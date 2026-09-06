@@ -17,6 +17,8 @@ killswitch_app = typer.Typer(help="Emergency kill switch (S6): halt polling, job
 app.add_typer(killswitch_app, name="killswitch")
 paper_app = typer.Typer(help="Paper-trading ledger (SIMULATED — no order is ever placed).")
 app.add_typer(paper_app, name="paper")
+portfolio_app = typer.Typer(help="Manual CSV portfolio import — analytics only, no broker contact.")
+app.add_typer(portfolio_app, name="portfolio")
 
 
 @app.callback()
@@ -232,6 +234,40 @@ def paper_snapshot() -> None:
 
     with session_scope() as session:
         typer.echo(json.dumps(portfolio_snapshot(session), indent=2, default=str))
+
+
+@portfolio_app.command("import")
+def portfolio_import(path: str) -> None:
+    """Import a broker CSV (positions or transactions) for analytics. No broker is contacted."""
+    from pathlib import Path
+
+    from signalforge.db.session import session_scope
+    from signalforge.portfolio import import_csv
+
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
+    with session_scope() as session:
+        s = import_csv(session, Path(path).name, text)
+    if s.already_imported:
+        typer.secho(f"Already imported (batch #{s.batch_id}).", fg=typer.colors.YELLOW)
+        return
+    typer.secho(
+        f"Imported batch #{s.batch_id} [{s.detected_format}]: "
+        f"{s.positions_imported} positions, {s.transactions_imported} transactions. "
+        "Analytics only — never scanned as tradable.",
+        fg=typer.colors.GREEN,
+    )
+
+
+@portfolio_app.command("analytics")
+def portfolio_analytics_cmd() -> None:
+    """Show exposure / concentration from imported positions."""
+    import json
+
+    from signalforge.db.session import session_scope
+    from signalforge.portfolio import portfolio_analytics
+
+    with session_scope() as session:
+        typer.echo(json.dumps(portfolio_analytics(session), indent=2, default=str))
 
 
 @app.command()
