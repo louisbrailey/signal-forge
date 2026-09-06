@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from signalforge.backtest.engine import EntrySignal, run_backtest
-from signalforge.backtest.series import PriceSeries
+from signalforge.data.series import PriceSeries
 from signalforge.domain import Direction
 
 

@@ -17,8 +17,8 @@ from signalforge.backtest.engine import (
 )
 from signalforge.backtest.metrics import Metrics, compute_metrics
 from signalforge.backtest.montecarlo import bootstrap_ci
-from signalforge.backtest.series import PriceSeries
 from signalforge.backtest.walkforward import WalkforwardReport, run_walkforward
+from signalforge.data.series import PriceSeries
 
 __all__ = [
     "CostModel",

@@ -106,6 +106,47 @@ def ingest(
         typer.secho(f"  ! {err}", fg=typer.colors.RED)
 
 
+@app.command("backtest-report")
+def backtest_report(
+    out_dir: Annotated[str, typer.Option(help="Directory for the markdown reports.")] = "reports",
+    years: Annotated[int, typer.Option(help="History window to test over.")] = 3,
+) -> None:
+    """Run every baseline strategy over the configured universe and write reports/."""
+    from pathlib import Path
+
+    from signalforge.config import get_settings
+    from signalforge.db.session import session_scope
+    from signalforge.research.backtest_runner import run_strategy_over_universe
+    from signalforge.research.reporting import render_report_md
+    from signalforge.research.strategies import default_strategies
+
+    settings = get_settings()
+    symbols = list(settings.research.universe)
+    end = date.today()
+    start = end - timedelta(days=365 * years + 10)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    with session_scope() as session:
+        for strat in default_strategies():
+            result = run_strategy_over_universe(
+                session,
+                strat,
+                symbols,
+                start,
+                end,
+                allow_short=settings.research.allow_short_candidates,
+                config_hash=settings.research.config_hash,
+            )
+            path = out / f"{strat.spec().key}-{strat.spec().version}.md"
+            path.write_text(render_report_md(result), encoding="utf-8")
+            typer.secho(
+                f"  {strat.spec().key}: {result.n_trades} trades  "
+                f"OOS expectancy {result.out_of_sample.expectancy_r:+.3f}R  -> {path}",
+                fg=typer.colors.GREEN,
+            )
+
+
 @app.command()
 def backup() -> None:
     """Snapshot the local database (Phase 1)."""

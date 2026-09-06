@@ -11,8 +11,8 @@ from signalforge.backtest.leakage import LookaheadDetected, assert_no_lookahead
 from signalforge.backtest.metrics import compute_metrics
 from signalforge.backtest.montecarlo import bootstrap_ci
 from signalforge.backtest.regime import label_regimes
-from signalforge.backtest.series import PriceSeries
 from signalforge.backtest.walkforward import run_walkforward
+from signalforge.data.series import PriceSeries
 from signalforge.domain import Direction
 
 

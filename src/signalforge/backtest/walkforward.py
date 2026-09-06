@@ -18,7 +18,7 @@ from datetime import date
 
 from signalforge.backtest.engine import BacktestOutcome, SignalFn, SimTrade, run_backtest
 from signalforge.backtest.metrics import Metrics, compute_metrics
-from signalforge.backtest.series import PriceSeries
+from signalforge.data.series import PriceSeries
 
 
 @dataclass(frozen=True, slots=True)

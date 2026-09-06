@@ -66,6 +66,11 @@ class StrategySpec:
 
     @property
     def key(self) -> str:
+        """Stable strategy name (already carries the horizon, e.g. ``trend.short_swing``)."""
+        return self.name
+
+    @property
+    def versioned_key(self) -> str:
         return f"{self.name}@{self.version}"
 
 
@@ -81,14 +86,14 @@ class StrategyRegistry:
         missing = spec.missing_fields()
         if missing:
             raise StrategyRegistrationError(
-                f"{spec.key}: incomplete StrategySpec, missing {missing}"
+                f"{spec.versioned_key}: incomplete StrategySpec, missing {missing}"
             )
-        if spec.key in self._specs:
-            raise StrategyRegistrationError(f"{spec.key}: already registered")
-        self._specs[spec.key] = spec
+        if spec.versioned_key in self._specs:
+            raise StrategyRegistrationError(f"{spec.versioned_key}: already registered")
+        self._specs[spec.versioned_key] = spec
 
-    def get(self, key: str) -> StrategySpec:
-        return self._specs[key]
+    def get(self, versioned_key: str) -> StrategySpec:
+        return self._specs[versioned_key]
 
     def scan_eligible(self) -> list[StrategySpec]:
         return [

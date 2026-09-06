@@ -129,6 +129,13 @@ disallow_any_generics = true
 warn_return_any = true
 strict_equality = true
 
+# Feature math is numpy-heavy; numpy's stubs surface as Any. The decision logic
+# (strategies, scan, rank, candidates, risk) keeps the strict settings above.
+[[tool.mypy.overrides]]
+module = ["signalforge.research.features.*"]
+warn_return_any = false
+disallow_any_generics = false
+
 # Third-party packages without bundled type information.
 [[tool.mypy.overrides]]
 module = ["pandas_market_calendars.*"]

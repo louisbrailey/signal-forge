@@ -15,7 +15,7 @@ from datetime import date
 
 import numpy as np
 
-from signalforge.backtest.series import PriceSeries
+from signalforge.data.series import PriceSeries
 
 TREND_LOOKBACK = 200
 VOL_LOOKBACK = 20

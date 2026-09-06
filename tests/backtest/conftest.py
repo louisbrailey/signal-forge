@@ -6,7 +6,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from signalforge.backtest.series import PriceSeries
+from signalforge.data.series import PriceSeries
 
 
 def _weekdays(start: date, n: int) -> list[date]:

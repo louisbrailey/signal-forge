@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from signalforge.backtest.costs import CostModel
-from signalforge.backtest.series import PriceSeries
+from signalforge.data.series import PriceSeries
 from signalforge.domain import Direction
 
 SignalFn = Callable[[PriceSeries, int], "EntrySignal | None"]

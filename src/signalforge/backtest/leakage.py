@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from signalforge.backtest.series import PriceSeries
+from signalforge.data.series import PriceSeries
 
 FeatureFn = Callable[[PriceSeries, int], float]
 
