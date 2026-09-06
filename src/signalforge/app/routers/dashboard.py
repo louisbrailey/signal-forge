@@ -115,6 +115,21 @@ def journal_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
     return _page(request, user, "journal.html", journal_context(db))
 
 
+@router.get("/briefing", response_class=HTMLResponse)
+def briefing_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
+    from signalforge.briefing import latest_briefing
+
+    return _page(request, user, "briefing.html", {"briefing": latest_briefing(db)})
+
+
+@router.post("/briefing/build", dependencies=Guard)
+def act_build_briefing(db: DbDep) -> RedirectResponse:
+    from signalforge.briefing import build_and_store_briefing
+
+    build_and_store_briefing(db)
+    return RedirectResponse("/briefing", HTTP_303_SEE_OTHER)
+
+
 @router.get("/options", response_class=HTMLResponse)
 def options_page(request: Request, user: UserDep) -> HTMLResponse:
     return templates.TemplateResponse(
@@ -205,7 +220,10 @@ def act_settings(
     watchlist: Annotated[str, Form()] = "",
     allow_short_candidates: Annotated[bool, Form()] = False,
     auto_simulate: Annotated[bool, Form()] = False,
+    alerts_enabled: Annotated[bool, Form()] = False,
     max_alerts_per_day: Annotated[int | None, Form()] = None,
+    quiet_start: Annotated[int | None, Form()] = None,
+    quiet_end: Annotated[int | None, Form()] = None,
 ) -> RedirectResponse:
     risk: dict[str, float] = {}
     if per_trade_risk_pct:
@@ -221,8 +239,11 @@ def act_settings(
         overrides["watchlist"] = [s.strip().upper() for s in watchlist.split(",") if s.strip()]
     set_setting(db, RESEARCH_OVERRIDES_KEY, overrides)
     set_setting(db, "auto_simulate_qualified_signals", auto_simulate)
+    set_setting(db, "alerts_enabled", alerts_enabled)
     if max_alerts_per_day is not None:
         set_setting(db, "max_alerts_per_day", max_alerts_per_day)
+    if quiet_start is not None and quiet_end is not None:
+        set_setting(db, "quiet_hours", {"start": quiet_start, "end": quiet_end})
     record("settings.update", entity="research_overrides", actor="local-user")
     return RedirectResponse("/settings", HTTP_303_SEE_OTHER)
 

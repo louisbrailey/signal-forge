@@ -86,7 +86,7 @@ def _candidate_rows(
 
 
 def overview_context(session: Session) -> dict[str, Any]:
-    feeds = feed_status_report()
+    feeds = feed_status_report(session)
     any_stale = any(f["is_stale"] for f in feeds["feeds"]) or not feeds["feeds"]
     snap = portfolio_snapshot(session)
     cfg = effective_research_config(session)

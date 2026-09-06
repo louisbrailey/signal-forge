@@ -103,8 +103,8 @@ def job_feed_probe() -> None:
 
 
 def job_daily_briefing() -> None:
+    from signalforge.briefing import build_and_store_briefing
     from signalforge.db.session import session_scope
-    from signalforge.research.briefing import build_and_store_briefing
 
     with session_scope() as session:
         build_and_store_briefing(session)
@@ -120,7 +120,16 @@ def default_job_specs() -> list[JobSpec]:
     specs.append(
         JobSpec("daily_briefing", job_daily_briefing, 24 * 60, "Build the daily research briefing")
     )
+    specs.append(JobSpec("alerts", job_alerts, 60, "Evaluate and dispatch alerts (policy-gated)"))
     return specs
+
+
+def job_alerts() -> None:
+    from signalforge.alerts.dispatch import run_alert_cycle
+    from signalforge.db.session import session_scope
+
+    with session_scope() as session:
+        run_alert_cycle(session)
 
 
 # --------------------------------------------------------------------------- #

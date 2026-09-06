@@ -270,6 +270,44 @@ def portfolio_analytics_cmd() -> None:
         typer.echo(json.dumps(portfolio_analytics(session), indent=2, default=str))
 
 
+@app.command()
+def briefing(
+    show_facts: Annotated[bool, typer.Option(help="Also print the raw frozen facts dict.")] = False,
+) -> None:
+    """Build and store today's daily research briefing (deterministic; LLM narrative optional)."""
+    import json
+
+    from signalforge.briefing import build_and_store_briefing
+    from signalforge.db.session import session_scope
+
+    with session_scope() as session:
+        payload = build_and_store_briefing(session)
+    typer.echo(payload["text"])
+    if payload["narrative"]:
+        typer.secho("\n--- AI narrative (explanation, not a trading instruction) ---", fg="cyan")
+        typer.echo(payload["narrative"])
+    if show_facts:
+        typer.echo("\n--- frozen facts ---")
+        typer.echo(json.dumps(payload["facts"], indent=2, default=str))
+
+
+@app.command()
+def alerts() -> None:
+    """Evaluate the alert policy and dispatch anything due (nothing until enabled in Settings)."""
+    ensure_not_engaged()
+    from signalforge.alerts.dispatch import run_alert_cycle
+    from signalforge.db.session import session_scope
+
+    with session_scope() as session:
+        r = run_alert_cycle(session)
+    typer.echo(
+        f"alerts: enabled={r.enabled} planned={r.planned} sent={r.sent} "
+        f"suppressed={len(r.suppressed)}"
+    )
+    for s in r.suppressed:
+        typer.secho(f"  - suppressed: {s}", fg=typer.colors.YELLOW)
+
+
 @app.command("run-scheduler")
 def run_scheduler() -> None:
     """Run the in-process background scheduler (ingest / scan / MTM / feed probe).
