@@ -11,21 +11,17 @@ baseline strategies and their committed backtest reports.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
-from enum import StrEnum
 
-from signalforge.config.research import Horizon
+from signalforge.domain import Direction, Horizon, StrategyStatus
 
-
-class StrategyStatus(StrEnum):
-    EXPERIMENTAL = "experimental"  # runs in paper only; never alerts
-    PAPER_APPROVED = "paper_approved"  # alert-eligible
-    DISABLED = "disabled"
-
-
-class Direction(StrEnum):
-    LONG = "LONG"
-    SHORT = "SHORT"
-    AVOID = "AVOID"
+__all__ = [
+    "Direction",
+    "Horizon",
+    "StrategyRegistrationError",
+    "StrategyRegistry",
+    "StrategySpec",
+    "StrategyStatus",
+]
 
 
 @dataclass(frozen=True, slots=True)

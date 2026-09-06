@@ -9,20 +9,19 @@ Defaults ship conservative.
 
 from __future__ import annotations
 
-from enum import StrEnum
-
 from pydantic import BaseModel, Field, NonNegativeFloat, PositiveFloat, PositiveInt
 
 from signalforge.config.hashing import config_hash
+from signalforge.domain import Horizon
 
-
-class Horizon(StrEnum):
-    """Independent research horizons — never blended into one score."""
-
-    INTRADAY = "INTRADAY"  # ~1h to close  (Phase 2)
-    SHORT_SWING = "SHORT_SWING"  # 2-10 trading days
-    MEDIUM_SWING = "MEDIUM_SWING"  # 2-8 weeks
-    POSITION = "POSITION"  # 2-6 months
+__all__ = [
+    "DataQualityConfig",
+    "EventFilters",
+    "Horizon",
+    "LiquidityFilters",
+    "ResearchConfig",
+    "RiskLimits",
+]
 
 
 class LiquidityFilters(BaseModel):

@@ -82,12 +82,15 @@ def create_app() -> FastAPI:
 
     @app.get("/readyz")
     def readyz() -> dict[str, Any]:
-        # Phase 1 adds DB + migration checks here.
+        from signalforge.db.health import check_db
+
         ks = get_kill_switch().state()
+        db = check_db()
+        ready = db["connected"] and db["at_head"]
         return {
-            "status": "ok",
+            "status": "ok" if ready else "degraded",
             "kill_switch_active": ks.active,
-            "checks": {"process": "ok", "database": "not-configured-in-phase-0"},
+            "checks": {"process": "ok", "database": db},
         }
 
     @app.get("/api/feeds")

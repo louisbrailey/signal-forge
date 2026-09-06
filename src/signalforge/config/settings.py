@@ -10,9 +10,10 @@ import secrets
 from enum import StrEnum
 from functools import lru_cache
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from signalforge.config import paths
 from signalforge.config.research import ResearchConfig
 
 
@@ -38,7 +39,9 @@ class Settings(BaseSettings):
     app_encryption_key: SecretStr = SecretStr("")
 
     # --- Storage ---
-    database_url: str = "sqlite+pysqlite:///./data/signalforge.sqlite"
+    # Empty => a SQLite file inside the resolved data dir (keeps checkouts and
+    # tests self-contained). Set DATABASE_URL to override (e.g. Postgres).
+    database_url: str = ""
 
     # --- Market data ---
     market_data_provider: str = "fixture"
@@ -74,6 +77,13 @@ class Settings(BaseSettings):
         if not [h.strip() for h in v.split(",") if h.strip()]:
             raise ValueError("app_allowed_hosts must contain at least one host")
         return v
+
+    @model_validator(mode="after")
+    def _default_database_url(self) -> Settings:
+        if not self.database_url:
+            db_path = paths.data_dir() / "signalforge.sqlite"
+            self.database_url = f"sqlite+pysqlite:///{db_path}"
+        return self
 
     @property
     def allowed_hosts(self) -> list[str]:

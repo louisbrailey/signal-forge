@@ -1,4 +1,9 @@
-"""S9 — paper trades are immutable after creation (Phase 0: contract shape)."""
+"""S9 — paper trades are immutable after creation.
+
+This module holds the dependency-free contract checks. The database-level proof
+(BEFORE UPDATE/DELETE triggers reject mutation) is in
+``tests/db/test_s9_paper_trade_triggers.py`` (also marked ``safety``).
+"""
 
 from __future__ import annotations
 
@@ -15,7 +20,3 @@ def test_immutability_error_is_a_runtime_error() -> None:
 
 def test_decision_enum_has_exactly_the_four_outcomes() -> None:
     assert {d.value for d in Decision} == {"accepted", "rejected", "ignored", "watch"}
-
-
-@pytest.mark.skip(reason="Phase 1 §1.7: repository rejects UPDATE/DELETE on paper_trade rows")
-def test_repository_rejects_mutation_of_existing_paper_trade() -> None: ...

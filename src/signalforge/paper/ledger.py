@@ -8,14 +8,10 @@ repository layer raises. The SQLAlchemy-backed implementation and property tests
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 
+from signalforge.domain import PaperDecision as Decision
 
-class Decision(StrEnum):
-    ACCEPTED = "accepted"
-    REJECTED = "rejected"
-    IGNORED = "ignored"
-    WATCH = "watch"
+__all__ = ["Decision", "FillAssumptions", "ImmutablePaperTradeError", "accept_candidate"]
 
 
 class ImmutablePaperTradeError(RuntimeError):

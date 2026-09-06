@@ -1,3 +1,111 @@
-"""ORM models (Phase 1). See ARCHITECTURE.md §5 for the full schema."""
+"""ORM models (ARCHITECTURE.md §5).
+
+Importing this package registers every table on ``Base.metadata`` so Alembic
+autogenerate and ``Base.metadata.create_all`` see the full schema.
+"""
 
 from __future__ import annotations
+
+from signalforge.db.base import Base
+from signalforge.db.models.market import (
+    CorporateAction,
+    DataFeedStatus,
+    DataQualityFlagRow,
+    EarningsEvent,
+    EconomicEvent,
+    FundamentalsSnapshot,
+    Instrument,
+    NewsItem,
+    OHLCVDaily,
+    QuoteSnapshot,
+    RawPayloadCache,
+    ReconciliationCheck,
+    ShortInterest,
+    UniverseConfigSnapshot,
+    Watchlist,
+    WatchlistMember,
+)
+from signalforge.db.models.paper import (
+    JournalEntry,
+    PaperAccount,
+    PaperFill,
+    PaperOrder,
+    PaperPosition,
+    PaperTrade,
+    TradeCorrection,
+)
+from signalforge.db.models.research import (
+    BacktestMetric,
+    BacktestRun,
+    BacktestTrade,
+    Candidate,
+    ScanRun,
+    Strategy,
+    StrategyHealth,
+    StrategyVersion,
+    WalkforwardWindow,
+)
+from signalforge.db.models.system import (
+    AlertLog,
+    AlertSetting,
+    AppSetting,
+    AppSettingHistory,
+    AuditLog,
+    ImportedPosition,
+    ImportedTransaction,
+    KillSwitchEvent,
+    LlmCall,
+    PortfolioImport,
+    User,
+)
+
+__all__ = [
+    "Base",
+    # market
+    "Instrument",
+    "Watchlist",
+    "WatchlistMember",
+    "UniverseConfigSnapshot",
+    "OHLCVDaily",
+    "QuoteSnapshot",
+    "CorporateAction",
+    "EarningsEvent",
+    "EconomicEvent",
+    "NewsItem",
+    "FundamentalsSnapshot",
+    "ShortInterest",
+    "RawPayloadCache",
+    "DataFeedStatus",
+    "DataQualityFlagRow",
+    "ReconciliationCheck",
+    # research
+    "Strategy",
+    "StrategyVersion",
+    "ScanRun",
+    "Candidate",
+    "BacktestRun",
+    "BacktestTrade",
+    "BacktestMetric",
+    "WalkforwardWindow",
+    "StrategyHealth",
+    # paper
+    "PaperAccount",
+    "PaperOrder",
+    "PaperFill",
+    "PaperPosition",
+    "PaperTrade",
+    "TradeCorrection",
+    "JournalEntry",
+    # system
+    "User",
+    "AppSetting",
+    "AppSettingHistory",
+    "AlertSetting",
+    "AlertLog",
+    "KillSwitchEvent",
+    "AuditLog",
+    "LlmCall",
+    "PortfolioImport",
+    "ImportedPosition",
+    "ImportedTransaction",
+]
