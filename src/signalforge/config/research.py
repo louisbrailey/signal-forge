@@ -19,6 +19,7 @@ __all__ = [
     "EventFilters",
     "Horizon",
     "LiquidityFilters",
+    "QualityThresholds",
     "ResearchConfig",
     "RiskLimits",
 ]
@@ -51,6 +52,17 @@ class EventFilters(BaseModel):
     exclude_days_before_earnings: PositiveInt = 3
     exclude_days_after_earnings: PositiveInt = 1
     block_on_major_econ_event: bool = True
+
+
+class QualityThresholds(BaseModel):
+    """Gates a candidate must clear (ARCHITECTURE.md §6.4)."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    min_oos_expectancy_r: float = 0.0  # OOS expectancy net of costs must exceed this
+    min_oos_ci_low_r: float = -0.15  # bootstrap lower bound not deeply negative
+    min_oos_trades: PositiveInt = 20  # enough OOS trades to trust the number
+    require_backtest: bool = True  # no committed backtest => NO TRADE
 
 
 class DataQualityConfig(BaseModel):
@@ -117,6 +129,7 @@ class ResearchConfig(BaseModel):
     risk: RiskLimits = Field(default_factory=RiskLimits)
     events: EventFilters = Field(default_factory=EventFilters)
     data_quality: DataQualityConfig = Field(default_factory=DataQualityConfig)
+    quality_gates: QualityThresholds = Field(default_factory=QualityThresholds)
 
     # Backtest cost assumptions (displayed on every candidate + report)
     commission_per_share: NonNegativeFloat = 0.0

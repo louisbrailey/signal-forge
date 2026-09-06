@@ -2,10 +2,10 @@
 
 > **Hypothetical research output.** Simulated fills include modeled commission, spread and slippage. Past results do not predict future results. This strategy is **EXPERIMENTAL** (paper only, no alerts) until promoted.
 
-- Generated: 2026-09-06T18:11:10+00:00
-- git: `e94fe71`  ·  config hash: `3964441158a7f324ddf7b38dcea49a4c847cd9a493297eb3e6e3046f2db6f59b`
+- Generated: 2026-09-06T18:19:49+00:00
+- git: `7f694d8`  ·  config hash: `fbe97fcb3031b439ccfbb5c6a8447e53bcfc1628c5755216382a92b70383f428`
 - Horizon: SHORT_SWING
-- Window: 2023-08-28 → 2026-09-06
+- Window: 2022-08-28 → 2026-09-06
 - Universe (25): AAPL, AMZN, DIA, GOOGL, HD, IWM, JPM, META, MSFT, NVDA, QQQ, SPY, UNH, XLB, XLC, XLE, XLF, XLI, XLK, XLP, XLRE, XLU, XLV, XLY, XOM
 - Data: fixture/simulated unless a real provider was configured at run time
 
@@ -13,51 +13,52 @@
 
 | Segment | Trades | Win rate | Avg win (R) | Avg loss (R) | Expectancy (R) | Profit factor | Max drawdown (R) | Risk-adj ratio* | Avg bars held | Worst losing streak | Total return (R) |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| In-sample (first 60%) | 215 | 0.0% | +0.00 | -1.10 | -1.098 | 0.00 | 236.00 | -42.12 | 3.0 | 215 | -236.0 |
-| Out-of-sample (last 40%) | 130 | 0.0% | +0.00 | -1.09 | -1.086 | 0.00 | 141.18 | -71.00 | 2.8 | 130 | -141.2 |
+| In-sample (first 60%) | 279 | 0.0% | +0.00 | -1.10 | -1.099 | 0.00 | 306.74 | -44.83 | 3.0 | 279 | -306.7 |
+| Out-of-sample (last 40%) | 168 | 0.0% | +0.00 | -1.08 | -1.084 | 0.00 | 182.07 | -71.87 | 2.8 | 168 | -182.1 |
 
 Out-of-sample bootstrap 95% CI:
 
-- Expectancy (R): -1.113 … -1.064 (point -1.086)
+- Expectancy (R): -1.105 … -1.064 (point -1.084)
 - Profit factor: 0.00 … 0.00
 
 ## Out-of-sample by market regime (entry-date regime)
 
 | Segment | Trades | Win rate | Avg win (R) | Avg loss (R) | Expectancy (R) | Profit factor | Max drawdown (R) | Risk-adj ratio* | Avg bars held | Worst losing streak | Total return (R) |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| bull/low | 13 | 0.0% | +0.00 | -1.08 | -1.081 | 0.00 | 14.06 | -100.84 | 2.5 | 13 | -14.1 |
+| bull/high | 4 | 0.0% | +0.00 | -1.13 | -1.133 | 0.00 | 4.53 | -103.92 | 2.2 | 4 | -4.5 |
+| bull/low | 43 | 0.0% | +0.00 | -1.06 | -1.058 | 0.00 | 45.48 | -104.10 | 3.0 | 43 | -45.5 |
 | neutral/high | 10 | 0.0% | +0.00 | -1.15 | -1.152 | 0.00 | 11.52 | -84.79 | 1.5 | 10 | -11.5 |
-| neutral/low | 107 | 0.0% | +0.00 | -1.08 | -1.080 | 0.00 | 115.61 | -69.09 | 2.9 | 107 | -115.6 |
+| neutral/low | 111 | 0.0% | +0.00 | -1.09 | -1.086 | 0.00 | 120.54 | -66.38 | 2.9 | 111 | -120.5 |
 
 ## Trades per symbol
 
 | Symbol | Trades |
 |---|---|
-| AAPL | 13 |
-| AMZN | 17 |
-| DIA | 15 |
-| GOOGL | 15 |
-| HD | 7 |
-| IWM | 14 |
-| JPM | 16 |
-| META | 15 |
-| MSFT | 16 |
-| NVDA | 10 |
-| QQQ | 15 |
-| SPY | 11 |
-| UNH | 12 |
-| XLB | 11 |
-| XLC | 13 |
-| XLE | 10 |
-| XLF | 16 |
-| XLI | 16 |
-| XLK | 16 |
-| XLP | 12 |
-| XLRE | 11 |
-| XLU | 16 |
-| XLV | 17 |
-| XLY | 16 |
-| XOM | 15 |
+| AAPL | 19 |
+| AMZN | 21 |
+| DIA | 21 |
+| GOOGL | 19 |
+| HD | 10 |
+| IWM | 19 |
+| JPM | 20 |
+| META | 19 |
+| MSFT | 18 |
+| NVDA | 14 |
+| QQQ | 16 |
+| SPY | 15 |
+| UNH | 16 |
+| XLB | 15 |
+| XLC | 17 |
+| XLE | 13 |
+| XLF | 21 |
+| XLI | 20 |
+| XLK | 22 |
+| XLP | 17 |
+| XLRE | 16 |
+| XLU | 20 |
+| XLV | 20 |
+| XLY | 20 |
+| XOM | 19 |
 
 \* Risk-adjusted ratio is a per-trade Sharpe-like figure annualised by trade frequency — not computed from a daily return stream. Read with that limitation in mind.
 

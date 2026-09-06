@@ -1,31 +1,122 @@
-"""Position sizing from per-trade risk % and stop distance (Phase 1).
+"""Position sizing + portfolio-limit enforcement (ARCHITECTURE.md §7.4).
 
-Phase 0: the public shape only. The real implementation (concentration, exposure,
-correlated-exposure, daily-risk checks) lands in Phase 1 §1.6 with property tests
-asserting no produced size can violate a configured limit.
+Size comes from ``per_trade_risk_pct`` and the entry-to-stop distance, then is
+capped by concentration / exposure / correlated-exposure / daily-risk limits. If
+the trade cannot be honoured within every limit the result carries a
+``rejected_reason`` and the candidate becomes NO TRADE.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from signalforge.config.research import RiskLimits
 
 
 @dataclass(frozen=True, slots=True)
 class SizingRequest:
     symbol: str
+    sector: str
     entry_price: float
     stop_price: float
     account_equity: float
-    sector: str
+
+
+@dataclass(frozen=True, slots=True)
+class OpenExposure:
+    """Snapshot of current open paper positions for limit checks."""
+
+    gross_dollars: float = 0.0
+    open_risk_dollars: float = 0.0  # sum of remaining risk-to-stop
+    by_sector_dollars: dict[str, float] = field(default_factory=dict)
+    position_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class SizingResult:
     shares: int
+    notional: float
     risk_dollars: float
     risk_pct_of_account: float
+    rejected: bool = False
     rejected_reason: str | None = None
+    checks: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def reject(cls, reason: str, checks: dict[str, str]) -> SizingResult:
+        return cls(0, 0.0, 0.0, 0.0, rejected=True, rejected_reason=reason, checks=checks)
 
 
-def size_position(request: SizingRequest) -> SizingResult:  # pragma: no cover - Phase 1
-    raise NotImplementedError("Risk engine sizing is implemented in Phase 1 (§1.6).")
+def size_position(
+    request: SizingRequest,
+    limits: RiskLimits,
+    exposure: OpenExposure | None = None,
+) -> SizingResult:
+    exp = exposure or OpenExposure()
+    checks: dict[str, str] = {}
+    equity = request.account_equity
+    if equity <= 0:
+        return SizingResult.reject("account_equity must be positive", checks)
+
+    per_share_risk = abs(request.entry_price - request.stop_price)
+    if per_share_risk <= 0:
+        return SizingResult.reject("entry and stop are equal", checks)
+
+    risk_budget = equity * (limits.per_trade_risk_pct / 100.0)
+    shares = int(risk_budget // per_share_risk)
+    if shares < 1:
+        return SizingResult.reject("per-trade risk budget too small for one share", checks)
+
+    notional = shares * request.entry_price
+    risk_dollars = shares * per_share_risk
+    risk_pct = risk_dollars / equity * 100.0
+
+    # --- concentration: single position notional ---
+    conc_cap = equity * (limits.max_position_concentration_pct / 100.0)
+    if notional > conc_cap:
+        shares = int(conc_cap // request.entry_price)
+        if shares < 1:
+            return SizingResult.reject("position concentration cap below one share", checks)
+        notional = shares * request.entry_price
+        risk_dollars = shares * per_share_risk
+        risk_pct = risk_dollars / equity * 100.0
+        checks["concentration"] = f"trimmed to {limits.max_position_concentration_pct}% of equity"
+    else:
+        checks["concentration"] = "ok"
+
+    # --- total portfolio exposure ---
+    expo_cap = equity * (limits.max_portfolio_exposure_pct / 100.0)
+    if exp.gross_dollars + notional > expo_cap:
+        return SizingResult.reject(
+            f"max portfolio exposure {limits.max_portfolio_exposure_pct}% would be exceeded",
+            checks,
+        )
+    checks["portfolio_exposure"] = "ok"
+
+    # --- correlated (sector) exposure ---
+    corr_cap = equity * (limits.max_correlated_exposure_pct / 100.0)
+    sector_now = exp.by_sector_dollars.get(request.sector, 0.0)
+    if sector_now + notional > corr_cap:
+        return SizingResult.reject(
+            f"max correlated exposure {limits.max_correlated_exposure_pct}% for sector "
+            f"{request.sector!r} would be exceeded",
+            checks,
+        )
+    checks["correlated_exposure"] = "ok"
+
+    # --- daily portfolio risk ---
+    daily_cap = equity * (limits.max_daily_portfolio_risk_pct / 100.0)
+    if exp.open_risk_dollars + risk_dollars > daily_cap:
+        return SizingResult.reject(
+            f"max daily portfolio risk {limits.max_daily_portfolio_risk_pct}% would be exceeded",
+            checks,
+        )
+    checks["daily_risk"] = "ok"
+
+    return SizingResult(
+        shares=shares,
+        notional=round(notional, 2),
+        risk_dollars=round(risk_dollars, 2),
+        risk_pct_of_account=round(risk_pct, 4),
+        checks=checks,
+    )

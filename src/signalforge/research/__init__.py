@@ -11,6 +11,11 @@ from signalforge.research.backtest_runner import (
     StrategyBacktestResult,
     run_strategy_over_universe,
 )
+from signalforge.research.candidates import persist_scan
+from signalforge.research.persistence import (
+    persist_backtest_result,
+    upsert_strategy_version,
+)
 from signalforge.research.regime import RegimeState, Trend, Vol, regime_from_proxy
 from signalforge.research.registry import (
     StrategyRegistrationError,
@@ -18,6 +23,7 @@ from signalforge.research.registry import (
     StrategySpec,
     StrategyStatus,
 )
+from signalforge.research.scan import ScanResult, run_scan
 from signalforge.research.strategies import build_registry, default_strategies
 
 __all__ = [
@@ -33,4 +39,9 @@ __all__ = [
     "build_registry",
     "StrategyBacktestResult",
     "run_strategy_over_universe",
+    "ScanResult",
+    "run_scan",
+    "persist_scan",
+    "upsert_strategy_version",
+    "persist_backtest_result",
 ]

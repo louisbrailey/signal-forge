@@ -127,6 +127,11 @@ def backtest_report(
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    from signalforge.research.persistence import (
+        persist_backtest_result,
+        upsert_strategy_version,
+    )
+
     with session_scope() as session:
         for strat in default_strategies():
             result = run_strategy_over_universe(
@@ -138,6 +143,8 @@ def backtest_report(
                 allow_short=settings.research.allow_short_candidates,
                 config_hash=settings.research.config_hash,
             )
+            version = upsert_strategy_version(session, strat.spec())
+            persist_backtest_result(session, version, result)
             path = out / f"{strat.spec().key}-{strat.spec().version}.md"
             path.write_text(render_report_md(result), encoding="utf-8")
             typer.secho(
@@ -145,6 +152,42 @@ def backtest_report(
                 f"OOS expectancy {result.out_of_sample.expectancy_r:+.3f}R  -> {path}",
                 fg=typer.colors.GREEN,
             )
+
+
+@app.command()
+def scan(
+    horizon: Annotated[
+        str, typer.Option(help="SHORT_SWING | MEDIUM_SWING | POSITION")
+    ] = "SHORT_SWING",
+) -> None:
+    """Run one horizon's scan and persist the scan_run + candidate rows."""
+    ensure_not_engaged()
+    from signalforge.db.session import session_scope
+    from signalforge.domain import Horizon
+    from signalforge.research.candidates import persist_scan
+    from signalforge.research.scan import run_scan
+
+    h = Horizon(horizon.upper())
+    with session_scope() as session:
+        result = run_scan(session, h)
+        run = persist_scan(session, result)
+
+    passing = [c for c in result.candidates if c.quality_gate_status.value == "PASSED"]
+    typer.secho(f"scan[{h.value}] run #{run.id}", fg=typer.colors.CYAN)
+    typer.echo(f"  universe scanned:        {len(result.scanned)}")
+    typer.echo(f"  excluded:                {result.excluded_count}")
+    for reason, syms in result.excluded.items():
+        typer.echo(f"    - {reason}: {len(syms)}")
+    typer.echo(f"  NO TRADE:                {len(result.no_trade)}")
+    typer.echo(f"  qualified candidates:    {len(passing)}")
+    if not result.live_alerts_enabled:
+        typer.secho("  live alerts DISABLED (stale/unavailable feed)", fg=typer.colors.YELLOW)
+    for c in passing:
+        typer.secho(
+            f"    {c.symbol} {c.direction.value} rr={c.reward_risk_estimate} "
+            f"entry {c.entry_zone_low}-{c.entry_zone_high} stop {c.invalidation_level}",
+            fg=typer.colors.GREEN,
+        )
 
 
 @app.command()
