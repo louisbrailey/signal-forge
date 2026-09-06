@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Create the local account — Signal Forge{% endblock %}
+{% block content %}
+<div class="mx-auto max-w-sm">
+  <h1 class="text-xl font-semibold text-slate-900">Create the local account</h1>
+  <p class="mt-1 text-sm text-slate-500">
+    First run only. One account is created for this machine; registration then closes.
+  </p>
+
+  {% if error %}
+  <p class="mt-4 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{{ error }}</p>
+  {% endif %}
+
+  <form method="post" action="/register" class="mt-6 space-y-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <div>
+      <label class="block text-sm font-medium text-slate-700" for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" required
+             class="mt-1 w-full rounded border border-slate-300 px-3 py-2" />
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-slate-700" for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="new-password" required
+             minlength="10" class="mt-1 w-full rounded border border-slate-300 px-3 py-2" />
+      <p class="mt-1 text-xs text-slate-400">At least 10 characters.</p>
+    </div>
+    <button type="submit"
+            class="w-full rounded bg-slate-900 px-3 py-2 text-white hover:bg-slate-700">
+      Create account
+    </button>
+  </form>
+</div>
+{% endblock %}

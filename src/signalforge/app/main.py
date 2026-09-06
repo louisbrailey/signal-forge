@@ -1,41 +1,41 @@
-"""Signal Forge FastAPI app (Phase 0 skeleton).
+"""Signal Forge FastAPI application.
 
-Provides health endpoints, the non-dismissable disclaimer page, and the kill-switch
-API + guard wiring. Research, data, scanner, portfolio, and journal routers are
-added in Phase 1.
+Wires: local auth, the non-dismissable disclaimer, health endpoints, the
+kill-switch API + guard, and (incrementally through Phase 1) the dashboard
+routers.
 """
 
 from __future__ import annotations
 
 import contextlib
 from collections.abc import AsyncIterator
-from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from signalforge import NOT_ADVICE_NOTICE, RESEARCH_ONLY_NOTICE, __version__
+from signalforge import __version__
 from signalforge.app.deps import require_not_killed
+from signalforge.app.routers import auth as auth_router
+from signalforge.app.templating import STATIC_DIR, templates
 from signalforge.audit import record
+from signalforge.auth import csrf
+from signalforge.auth.deps import install_redirect_handler, require_user_page
 from signalforge.config import get_settings
+from signalforge.db.models import User
 from signalforge.killswitch import get_kill_switch
 from signalforge.observability import configure_logging, get_logger
 
-_TEMPLATES_DIR = Path(__file__).parent / "templates"
-_STATIC_DIR = Path(__file__).parent / "static"
 _log = get_logger("app")
 
 
 class KillSwitchRequest(BaseModel):
-    # Defined at module scope so FastAPI can resolve the annotation under
-    # ``from __future__ import annotations`` (a closure-local model cannot be
-    # resolved by typing.get_type_hints and would be mis-read as a query param).
+    # Module scope so FastAPI can resolve the annotation under
+    # ``from __future__ import annotations``.
     reason: str = Field(min_length=3, max_length=280)
     actor: str = Field(default="local-user", max_length=80)
 
@@ -66,16 +66,13 @@ def create_app() -> FastAPI:
         same_site="strict",
         https_only=not settings.is_loopback_only,
     )
-    if _STATIC_DIR.is_dir():
-        app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+    if STATIC_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-    templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
-    templates.env.globals.update(
-        research_only_notice=RESEARCH_ONLY_NOTICE,
-        not_advice_notice=NOT_ADVICE_NOTICE,
-        app_version=__version__,
-    )
+    install_redirect_handler(app)
+    app.include_router(auth_router.router)
 
+    # ---- health (public) -------------------------------------------------
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok", "version": __version__}
@@ -95,12 +92,11 @@ def create_app() -> FastAPI:
 
     @app.get("/api/feeds")
     def feeds() -> dict[str, Any]:
-        return {
-            "feeds": [],
-            "note": "No data adapters wired in Phase 0. Every feed will report its "
-            "source, latency_category, and last successful update here.",
-        }
+        from signalforge.data.feeds import feed_status_report
 
+        return feed_status_report()
+
+    # ---- kill switch API ----------------------------------------------------
     @app.get("/api/killswitch")
     def killswitch_status() -> dict[str, Any]:
         st = get_kill_switch().state()
@@ -126,17 +122,22 @@ def create_app() -> FastAPI:
 
     @app.post("/api/_demo/guarded", dependencies=[Depends(require_not_killed)])
     def guarded_demo() -> dict[str, str]:
-        """Phase 0 wiring demo: any state-changing route depends on require_not_killed
-        and returns 423 while the kill switch is engaged."""
+        """Phase 0 wiring demo: any state-changing route depends on require_not_killed."""
         return {"result": "ok — this stands in for a state-changing research/paper route"}
 
+    # ---- overview (auth-protected) ----------------------------------------
     @app.get("/", response_class=HTMLResponse)
-    def index(request: Request) -> HTMLResponse:
+    def index(request: Request, user: Annotated[User, Depends(require_user_page)]) -> HTMLResponse:
         st = get_kill_switch().state()
         return templates.TemplateResponse(
             request,
             "index.html",
-            {"kill_switch": st, "settings_env": settings.app_env.value},
+            {
+                "kill_switch": st,
+                "settings_env": settings.app_env.value,
+                "user": user,
+                "csrf_token": csrf.get_or_create_token(request),
+            },
         )
 
     return app

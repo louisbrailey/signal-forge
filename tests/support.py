@@ -7,8 +7,23 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
-SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+from alembic import command
+from alembic.config import Config
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
 PKG_ROOT = SRC_ROOT / "signalforge"
+
+
+def alembic_config(url: str) -> Config:
+    cfg = Config(str(REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(PKG_ROOT / "db/migrations"))
+    cfg.set_main_option("sqlalchemy.url", url)
+    return cfg
+
+
+def migrate_to_head(url: str) -> None:
+    command.upgrade(alembic_config(url), "head")
 
 
 def run_python(code: str) -> subprocess.CompletedProcess[str]:

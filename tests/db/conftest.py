@@ -6,18 +6,9 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from sqlalchemy.orm import Session
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-def _alembic_config(url: str) -> Config:
-    cfg = Config(str(REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(REPO_ROOT / "src/signalforge/db/migrations"))
-    cfg.set_main_option("sqlalchemy.url", url)
-    return cfg
+from tests.support import migrate_to_head
 
 
 @pytest.fixture
@@ -37,7 +28,7 @@ def db_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 
 @pytest.fixture
 def migrated_db(db_url: str) -> str:
-    command.upgrade(_alembic_config(db_url), "head")
+    migrate_to_head(db_url)
     return db_url
 
 
