@@ -110,6 +110,46 @@ def ingest(
         typer.secho(f"  ! {err}", fg=typer.colors.RED)
 
 
+@app.command("ingest-intraday")
+def ingest_intraday_cmd(
+    bar_size: Annotated[str, typer.Option(help="5m | 15m | 30m | 1h")] = "5m",
+    days: Annotated[int, typer.Option(help="Trailing days to fetch.")] = 5,
+    symbols: Annotated[
+        str, typer.Option(help="Comma-separated; default: configured universe.")
+    ] = "",
+) -> None:
+    """Fetch intraday bars into the local store (Phase 2)."""
+    ensure_not_engaged()
+    from datetime import UTC
+
+    from signalforge.config import get_settings
+    from signalforge.data.adapters.registry import get_primary_adapter
+    from signalforge.data.ingest import ingest_intraday_universe
+    from signalforge.db.session import session_scope
+
+    settings = get_settings()
+    adapter = get_primary_adapter(settings)
+    if not hasattr(adapter, "fetch_intraday_bars"):
+        typer.secho(f"{adapter.provider_name} has no intraday feed", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()] or list(
+        settings.research.universe
+    )
+    end = datetime.now(UTC)
+    start = end - timedelta(days=days)
+    with session_scope() as session:
+        report = ingest_intraday_universe(
+            session, adapter, syms, start, end, bar_size=bar_size  # type: ignore[arg-type]
+        )
+    typer.secho(
+        f"ingest-intraday[{adapter.provider_name}] {bar_size}: "
+        f"{report.bars_written} bars across {len(syms)} symbols",
+        fg=typer.colors.GREEN,
+    )
+    for err in report.errors:
+        typer.secho(f"  ! {err}", fg=typer.colors.RED)
+
+
 @app.command("backtest-report")
 def backtest_report(
     out_dir: Annotated[str, typer.Option(help="Directory for the markdown reports.")] = "reports",

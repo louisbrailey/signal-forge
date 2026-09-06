@@ -8,10 +8,11 @@ makes look-ahead a structural impossibility in tests.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 import numpy as np
 from numpy.typing import NDArray
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from signalforge.data.repository import get_daily_bars
@@ -99,3 +100,36 @@ class PriceSeries:
                 )
             )
         return cls.from_bars(symbol, rows)
+
+    @classmethod
+    def load_intraday(
+        cls,
+        session: Session,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        *,
+        bar_size: str = "5m",
+        source: str | None = None,
+    ) -> PriceSeries:
+        """Intraday bars as a ``PriceSeries`` whose ``dates`` are aware datetimes."""
+        from signalforge.db.models import Instrument, OHLCVIntraday
+
+        stmt = (
+            select(OHLCVIntraday)
+            .join(Instrument)
+            .where(
+                Instrument.symbol == symbol.strip().upper(),
+                OHLCVIntraday.bar_size == bar_size,
+                OHLCVIntraday.bar_start >= start,
+                OHLCVIntraday.bar_start <= end,
+            )
+            .order_by(OHLCVIntraday.bar_start)
+        )
+        if source is not None:
+            stmt = stmt.where(OHLCVIntraday.source == source)
+        bars = list(session.scalars(stmt))
+        rows = [
+            (b.bar_start, b.open, b.high, b.low, b.close, b.volume) for b in bars
+        ]
+        return cls.from_bars(symbol, rows)  # type: ignore[arg-type]

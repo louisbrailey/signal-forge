@@ -1,0 +1,87 @@
+"""US equity trading sessions (NYSE) via pandas-market-calendars.
+
+Used to reject weekend/holiday dates, compute holding periods in sessions, and
+classify an intraday timestamp as pre-market / regular hours / post-market.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, date, datetime, time
+from functools import lru_cache
+
+import pandas as pd
+import pandas_market_calendars as mcal
+
+_RTH_OPEN = time(9, 30)
+_RTH_CLOSE = time(16, 0)
+
+
+@lru_cache(maxsize=1)
+def _xnys() -> mcal.MarketCalendar:
+    return mcal.get_calendar("XNYS")
+
+
+@lru_cache(maxsize=32)
+def sessions(start: date, end: date) -> tuple[date, ...]:
+    sched = _xnys().schedule(start_date=start.isoformat(), end_date=end.isoformat())
+    return tuple(ts.date() for ts in sched.index)
+
+
+def is_session(d: date) -> bool:
+    return d in sessions(d, d)
+
+
+def session_count(start: date, end: date) -> int:
+    return len(sessions(start, end))
+
+
+@lru_cache(maxsize=4096)
+def rth_bounds_utc(d: date) -> tuple[datetime, datetime] | None:
+    """(open, close) as tz-aware UTC datetimes for a regular session, else None."""
+    sched = _xnys().schedule(start_date=d.isoformat(), end_date=d.isoformat())
+    if sched.empty:
+        return None
+    open_ts = pd.Timestamp(sched.iloc[0]["market_open"]).tz_convert("UTC")
+    close_ts = pd.Timestamp(sched.iloc[0]["market_close"]).tz_convert("UTC")
+    return open_ts.to_pydatetime(), close_ts.to_pydatetime()
+
+
+@lru_cache(maxsize=4096)
+def rth_bounds(d: date) -> tuple[datetime, datetime] | None:
+    """(open, close) in US/Eastern-naive wall time for a regular session, else None."""
+    b = rth_bounds_utc(d)
+    if b is None:
+        return None
+    o = pd.Timestamp(b[0]).tz_convert("America/New_York").to_pydatetime().replace(tzinfo=None)
+    c = pd.Timestamp(b[1]).tz_convert("America/New_York").to_pydatetime().replace(tzinfo=None)
+    return o, c
+
+
+def _eastern_wall(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt  # assume already Eastern wall time
+    return pd.Timestamp(dt).tz_convert("America/New_York").to_pydatetime().replace(tzinfo=None)
+
+
+def session_of(dt: datetime) -> str:
+    """``pre`` | ``rth`` | ``post`` | ``closed`` for an intraday timestamp."""
+    wall = _eastern_wall(dt)
+    if not is_session(wall.date()):
+        return "closed"
+    bounds = rth_bounds(wall.date())
+    if bounds is None:
+        return "closed"
+    open_dt, close_dt = bounds
+    if wall < open_dt:
+        return "pre" if wall.time() >= time(4, 0) else "closed"
+    if wall >= close_dt:
+        return "post" if wall.time() < time(20, 0) else "closed"
+    return "rth"
+
+
+def is_rth(dt: datetime) -> bool:
+    return session_of(dt) == "rth"
+
+
+def now_eastern() -> datetime:
+    return _eastern_wall(datetime.now(UTC))

@@ -102,6 +102,32 @@ class OHLCVDaily(Base, IntPK, CreatedAt):
     instrument: Mapped[Instrument] = relationship(back_populates="bars")
 
 
+class OHLCVIntraday(Base, IntPK, CreatedAt):
+    """Intraday bars (Phase 2). ``bar_start`` is the UTC start of the bar."""
+
+    __tablename__ = "ohlcv_intraday"
+    __table_args__ = (
+        UniqueConstraint("instrument_id", "bar_start", "bar_size", "source"),
+        Index("ix_ohlcv_intraday_instrument_start", "instrument_id", "bar_start"),
+    )
+
+    instrument_id: Mapped[int] = mapped_column(ForeignKey("instrument.id", ondelete="CASCADE"))
+    bar_start: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    bar_size: Mapped[str] = mapped_column(String(8))  # e.g. "5m", "15m", "1h"
+    session: Mapped[str] = mapped_column(String(6), default="rth")  # pre | rth | post
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float] = mapped_column(Float)
+
+    source: Mapped[str] = mapped_column(String(40), index=True)
+    latency_category: Mapped[LatencyCategory] = mapped_column(SAEnum(LatencyCategory, **_ENUM_KW))
+    is_simulated: Mapped[bool] = mapped_column(default=False)
+    ingested_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    quality_flags: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
 class QuoteSnapshot(Base, IntPK, CreatedAt):
     """The last quote used for a scan / candidate (spread & latency provenance)."""
 
