@@ -129,8 +129,10 @@ disallow_any_generics = true
 warn_return_any = true
 strict_equality = true
 
-# Add per-package ``ignore_missing_imports`` overrides here as untyped
-# third-party deps are introduced in Phase 1 (e.g. pandas_market_calendars).
+# Third-party packages without bundled type information.
+[[tool.mypy.overrides]]
+module = ["pandas_market_calendars.*"]
+ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------
 # Pytest / coverage
