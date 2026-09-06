@@ -8,9 +8,18 @@ the trade cannot be honoured within every limit the result carries a
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from signalforge.config.research import RiskLimits
+
+
+def _shares_within(budget: float, per_unit: float) -> int:
+    """Largest integer ``n`` with ``n * per_unit <= budget`` (FP-safe)."""
+    n = math.floor(budget / per_unit)
+    while n > 0 and n * per_unit > budget:  # correct a float floor overshoot
+        n -= 1
+    return n
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +72,7 @@ def size_position(
         return SizingResult.reject("entry and stop are equal", checks)
 
     risk_budget = equity * (limits.per_trade_risk_pct / 100.0)
-    shares = int(risk_budget // per_share_risk)
+    shares = _shares_within(risk_budget, per_share_risk)
     if shares < 1:
         return SizingResult.reject("per-trade risk budget too small for one share", checks)
 
@@ -74,7 +83,7 @@ def size_position(
     # --- concentration: single position notional ---
     conc_cap = equity * (limits.max_position_concentration_pct / 100.0)
     if notional > conc_cap:
-        shares = int(conc_cap // request.entry_price)
+        shares = _shares_within(conc_cap, request.entry_price)
         if shares < 1:
             return SizingResult.reject("position concentration cap below one share", checks)
         notional = shares * request.entry_price

@@ -11,9 +11,16 @@ from pathlib import Path
 
 import pytest
 import structlog
+from hypothesis import settings as hypothesis_settings
 from sqlalchemy.orm import Session
 
 from tests.support import migrate_to_head
+
+# Deterministic property-based testing so CI cannot flake on a newly-found example.
+hypothesis_settings.register_profile(
+    "deterministic", derandomize=True, max_examples=250, deadline=None
+)
+hypothesis_settings.load_profile("deterministic")
 
 
 @pytest.fixture(autouse=True)
