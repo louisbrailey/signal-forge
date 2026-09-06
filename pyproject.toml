@@ -138,7 +138,7 @@ disallow_any_generics = false
 
 # Third-party packages without bundled type information.
 [[tool.mypy.overrides]]
-module = ["pandas_market_calendars.*"]
+module = ["pandas_market_calendars.*", "apscheduler.*"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------

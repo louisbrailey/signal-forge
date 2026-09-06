@@ -14,7 +14,7 @@ from signalforge.killswitch import (
     ensure_not_engaged,
     get_kill_switch,
 )
-from signalforge.scheduler import InlineJobRunner
+from signalforge.scheduler import guarded
 
 pytestmark = pytest.mark.safety
 
@@ -43,21 +43,16 @@ def test_ensure_not_engaged_raises_when_active(isolated_data_dir: Path) -> None:
         ensure_not_engaged()
 
 
-def test_scheduler_refuses_jobs_when_engaged(isolated_data_dir: Path) -> None:
+def test_scheduler_jobs_noop_when_engaged(isolated_data_dir: Path) -> None:
     ran: list[str] = []
+    job = guarded("demo", lambda: ran.append("ran"))
 
-    class _Job:
-        name = "demo"
+    job()
+    assert ran == ["ran"]
 
-        def run(self) -> None:
-            ran.append("ran")
-
-    runner = InlineJobRunner()
-    runner.register(_Job())
     get_kill_switch().engage(reason="halt", actor="pytest")
-    with pytest.raises(KillSwitchEngaged):
-        runner.submit("demo")
-    assert ran == []
+    job()  # guarded: logs + returns, does not raise, does not run
+    assert ran == ["ran"]
 
 
 def test_api_guarded_route_returns_423_when_engaged(isolated_data_dir: Path) -> None:

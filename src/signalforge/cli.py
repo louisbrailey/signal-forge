@@ -270,6 +270,43 @@ def portfolio_analytics_cmd() -> None:
         typer.echo(json.dumps(portfolio_analytics(session), indent=2, default=str))
 
 
+@app.command("run-scheduler")
+def run_scheduler() -> None:
+    """Run the in-process background scheduler (ingest / scan / MTM / feed probe).
+
+    Every job is a no-op while the kill switch is engaged.
+    """
+    import time
+
+    from signalforge.scheduler import build_scheduler, run_catch_up
+
+    ensure_not_engaged()
+    run_catch_up()
+    scheduler = build_scheduler()
+    scheduler.start()
+    typer.secho("scheduler running — Ctrl-C to stop", fg=typer.colors.CYAN)
+    try:
+        while True:
+            time.sleep(2)
+    except (KeyboardInterrupt, SystemExit):
+        scheduler.shutdown(wait=False)
+
+
+@app.command("run-job")
+def run_job(
+    name: Annotated[str, typer.Argument(help="ingest | scan_all | paper_mtm | feed_probe")],
+) -> None:
+    """Run one scheduled job once (kill-switch guarded)."""
+    from signalforge.scheduler import default_job_specs, guarded
+
+    spec = next((s for s in default_job_specs() if s.name == name), None)
+    if spec is None:
+        typer.secho(f"unknown job {name!r}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    guarded(spec.name, spec.fn)()
+    typer.secho(f"job {name} finished", fg=typer.colors.GREEN)
+
+
 @app.command()
 def backup() -> None:
     """Snapshot the local database (Phase 1)."""
