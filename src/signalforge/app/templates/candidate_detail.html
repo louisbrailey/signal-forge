@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% from "_macros.html" import freshness %}
+{% block title %}{{ symbol }} — evidence — Signal Forge{% endblock %}
+{% block content %}
+{% set c = candidate %}
+<div class="flex flex-wrap items-baseline justify-between gap-2">
+  <h1 class="text-2xl font-semibold text-slate-900">{{ symbol }}
+    <span class="text-base font-normal text-slate-500">{{ sector }} · {{ strategy_name }} v{{ strategy_version }} · {{ c.horizon.value }}</span>
+  </h1>
+  <span class="rounded px-2 py-1 text-sm {{ 'bg-emerald-100 text-emerald-800' if c.quality_gate_status.value == 'PASSED' else 'bg-amber-100 text-amber-800' }}">
+    {{ 'QUALIFIED' if c.quality_gate_status.value == 'PASSED' else 'NO TRADE' }}
+  </span>
+</div>
+<p class="mt-1 text-xs font-mono text-slate-500">Research signal only — no order was placed. Hypothetical research output, not financial advice.</p>
+
+{% if request.query_params.get('accepted') %}
+<p class="mt-2 rounded border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+  Paper trade #{{ request.query_params.get('accepted') }} created (SIMULATED). No order was placed.</p>
+{% elif request.query_params.get('decision') %}
+<p class="mt-2 rounded border border-slate-300 bg-slate-50 px-3 py-2 text-sm">Recorded: {{ request.query_params.get('decision') }}.</p>
+{% endif %}
+
+<div class="mt-4 grid gap-4 lg:grid-cols-3">
+  <div class="lg:col-span-2 rounded-lg border border-slate-200 bg-white p-4">
+    <h2 class="text-sm font-medium text-slate-500">Price ({{ n_bars }} sessions, last bar {{ last_bar_date or '—' }})</h2>
+    <div class="mt-2 text-sky-700">{{ sparkline_svg | safe }}</div>
+  </div>
+  <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
+    <h2 class="text-sm font-medium text-slate-500">Plan</h2>
+    <dl class="mt-2 space-y-1">
+      <div class="flex justify-between"><dt>Direction</dt><dd class="font-medium">{{ c.direction.value }}</dd></div>
+      <div class="flex justify-between"><dt>Entry zone</dt><dd>{{ '%.2f' | format(c.entry_zone_low) }}–{{ '%.2f' | format(c.entry_zone_high) }}</dd></div>
+      <div class="flex justify-between"><dt>Invalidation (stop)</dt><dd>{{ '%.2f' | format(c.invalidation_level) }}</dd></div>
+      <div class="flex justify-between"><dt>Target</dt><dd>{{ '%.2f' | format(c.target_level) if c.target_level else '—' }}</dd></div>
+      <div class="flex justify-between"><dt>Time stop</dt><dd>{{ c.time_stop_days }} sessions</dd></div>
+      <div class="flex justify-between"><dt>Reward : risk</dt><dd>{{ '%.2f' | format(c.reward_risk_estimate) }}</dd></div>
+      <div class="flex justify-between"><dt>Max risk</dt><dd>${{ '%.0f' | format(c.risk_dollars) }} ({{ '%.2f' | format(c.risk_pct_of_account) }}%)</dd></div>
+      <div class="flex justify-between"><dt>Probability</dt><dd>{{ probability_display or '—' }}</dd></div>
+    </dl>
+    <p class="mt-2 text-xs text-slate-500">{{ confidence_note }}</p>
+  </div>
+</div>
+
+<div class="mt-4 grid gap-4 lg:grid-cols-2">
+  <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
+    <h2 class="text-sm font-medium text-slate-500">Why it {{ 'qualified' if c.quality_gate_status.value == 'PASSED' else 'triggered' }}</h2>
+    <ul class="mt-2 list-disc pl-5 text-slate-700">{% for r in c.reasons_qualify %}<li>{{ r }}</li>{% endfor %}</ul>
+    {% if c.failed_gates %}
+    <h3 class="mt-3 text-sm font-medium text-amber-700">Failed quality gates</h3>
+    <ul class="mt-1 list-disc pl-5 text-amber-800">{% for g in c.failed_gates %}<li>{{ g }}</li>{% endfor %}</ul>
+    {% endif %}
+  </div>
+  <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
+    <h2 class="text-sm font-medium text-slate-500">Why it could fail</h2>
+    <ul class="mt-2 list-disc pl-5 text-slate-700">{% for r in c.reasons_fail %}<li>{{ r }}</li>{% endfor %}</ul>
+    <h3 class="mt-3 text-sm font-medium text-slate-500">Upcoming events (90d)</h3>
+    <p class="mt-1 text-slate-700">{{ upcoming_earnings | join(', ') if upcoming_earnings else 'none on record' }}</p>
+  </div>
+</div>
+
+<div class="mt-4 grid gap-4 lg:grid-cols-2">
+  <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
+    <h2 class="text-sm font-medium text-slate-500">Costs, liquidity &amp; data</h2>
+    <dl class="mt-2 space-y-1">
+      <div class="flex justify-between"><dt>Last price</dt><dd>{{ c.liquidity_json.get('last_price') }}</dd></div>
+      <div class="flex justify-between"><dt>Avg $ volume (20d)</dt><dd>{{ '{:,.0f}'.format(c.liquidity_json.get('avg_dollar_volume_20d') or 0) }}</dd></div>
+      <div class="flex justify-between"><dt>Spread</dt><dd>{{ c.liquidity_json.get('spread_bps') or 'n/a' }}</dd></div>
+      <div class="flex justify-between"><dt>Slippage model</dt><dd>slippage_bps + half spread</dd></div>
+    </dl>
+    <div class="mt-2">{{ freshness(data_freshness) }}</div>
+  </div>
+  <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
+    <h2 class="text-sm font-medium text-slate-500">Backtest — {{ strategy_name }} v{{ strategy_version }} (out-of-sample)</h2>
+    {% if oos_metric %}
+    <dl class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1">
+      <div class="flex justify-between"><dt>Trades</dt><dd>{{ oos_metric.get('n_trades') }}</dd></div>
+      <div class="flex justify-between"><dt>Win rate</dt><dd>{{ '%.1f%%' | format((oos_metric.get('win_rate') or 0) * 100) }}</dd></div>
+      <div class="flex justify-between"><dt>Expectancy</dt><dd>{{ '%+.3f' | format(oos_metric.get('expectancy_r') or 0) }}R</dd></div>
+      <div class="flex justify-between"><dt>Profit factor</dt><dd>{{ '%.2f' | format(oos_metric.get('profit_factor') or 0) }}</dd></div>
+      <div class="flex justify-between"><dt>Max DD</dt><dd>{{ '%.1f' | format(oos_metric.get('max_drawdown_r') or 0) }}R</dd></div>
+      <div class="flex justify-between"><dt>Losing streak</dt><dd>{{ oos_metric.get('largest_losing_streak') }}</dd></div>
+    </dl>
+    {% if oos_ci and oos_ci.get('expectancy_r') %}
+    <p class="mt-2 text-xs text-slate-500">Expectancy 95% CI: {{ '%+.3f' | format(oos_ci['expectancy_r']['low']) }}
+      … {{ '%+.3f' | format(oos_ci['expectancy_r']['high']) }}R</p>
+    {% endif %}
+    <p class="mt-1 text-xs text-slate-400">Full report: <code>{{ spec.get('walkforward_result_ref') }}</code></p>
+    {% else %}
+    <p class="mt-2 text-slate-500">No committed backtest for this strategy version — run <code>signalforge backtest-report</code>.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="mt-4 rounded-lg border border-slate-200 bg-white p-4 text-sm">
+  <h2 class="text-sm font-medium text-slate-500">Ranking (transparent score)</h2>
+  <pre class="mt-2 overflow-x-auto rounded bg-slate-50 p-2 text-xs">{{ ranking | tojson(indent=2) }}</pre>
+</div>
+
+<section class="mt-6 rounded-lg border border-slate-300 bg-slate-50 p-4">
+  <h2 class="text-sm font-medium text-slate-700">Paper action (SIMULATED — the only action available)</h2>
+  <div class="mt-2 flex flex-wrap gap-2">
+    <form method="post" action="/candidates/{{ c.id }}/accept">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <button class="rounded bg-emerald-600 px-3 py-2 text-white hover:bg-emerald-500"
+        {{ 'disabled title=NO-TRADE' if c.quality_gate_status.value != 'PASSED' }}>Paper accept</button>
+    </form>
+    {% for d in ['reject','ignore','watch'] %}
+    <form method="post" action="/candidates/{{ c.id }}/decision">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="decision" value="{{ d }}" />
+      <button class="rounded border border-slate-300 px-3 py-2 hover:bg-white">{{ d | capitalize }}</button>
+    </form>
+    {% endfor %}
+  </div>
+  <p class="mt-2 text-xs text-slate-500">No brokerage is contacted. Accepting creates a simulated fill in the paper ledger only.</p>
+</section>
+{% endblock %}

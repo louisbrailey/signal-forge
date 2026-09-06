@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% from "_macros.html" import killswitch_card %}
+{% block title %}Settings — Signal Forge{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold text-slate-900">Settings</h1>
+
+<section class="mt-4 grid gap-4 lg:grid-cols-2">
+  {{ killswitch_card(kill_switch, csrf_token) }}
+
+  <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
+    <h2 class="text-sm font-medium text-slate-500">Provider keys</h2>
+    <p class="mt-1 text-xs text-slate-500">Keys are read from <code>.env</code> / the environment only and are never
+      shown or accepted here (they must not pass through a web form or a log). Edit <code>.env</code> and restart.</p>
+    <ul class="mt-2 space-y-1">
+      {% for name, isset in keys.items() %}
+      <li class="flex justify-between"><span>{{ name }}</span>
+        <span class="{{ 'text-emerald-600' if isset else 'text-slate-400' }}">{{ 'set' if isset else 'not set' }}</span></li>
+      {% endfor %}
+    </ul>
+    <p class="mt-2 text-xs text-slate-500">market data provider: <code>{{ market_data_provider }}</code> · LLM: {{ 'enabled' if llm_enabled else 'disabled' }}</p>
+  </div>
+</section>
+
+<section class="mt-6 rounded-lg border border-slate-200 bg-white p-4">
+  <h2 class="text-lg font-semibold">Research &amp; risk overrides</h2>
+  <p class="mt-1 text-xs text-slate-500">Overrides are stored locally and merged onto the env config. config hash:
+    <code>{{ config_hash[:16] }}…</code></p>
+  <form method="post" action="/settings" class="mt-3 grid gap-3 sm:grid-cols-2 text-sm">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <label class="flex flex-col">Per-trade risk %
+      <input name="per_trade_risk_pct" type="number" step="0.05" value="{{ research.risk.per_trade_risk_pct }}" class="mt-1 rounded border border-slate-300 px-2 py-1" /></label>
+    <label class="flex flex-col">Max position concentration %
+      <input name="max_position_concentration_pct" type="number" step="1" value="{{ research.risk.max_position_concentration_pct }}" class="mt-1 rounded border border-slate-300 px-2 py-1" /></label>
+    <label class="flex flex-col">Max portfolio exposure %
+      <input name="max_portfolio_exposure_pct" type="number" step="1" value="{{ research.risk.max_portfolio_exposure_pct }}" class="mt-1 rounded border border-slate-300 px-2 py-1" /></label>
+    <label class="flex flex-col">Max alerts / day
+      <input name="max_alerts_per_day" type="number" min="0" value="{{ max_alerts_per_day }}" class="mt-1 rounded border border-slate-300 px-2 py-1" /></label>
+    <label class="sm:col-span-2 flex flex-col">Watchlist (comma-separated)
+      <input name="watchlist" value="{{ research.watchlist | join(', ') }}" class="mt-1 rounded border border-slate-300 px-2 py-1" /></label>
+    <label class="flex items-center gap-2"><input type="checkbox" name="allow_short_candidates" value="true" {{ 'checked' if research.allow_short_candidates }} /> allow short candidates</label>
+    <label class="flex items-center gap-2"><input type="checkbox" name="auto_simulate" value="true" {{ 'checked' if auto_simulate }} /> auto-simulate qualified signals</label>
+    <button class="sm:col-span-2 rounded bg-slate-900 px-3 py-1.5 text-white">Save overrides</button>
+  </form>
+</section>
+
+<section class="mt-6 rounded-lg border border-slate-200 bg-white p-4 text-sm">
+  <h2 class="text-lg font-semibold">Effective research config</h2>
+  <pre class="mt-2 overflow-x-auto rounded bg-slate-50 p-2 text-xs">{{ research | tojson(indent=2) }}</pre>
+</section>
+{% endblock %}

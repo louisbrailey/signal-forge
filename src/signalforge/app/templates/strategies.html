@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Strategy Lab — Signal Forge{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold text-slate-900">Strategy Lab</h1>
+<p class="mt-1 text-sm text-slate-500">Strategies are code + a versioned spec. A strategy only alerts when it is
+<code>paper_approved</code> — promotion is manual and audited. On the fixture data every strategy has negative
+out-of-sample expectancy, so none should be promoted.</p>
+
+<div class="mt-4 space-y-4">
+{% for s in strategies %}
+<div class="rounded-lg border border-slate-200 bg-white p-4">
+  <div class="flex flex-wrap items-center justify-between gap-2">
+    <h2 class="text-lg font-semibold">{{ s.name }} <span class="text-sm font-normal text-slate-500">v{{ s.version }} · {{ s.horizon }}</span></h2>
+    <span class="rounded px-2 py-0.5 text-xs
+      {{ 'bg-emerald-100 text-emerald-800' if s.status == 'paper_approved' else ('bg-slate-100 text-slate-600' if s.status == 'experimental' else 'bg-red-100 text-red-700') }}">
+      {{ s.status }}</span>
+  </div>
+  <p class="mt-2 text-sm text-slate-700">{{ s.rule_definition }}</p>
+  <div class="mt-2 text-xs text-slate-500">long: {{ s.permits_long }} · short: {{ s.permits_short }} · report: <code>{{ s.report_ref }}</code></div>
+  {% if s.oos %}
+  <div class="mt-2 text-sm text-slate-600">OOS: {{ s.oos.get('n_trades') }} trades ·
+    expectancy {{ '%+.3f' | format(s.oos.get('expectancy_r') or 0) }}R ·
+    profit factor {{ '%.2f' | format(s.oos.get('profit_factor') or 0) }} ·
+    max DD {{ '%.1f' | format(s.oos.get('max_drawdown_r') or 0) }}R</div>
+  {% else %}
+  <div class="mt-2 text-sm text-slate-400">no committed backtest — run <code>signalforge backtest-report</code></div>
+  {% endif %}
+  <details class="mt-2 text-sm"><summary class="cursor-pointer text-slate-500">Known failure modes</summary>
+    <ul class="mt-1 list-disc pl-5 text-slate-700">{% for f in s.known_failure_modes %}<li>{{ f }}</li>{% endfor %}</ul>
+  </details>
+  <form method="post" action="/strategies/{{ s.name }}/status" class="mt-3 flex items-center gap-2 text-sm">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <select name="status" class="rounded border border-slate-300 px-2 py-1">
+      <option value="experimental" {{ 'selected' if s.status == 'experimental' }}>experimental (paper only)</option>
+      <option value="paper_approved" {{ 'selected' if s.status == 'paper_approved' }}>paper_approved (alert-eligible)</option>
+      <option value="disabled" {{ 'selected' if s.status == 'disabled' }}>disabled</option>
+    </select>
+    <button class="rounded border border-slate-300 px-3 py-1 hover:bg-slate-50">Set status</button>
+  </form>
+</div>
+{% endfor %}
+</div>
+{% endblock %}

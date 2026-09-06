@@ -137,13 +137,19 @@ def run_scan(
     horizon: Horizon,
     *,
     settings: Settings | None = None,
+    research: ResearchConfig | None = None,
     as_of: date | None = None,
     source: str | None = None,
     proxy_symbol: str = "SPY",
     symbols: list[str] | None = None,
 ) -> ScanResult:
     settings = settings or get_settings()
-    cfg = settings.research
+    if research is not None:
+        cfg = research
+    else:
+        from signalforge.settings_store import effective_research_config
+
+        cfg = effective_research_config(session)
     universe = list(symbols) if symbols is not None else list(cfg.universe)
     started = utcnow()
     result = ScanResult(

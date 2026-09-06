@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Scanner — Signal Forge{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold text-slate-900">Candidate Scanner</h1>
+<p class="mt-1 text-sm text-slate-500">Only candidates that pass every quality gate are shown. Rejected setups
+are counted below with their reasons.</p>
+
+<form method="get" action="/scanner" class="mt-4 flex flex-wrap items-end gap-3 text-sm">
+  <label class="flex flex-col">Horizon
+    <select name="horizon" class="mt-1 rounded border border-slate-300 px-2 py-1">
+      {% for h in horizons %}<option value="{{ h }}" {{ 'selected' if h == selected_horizon }}>{{ h }}</option>{% endfor %}
+    </select>
+  </label>
+  <label class="flex flex-col">Strategy
+    <select name="strategy" class="mt-1 rounded border border-slate-300 px-2 py-1">
+      <option value="">any</option>
+      {% for s in strategies %}<option value="{{ s }}" {{ 'selected' if s == filters.strategy }}>{{ s }}</option>{% endfor %}
+    </select>
+  </label>
+  <label class="flex flex-col">Min R:R
+    <input type="number" step="0.1" name="min_reward_risk" value="{{ filters.min_reward_risk }}"
+           class="mt-1 w-24 rounded border border-slate-300 px-2 py-1" />
+  </label>
+  <label class="flex items-center gap-1"><input type="checkbox" name="exclude_event_risk" value="true"
+    {{ 'checked' if filters.exclude_event_risk }} /> hide event-risk</label>
+  <button class="rounded bg-slate-900 px-3 py-1.5 text-white">Apply</button>
+</form>
+
+{% if run %}
+<div class="mt-4 rounded border border-slate-200 bg-white p-3 text-sm text-slate-600">
+  Last scan {{ run.started_at }} —
+  <strong>universe scanned {{ run.scanned }}</strong>,
+  <strong>excluded {{ run.excluded }}</strong>
+  {% if run.exclusions %}({% for r, i in run.exclusions.items() %}{{ r }}: {{ i.count }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif %},
+  <strong>NO TRADE {{ run.no_trade }}</strong>,
+  <strong>{{ run.qualified }} qualified</strong>.
+</div>
+{% else %}
+<p class="mt-4 text-sm text-slate-500">No scan for this horizon yet.</p>
+{% endif %}
+
+<div class="mt-4 overflow-x-auto">
+  <table class="min-w-full text-sm">
+    <thead class="text-left text-slate-500"><tr>
+      <th class="py-1 pr-4">Rank</th><th class="pr-4">Symbol</th><th class="pr-4">Sector</th>
+      <th class="pr-4">Dir</th><th class="pr-4">Strategy</th><th class="pr-4">Entry zone</th>
+      <th class="pr-4">Stop</th><th class="pr-4">Target</th><th class="pr-4">R:R</th>
+      <th class="pr-4">Risk</th><th class="pr-4">Events</th><th></th></tr></thead>
+    <tbody>
+    {% for c in candidates %}
+      <tr class="border-t border-slate-100">
+        <td class="py-1 pr-4">{{ c.rank or '–' }}</td>
+        <td class="pr-4 font-medium">{{ c.symbol }}</td>
+        <td class="pr-4">{{ c.sector }}</td>
+        <td class="pr-4">{{ c.direction }}</td>
+        <td class="pr-4">{{ c.strategy }}</td>
+        <td class="pr-4">{{ '%.2f' | format(c.entry_low) }}–{{ '%.2f' | format(c.entry_high) }}</td>
+        <td class="pr-4">{{ '%.2f' | format(c.stop) }}</td>
+        <td class="pr-4">{{ '%.2f' | format(c.target) if c.target else '–' }}</td>
+        <td class="pr-4">{{ '%.2f' | format(c.reward_risk) }}</td>
+        <td class="pr-4">${{ '%.0f' | format(c.risk_dollars) }}</td>
+        <td class="pr-4">{{ c.event_risk.upcoming_earnings | length if c.event_risk.upcoming_earnings else 0 }}</td>
+        <td><a class="text-sky-700 hover:underline" href="/candidates/{{ c.id }}">evidence →</a></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="12" class="py-3 text-slate-500">No qualified candidates. NO&nbsp;TRADE is the expected default.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

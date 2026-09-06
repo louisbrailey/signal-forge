@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% from "_macros.html" import killswitch_card, feed_badge %}
+{% block title %}Overview — Signal Forge{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold text-slate-900">Overview</h1>
+
+{% if warnings %}
+<div class="mt-3 space-y-1">
+  {% for w in warnings %}
+  <p class="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">⚠ {{ w }}</p>
+  {% endfor %}
+</div>
+{% endif %}
+
+<section class="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+  {{ killswitch_card(kill_switch, csrf_token) }}
+
+  <div class="rounded-lg border border-slate-200 bg-white p-4">
+    <h2 class="text-sm font-medium text-slate-500">Data feeds</h2>
+    {% if feeds %}
+      <div class="mt-2 flex flex-wrap gap-1">{% for f in feeds %}{{ feed_badge(f) }}{% endfor %}</div>
+      <p class="mt-2 text-xs {{ 'text-red-600' if not live_alerts_enabled else 'text-slate-500' }}">
+        Live alerts: {{ 'DISABLED (stale/unavailable feed)' if not live_alerts_enabled else 'eligible when a strategy is promoted' }}
+      </p>
+    {% else %}
+      <p class="mt-2 text-sm text-slate-500">No feeds registered — run an ingest job.</p>
+    {% endif %}
+  </div>
+
+  <div class="rounded-lg border border-slate-200 bg-white p-4">
+    <h2 class="text-sm font-medium text-slate-500">Paper account</h2>
+    {% if paper.exists %}
+      <p class="mt-1 text-lg font-semibold">${{ '%.2f' | format(paper.equity_estimate) }}
+        <span class="text-sm {{ 'text-emerald-600' if paper.return_pct >= 0 else 'text-red-600' }}">({{ '%+.2f' | format(paper.return_pct) }}%)</span></p>
+      <p class="text-sm text-slate-600">cash ${{ '%.2f' | format(paper.cash) }} · {{ paper.n_open }} open · {{ paper.n_closed }} closed</p>
+      <p class="text-sm text-slate-600">unrealized {{ '%+.2f' | format(paper.unrealized_pnl) }} · realized {{ '%+.2f' | format(paper.realized_pnl) }}</p>
+    {% else %}
+      <p class="mt-2 text-sm text-slate-500">No paper account — run <code>signalforge seed</code>.</p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="mt-6">
+  <h2 class="text-lg font-semibold">Scans by horizon</h2>
+  <div class="mt-2 grid gap-3 sm:grid-cols-3">
+    {% for h in horizons %}
+    <div class="rounded-lg border border-slate-200 bg-white p-3 text-sm">
+      <div class="font-medium">{{ h.horizon }}</div>
+      {% if h.has_run %}
+        <div class="mt-1 text-slate-600">scanned {{ h.scanned }} · excluded {{ h.excluded }} · NO&nbsp;TRADE {{ h.no_trade }}</div>
+        <div class="mt-1 {{ 'text-emerald-700 font-medium' if h.qualified else 'text-slate-500' }}">{{ h.qualified }} qualified candidate(s)</div>
+        {% if h.exclusions %}
+        <ul class="mt-1 text-xs text-slate-400">
+          {% for reason, info in h.exclusions.items() %}<li>{{ reason }}: {{ info.count }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        <div class="mt-1 text-xs text-slate-400">{{ h.started_at }}</div>
+      {% else %}
+        <div class="mt-1 text-slate-400">no scan yet — <code>signalforge scan --horizon {{ h.horizon }}</code></div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="mt-6">
+  <h2 class="text-lg font-semibold">Today's qualified candidates</h2>
+  {% if todays_candidates %}
+  <div class="mt-2 overflow-x-auto">
+    <table class="min-w-full text-sm">
+      <thead class="text-left text-slate-500"><tr>
+        <th class="py-1 pr-4">Symbol</th><th class="pr-4">Dir</th><th class="pr-4">Strategy</th>
+        <th class="pr-4">Horizon</th><th class="pr-4">R:R</th><th class="pr-4">Risk</th><th></th></tr></thead>
+      <tbody>
+      {% for c in todays_candidates %}
+        <tr class="border-t border-slate-100">
+          <td class="py-1 pr-4 font-medium">{{ c.symbol }}</td>
+          <td class="pr-4">{{ c.direction }}</td>
+          <td class="pr-4">{{ c.strategy }}</td>
+          <td class="pr-4">{{ c.horizon }}</td>
+          <td class="pr-4">{{ '%.2f' | format(c.reward_risk) }}</td>
+          <td class="pr-4">${{ '%.0f' | format(c.risk_dollars) }} ({{ '%.2f' | format(c.risk_pct) }}%)</td>
+          <td><a class="text-sky-700 hover:underline" href="/candidates/{{ c.id }}">evidence →</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="mt-2 rounded border border-slate-200 bg-white p-3 text-sm text-slate-600">
+    <strong>NO TRADE across all horizons.</strong> {{ no_trade_total }} setup(s) evaluated and rejected —
+    this is a normal, frequent result. Open the Scanner to see why each was rejected.
+  </p>
+  {% endif %}
+</section>
+{% endblock %}
