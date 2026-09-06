@@ -15,6 +15,8 @@ from signalforge.observability import configure_logging
 app = typer.Typer(add_completion=False, help="Signal Forge — research/education only. No trading.")
 killswitch_app = typer.Typer(help="Emergency kill switch (S6): halt polling, jobs, alerts, paper.")
 app.add_typer(killswitch_app, name="killswitch")
+paper_app = typer.Typer(help="Paper-trading ledger (SIMULATED — no order is ever placed).")
+app.add_typer(paper_app, name="paper")
 
 
 @app.callback()
@@ -188,6 +190,48 @@ def scan(
             f"entry {c.entry_zone_low}-{c.entry_zone_high} stop {c.invalidation_level}",
             fg=typer.colors.GREEN,
         )
+
+
+@paper_app.command("accept")
+def paper_accept(candidate_id: int) -> None:
+    """Paper-accept a candidate (SIMULATED fill). Research signal only — no order was placed."""
+    from signalforge.db.session import session_scope
+    from signalforge.paper.ledger import accept_candidate
+
+    with session_scope() as session:
+        res = accept_candidate(session, candidate_id)
+    typer.secho(
+        f"SIMULATED {res.side.value} {res.shares} @ {res.fill_price} "
+        f"(cost {res.total_cost:.2f}) — trade #{res.paper_trade_id}. "
+        "Research signal only — no order was placed.",
+        fg=typer.colors.GREEN,
+    )
+
+
+@paper_app.command("mtm")
+def paper_mtm() -> None:
+    """Mark open paper positions to market; close any that hit stop/target/time-stop."""
+    from signalforge.db.session import session_scope
+    from signalforge.paper.ledger import mark_to_market
+
+    with session_scope() as session:
+        r = mark_to_market(session)
+    typer.echo(
+        f"checked {r.checked}, closed {r.closed}, realized {r.realized_pnl:+.2f}, "
+        f"unrealized {r.unrealized_pnl:+.2f}"
+    )
+
+
+@paper_app.command("snapshot")
+def paper_snapshot() -> None:
+    """Print the paper account portfolio snapshot."""
+    import json
+
+    from signalforge.db.session import session_scope
+    from signalforge.paper.portfolio import portfolio_snapshot
+
+    with session_scope() as session:
+        typer.echo(json.dumps(portfolio_snapshot(session), indent=2, default=str))
 
 
 @app.command()
