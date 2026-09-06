@@ -402,3 +402,110 @@ Known already: macOS (Darwin 25.6); system Python 3.9 (will install 3.12 via
      XOM, UNH, HD
 6. **Always-on host** (Phase 2/3 only): Mac laptop only, or a Pi / VM you can run
    24/7 later?
+
+---
+
+## Phase 1 exit report — 2026-09-06
+
+### Built (with evidence)
+- **Persistence** — 43 SQLAlchemy tables (ARCHITECTURE §5), Alembic migration
+  with `paper_trade` BEFORE UPDATE/DELETE triggers. `make migrate` round-trips;
+  `tests/db/`.
+- **Local auth** — Argon2id, first-run registration that then closes, session
+  cookie (HttpOnly, SameSite=strict), CSRF on every form, login backoff, loopback
+  bind. `tests/app/test_auth.py`.
+- **Data** — adapter interfaces + capability descriptors; offline deterministic
+  `fixture` adapter; free `stooq` EOD adapter; ingestion (normalize, raw-payload
+  cache, dedupe, quality flags, feed status); cross-source reconciliation;
+  `FreshnessGate` (S8). `tests/data/`.
+- **Backtest** — event-loop engine (signal sees `head(t)`, fill at `t+1` open,
+  stop→target→time-stop, costs in fills), full metric set, walk-forward IS/OOS,
+  seeded bootstrap CIs, regime segmentation, leakage detector. `tests/backtest/`.
+- **Strategies** — `trend_continuation` (2 horizons) + `mean_reversion`, each a
+  versioned `StrategySpec`, all `EXPERIMENTAL`; regime filter as a gating input;
+  committed `reports/*.md`. `tests/research/test_strategies.py`.
+- **Scan → rank → risk → candidates** — separated accounting (scanned / excluded
+  with reasons / NO-TRADE), quality gates (reward:risk, OOS expectancy + CI +
+  trade count, risk-engine sizing), transparent ranking, S10 probability guard,
+  persistence. `tests/research/test_scan.py`, `tests/risk/`.
+- **Paper ledger + journal** — accept / reject / ignore / watch, simulated fills
+  with spread + slippage, immutable `paper_trade` (S9) + append-only corrections,
+  mark-to-market, weekly review. `tests/paper/`.
+- **CSV portfolio import** — offline (S2), format detection, idempotent by
+  content hash, exposure analytics, kept separate from the paper ledger.
+  `tests/portfolio/`.
+- **Kill switch integration** — `guarded()` no-ops every scheduled job; startup
+  catch-up; 423 on state-changing routes. `tests/test_scheduler.py`,
+  `tests/safety/test_s6_kill_switch.py`.
+- **Dashboard** — Overview, Scanner, Candidate Detail (evidence + SVG sparkline +
+  OOS stats for that exact strategy version), Portfolio & Import, Strategy Lab,
+  Journal, Briefing, Options (learn stub), Settings. `tests/app/test_dashboard.py`.
+- **Daily briefing** — deterministic frozen facts + Markdown, complete without an
+  LLM; optional grounded LLM narrative with an `llm_call` audit row.
+  `tests/research/test_briefing.py`, `tests/test_briefing_llm_guard.py`.
+- **Alerts** — policy engine (OFF by default, caps, quiet hours, dedupe,
+  stale-feed → health-only), local + optional email channels, mandatory lines in
+  every body. `tests/alerts/`.
+- **Backup / restore** — consistent SQLite snapshot, optional gpg, `.pre-restore`
+  safety copy. `tests/test_backup.py`.
+- **Gates** — Ruff, Black, mypy (strict on the decision core), import-linter
+  (4/4 contracts KEPT), `detect-secrets` clean, GitHub Actions CI.
+  **175 tests pass**, ~86% coverage.
+
+### Still simulated
+- All market data unless a real provider is configured — the default `fixture`
+  adapter is a deterministic random walk, every datum `is_simulated=True` /
+  `HISTORICAL`. Seed data, all backtests, and every scan on a fresh install run
+  on it.
+
+### Delayed / not real-time
+- `stooq` adapter is `END_OF_DAY` (split-adjusted close only, no dividend
+  adjustment). Nothing anywhere is labelled "live" — `latency_category=REALTIME`
+  has no code path yet.
+
+### Unsupported in Phase 1
+- Intraday bars and the INTRADAY horizon (Phase 2).
+- Streaming / polling adapter layer, second real data source, meaningful
+  two-source reconciliation.
+- Strategies 3–5 (relative strength, breakout, post-earnings drift),
+  parameter-sensitivity grids, the strategy-health auto-downgrade monitor.
+- Discord / Slack / push / SMS alert channels.
+- Options education & simulation module; research-document retrieval; advanced
+  factor/scenario portfolio risk (all Phase 3).
+- Postgres, Docker Compose, a durable job worker (Phase 2).
+- Frontend is server-rendered HTMX; the React + TypeScript SPA is Phase 2
+  (ADR 0001). No Playwright E2E — covered by FastAPI TestClient integration tests.
+
+### Unvalidated
+- All three baseline strategies are `EXPERIMENTAL`. On the fixture data their
+  out-of-sample expectancy is ≈ **−1R** with a ~6% win rate — no edge net of
+  costs. The scanner therefore returns **NO TRADE for every candidate**, no
+  strategy is promoted, and no candidate alert can fire. This is the correct,
+  intended outcome; the strategies have not been validated on real data.
+- Confidence / probability figures are never shown (no calibrated out-of-sample
+  `calibration_ref` exists yet) — S10.
+- Walk-forward re-fits no parameters in Phase 1 (the strategies have none); it is
+  an IS-vs-OOS partition of a single run, documented as such.
+
+### Security limitations
+- Local single-user auth, no MFA; login backoff only (no lockout, no route rate
+  limiting). App binds to `127.0.0.1`; `APP_ENCRYPTION_KEY` unset in dev uses an
+  ephemeral session secret.
+- Backups are plaintext unless a passphrase is supplied and `gpg` is installed.
+- Restore is stop-the-app.
+- Provider keys are read from `.env` only and shown as set/not-set in the UI; the
+  encrypted local secret store is Phase 2/3.
+
+### Data-quality limitations
+- Single data source on a default install → reconciliation is inert.
+- Free EOD history has survivorship bias (flagged in the UI, not corrected) and
+  no dividend adjustment.
+- The fixture session calendar is weekdays-only (no holidays); the NYSE calendar
+  is used by the backtest engine but not yet by ingestion.
+
+### Test run
+- `uv run pytest` → **175 passed, 1 warning** (third-party starlette
+  DeprecationWarning), ~86% line coverage.
+- `uv run ruff check` / `black --check` / `mypy` / `lint-imports` → all clean,
+  4/4 architectural contracts KEPT.
+- CI workflow: `.github/workflows/ci.yml` runs the same gates on push / PR.

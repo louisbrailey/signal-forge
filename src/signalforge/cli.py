@@ -346,10 +346,45 @@ def run_job(
 
 
 @app.command()
-def backup() -> None:
-    """Snapshot the local database (Phase 1)."""
-    typer.secho("`make backup` is implemented later in Phase 1 (§1.13).", fg="yellow")
-    raise typer.Exit(code=1)
+def backup(
+    encrypt: Annotated[bool, typer.Option(help="Prompt for a passphrase and gpg-encrypt.")] = False,
+    out_dir: Annotated[str, typer.Option(help="Destination directory.")] = "",
+) -> None:
+    """Consistent snapshot of the local SQLite database."""
+    from pathlib import Path
+
+    from signalforge.backup import create_backup
+
+    passphrase = (
+        typer.prompt("Backup passphrase", hide_input=True, confirmation_prompt=True)
+        if encrypt
+        else None
+    )
+    res = create_backup(out_dir=Path(out_dir) if out_dir else None, gpg_passphrase=passphrase)
+    typer.secho(
+        f"backup written: {res.path}  ({res.bytes:,} bytes, "
+        f"{'encrypted' if res.encrypted else 'plaintext'})",
+        fg=typer.colors.GREEN,
+    )
+
+
+@app.command()
+def restore(
+    path: str,
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+) -> None:
+    """Overwrite the live database with a backup (a .pre-restore copy is kept)."""
+    from pathlib import Path
+
+    from signalforge.backup import restore_backup
+
+    if not yes:
+        typer.confirm(f"This overwrites the current database with {path}. Continue?", abort=True)
+    passphrase = (
+        typer.prompt("Backup passphrase", hide_input=True) if path.endswith(".gpg") else None
+    )
+    dest = restore_backup(Path(path), gpg_passphrase=passphrase)
+    typer.secho(f"restored into {dest}", fg=typer.colors.GREEN)
 
 
 def main() -> None:

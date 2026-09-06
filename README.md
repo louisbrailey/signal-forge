@@ -15,71 +15,94 @@ predictive value.
 ## What it will not do
 
 - No brokerage login, credential storage, order placement, or trade execution.
-- No browser automation of any brokerage or trading venue.
-- No scraping of Fidelity or any site that prohibits automated access; no
-  unofficial/reverse-engineered brokerage APIs.
+- No browser automation of any brokerage or trading venue; no scraping of sites
+  that prohibit it; no unofficial/reverse-engineered brokerage APIs.
 - No LLM deciding entries, exits, or position size — those are deterministic,
-  version-controlled code.
-- Account data import is **manual CSV only**.
+  version-controlled code. An LLM may only rephrase deterministic facts, and only
+  when its output is grounded in those facts.
+- Account data import is **manual CSV only**, offline, for analytics.
 - An **emergency kill switch** halts polling, scheduled jobs, alerts, and
   paper-trade creation immediately.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design and the safety
-invariants (S1–S10), and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the
-phased build plan and acceptance criteria.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and the safety invariants
+(S1–S10), [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the phased plan and
+the Phase 1 exit report, and [docs/architecture-diagram.md](docs/architecture-diagram.md)
+for diagrams.
 
-## Status
+## Status — Phase 1 MVP complete
 
-**Phase 0 — scaffold.** Repo skeleton, tooling, CI, and the architectural safety
-contracts are in place. No research or data functionality yet. See the
-Phase 0 exit report at the bottom of `IMPLEMENTATION_PLAN.md` once complete.
+Local end-to-end research loop on daily data: ingest → scan → ranked candidates
+with full evidence → paper trade → journal → daily briefing, with a kill switch,
+data-freshness labelling, and an alert policy engine. Deployed on SQLite with an
+in-process scheduler and a server-rendered HTMX dashboard. **On the shipped
+fixture data every candidate is `NO TRADE`** — the intended result: no baseline
+strategy has positive out-of-sample expectancy net of costs, so none is promoted
+and none alerts.
 
 ## Requirements
 
 - macOS / Linux
-- [`uv`](https://docs.astral.sh/uv/) (manages Python 3.12 and the virtualenv)
-- No Node, Docker, Postgres, or Redis needed for Phase 1 (SQLite +
-  server-rendered HTMX UI + in-process scheduler).
+- [`uv`](https://docs.astral.sh/uv/) — manages Python 3.12 and the virtualenv
+- No Node, Docker, Postgres, or Redis for Phase 1
 
-## Quick start (Phase 1 target)
+## Quick start
 
 ```bash
-cp .env.example .env          # then edit; APP_ENCRYPTION_KEY is required
-uv sync --extra dev           # create venv, install deps
-make migrate                  # create the SQLite schema
-make seed                     # load clearly-labelled SIMULATED demo data
-make dev                      # API + scheduler on http://127.0.0.1:8787
+cp .env.example .env            # optional for local dev; set APP_ENCRYPTION_KEY for stable sessions
+uv sync                         # venv + runtime + dev deps (add --extra llm for the narrative)
+uv run alembic upgrade head     # create the SQLite schema
+uv run signalforge seed         # load clearly-labelled SIMULATED demo data
+uv run signalforge backtest-report   # backtests + reports/ + backtest_metric rows
+uv run signalforge scan --horizon SHORT_SWING
+uv run signalforge scan --horizon MEDIUM_SWING
+make dev                        # dashboard on http://127.0.0.1:8787
 ```
 
-First run walks you through creating the single local user account. All alerts
-are **off** until you finish setup in **Settings**.
+Open the dashboard, create the single local account on first run, then explore
+Overview / Scanner / Briefing / Portfolio / Strategy Lab / Journal / Settings.
 
-## Common commands
+## Commands
 
-| Command | What it does |
+| Command | What |
 |---|---|
-| `make dev` | Run the app + in-process scheduler (reload) |
-| `make test` | Full pytest suite with coverage |
-| `make safety` | Run only the S1–S10 invariant tests |
-| `make lint` | Ruff + Black check + mypy + import-linter |
-| `make fmt` | Ruff --fix + Black |
+| `make dev` | Dashboard (+ scheduler if `APP_RUN_SCHEDULER=true`) |
+| `make test` / `make safety` | Full suite / just the S1–S10 invariant tests |
+| `make lint` | Ruff + Black + mypy + import-linter |
 | `make migrate` / `make downgrade` | Alembic up / down |
-| `make seed` | Load simulated demo data |
-| `make backup` | Snapshot the SQLite DB (+ optional gpg) |
-| `make killswitch-on` / `-off` | Flip the kill switch from the CLI |
+| `signalforge seed` | SIMULATED demo data (idempotent) |
+| `signalforge ingest [--provider stooq]` | Fetch daily bars (kill-switch guarded) |
+| `signalforge backtest-report` | Backtests → `reports/` + DB metrics |
+| `signalforge scan --horizon …` | Run + persist one horizon's scan |
+| `signalforge briefing` | Build today's briefing (LLM narrative if configured) |
+| `signalforge alerts` | Evaluate + dispatch alerts (nothing until enabled in Settings) |
+| `signalforge paper accept\|mtm\|snapshot` | Paper ledger (SIMULATED — no order placed) |
+| `signalforge portfolio import <csv>` / `analytics` | Offline CSV import + exposure |
+| `signalforge run-scheduler` / `run-job <name>` | Background jobs |
+| `signalforge killswitch on\|off\|status` | Emergency stop |
+| `./backup.sh [--encrypt]` / `signalforge restore <path>` | Local DB backup / restore |
+
+## Data providers
+
+- **`fixture`** (default): deterministic, offline, `HISTORICAL` / `SIMULATED`.
+  Every value is labelled simulated; nothing is ever shown as "live".
+- **`stooq`**: free end-of-day CSV, `END_OF_DAY`, no API key. Split-adjusted
+  close only; survivorship bias in free history — both surfaced in the UI.
+- A paid real-time provider slots in behind the same adapter interface in
+  Phase 3; `latency_category=REALTIME` and "live" labels unlock only with a
+  confirmed entitlement.
 
 ## Layout
 
 ```
 src/signalforge/     application package (see ARCHITECTURE.md §4.1)
-tests/               unit / integration / safety (S1-S10) / e2e
-docs/decisions/      lightweight ADRs
+tests/               unit / integration / safety (S1–S10) / app
 reports/             committed backtest / walk-forward reports per strategy version
-data/                local runtime state (gitignored)
+docs/decisions/      lightweight ADRs
+data/                local runtime state — gitignored
 ```
 
 ## Security
 
-Secrets come only from `.env` / a local encrypted store, are wrapped in
-`SecretStr`, redacted from logs, and never persisted to the database or git.
-See [SECURITY.md](SECURITY.md).
+Secrets come only from `.env` / the environment, are wrapped in `SecretStr`,
+redacted from logs, and never persisted or shown in the UI (Settings shows
+set / not-set only). See [SECURITY.md](SECURITY.md).
