@@ -1,0 +1,192 @@
+[project]
+name = "signalforge"
+version = "0.1.0"
+description = "Signal Forge — local-first, paper-trading-only market research & trade-recommendation platform (research/education only)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "LicenseRef-Personal-Use-Only" }
+authors = [{ name = "Louis Brailey" }]
+
+# Runtime dependencies. Deliberately conservative for Phase 1.
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.6",
+    "jinja2>=3.1.4",
+    "python-multipart>=0.0.18",
+    "itsdangerous>=2.2",
+    "argon2-cffi>=23.1",
+    "httpx>=0.28",
+    "structlog>=24.4",
+    "apscheduler>=3.11,<4",
+    "numpy>=2.1",
+    "pandas>=2.2",
+    "pandas-market-calendars>=4.4",
+    "python-dateutil>=2.9",
+    "tenacity>=9.0",
+    "typer>=0.15",
+    "rich>=13.9",
+    "cryptography>=44.0",
+]
+
+[project.optional-dependencies]
+# The LLM explanation layer is OPTIONAL. The system is fully functional without it.
+# It is never imported by research/, risk/, backtest/, or paper/ (enforced by import-linter).
+llm = ["anthropic>=0.42"]
+
+[project.scripts]
+signalforge = "signalforge.cli:main"
+
+# Installed by default with `uv sync`.
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "pytest-asyncio>=0.24",
+    "hypothesis>=6.122",
+    "freezegun>=1.5",
+    "ruff>=0.8.4",
+    "black>=24.10",
+    "mypy>=1.13",
+    "import-linter>=2.1",
+    "detect-secrets>=1.5",
+    "pre-commit>=4.0",
+    "types-python-dateutil",
+    "pandas-stubs",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/signalforge"]
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+src = ["src", "tests"]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",      # pyflakes / pycodestyle
+    "I",                # isort
+    "UP",               # pyupgrade
+    "B",                # bugbear
+    "C4",               # comprehensions
+    "SIM",              # simplify
+    "PTH",              # use pathlib
+    "RUF",              # ruff-specific
+    "TID",              # tidy imports (banned-api)
+    "S",                # flake8-bandit (security)
+]
+ignore = [
+    "S101",   # assert used — fine in tests and internal invariants
+    "B008",   # function call in argument defaults — FastAPI Depends() idiom
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "B011"]
+"src/signalforge/db/migrations/**" = ["E501", "F401"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# Hard denylist: brokerage / execution / browser-automation surfaces must never be importable.
+"ib_insync".msg = "No brokerage connectivity. See ARCHITECTURE.md S1."
+"ibapi".msg = "No brokerage connectivity. See ARCHITECTURE.md S1."
+"alpaca_trade_api".msg = "No brokerage/trading API. Data-only adapters live in signalforge.data.adapters."
+"selenium".msg = "No browser automation of any venue. See ARCHITECTURE.md S1."
+"ccxt".msg = "Out of scope: no crypto exchange connectivity."
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+# ---------------------------------------------------------------------------
+# mypy — strict on the deterministic decision core
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["signalforge"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = ["signalforge.research.*", "signalforge.risk.*", "signalforge.backtest.*"]
+disallow_any_generics = true
+warn_return_any = true
+strict_equality = true
+
+# Add per-package ``ignore_missing_imports`` overrides here as untyped
+# third-party deps are introduced in Phase 1 (e.g. pandas_market_calendars).
+
+# ---------------------------------------------------------------------------
+# Pytest / coverage
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra -q --strict-markers --cov=signalforge --cov-report=term-missing:skip-covered"
+asyncio_mode = "auto"
+markers = [
+    "safety: invariant tests (S1-S10 from ARCHITECTURE.md) — must always pass",
+    "slow: longer-running tests (backtests over large synthetic series)",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src/signalforge"]
+omit = ["src/signalforge/db/migrations/*", "src/signalforge/cli.py"]
+
+[tool.coverage.report]
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "@(abc\\.)?abstractmethod"]
+
+# ---------------------------------------------------------------------------
+# import-linter — architectural safety contracts (S1, S2, S3)
+# ---------------------------------------------------------------------------
+[tool.importlinter]
+root_package = "signalforge"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "S3: LLM layer is never on the deterministic decision path"
+type = "forbidden"
+source_modules = [
+    "signalforge.research",
+    "signalforge.risk",
+    "signalforge.backtest",
+    "signalforge.paper",
+]
+forbidden_modules = ["signalforge.llm"]
+
+[[tool.importlinter.contracts]]
+name = "S2: manual CSV portfolio import performs no network I/O"
+type = "forbidden"
+source_modules = ["signalforge.portfolio"]
+forbidden_modules = ["httpx", "requests", "aiohttp", "socket", "urllib", "signalforge.data"]
+
+[[tool.importlinter.contracts]]
+name = "S1: no brokerage / execution / browser-automation surface anywhere"
+type = "forbidden"
+source_modules = ["signalforge"]
+forbidden_modules = ["ib_insync", "ibapi", "alpaca_trade_api", "selenium", "ccxt"]
+
+[[tool.importlinter.contracts]]
+name = "Layering: data adapters do not depend on research/paper/app/alerts"
+type = "forbidden"
+source_modules = ["signalforge.data.adapters"]
+forbidden_modules = [
+    "signalforge.research", "signalforge.risk", "signalforge.backtest",
+    "signalforge.paper", "signalforge.app", "signalforge.alerts",
+]

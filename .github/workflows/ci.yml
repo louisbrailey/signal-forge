@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: lint · type · imports · secrets · tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.10"
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync (runtime + dev group + llm extra)
+        run: uv sync --extra llm --frozen || uv sync --extra llm
+
+      - name: Ruff
+        run: uv run ruff check --output-format=github src tests
+
+      - name: Black (check)
+        run: uv run black --check src tests
+
+      - name: mypy
+        run: uv run mypy
+
+      - name: import-linter (S1/S2/S3 contracts)
+        run: uv run lint-imports
+
+      - name: detect-secrets
+        run: uv run detect-secrets scan --baseline .secrets.baseline
+
+      - name: Pytest (with coverage)
+        run: uv run pytest --cov-report=xml
+
+      - name: Safety invariants must pass
+        run: uv run pytest -m safety -q
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore

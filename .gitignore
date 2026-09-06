@@ -1,0 +1,45 @@
+# --- Secrets: never commit real values ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+.secret_store/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.import_linter_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+dist/
+build/
+
+# --- Local data / runtime state (never versioned) ---
+data/
+*.sqlite
+*.sqlite3
+*.db
+logs/
+*.log
+backups/
+raw_cache/
+
+# --- Editors / OS ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# --- Node (only present if frontend Option B is chosen later) ---
+node_modules/
+frontend/dist/

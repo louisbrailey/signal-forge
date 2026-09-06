@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}Signal Forge{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    [data-disclaimer] { position: sticky; top: 0; z-index: 50; }
+  </style>
+</head>
+<body class="h-full bg-slate-50 text-slate-800">
+  <div data-disclaimer class="bg-amber-100 border-b border-amber-300 text-amber-900 text-sm">
+    <div class="mx-auto max-w-5xl px-4 py-2">
+      <strong>Research &amp; education only — not financial advice.</strong>
+      {{ not_advice_notice }}
+      No brokerage is ever contacted; no order is ever placed.
+      <span class="font-mono">{{ research_only_notice }}</span>
+    </div>
+  </div>
+
+  <main class="mx-auto max-w-5xl px-4 py-8">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="mx-auto max-w-5xl px-4 py-8 text-xs text-slate-400">
+    Signal Forge v{{ app_version }} · local-first · paper-trading only ·
+    every recommendation is a hypothetical research output.
+  </footer>
+</body>
+</html>

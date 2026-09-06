@@ -1,0 +1,84 @@
+# Signal Forge — developer workflow.
+# Everything runs through `uv`; no global installs required.
+
+UV ?= uv
+RUN := $(UV) run
+
+.DEFAULT_GOAL := help
+
+.PHONY: help
+help: ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
+.PHONY: install
+install: ## Create venv + install runtime, dev group, and the optional LLM extra
+	$(UV) sync --extra llm
+
+.PHONY: install-min
+install-min: ## Runtime + dev group only (no LLM extra)
+	$(UV) sync
+
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+.PHONY: dev
+dev: ## Run API + in-process scheduler with reload
+	$(RUN) uvicorn signalforge.app.main:app --host 127.0.0.1 --port 8787 --reload
+
+.PHONY: seed
+seed: ## Load clearly-labelled SIMULATED demo data
+	$(RUN) signalforge seed
+
+.PHONY: migrate
+migrate: ## Alembic upgrade head
+	$(RUN) alembic upgrade head
+
+.PHONY: downgrade
+downgrade: ## Alembic downgrade -1
+	$(RUN) alembic downgrade -1
+
+.PHONY: backup
+backup: ## Snapshot the SQLite DB (optionally gpg-encrypted, prompts for passphrase)
+	$(RUN) signalforge backup
+
+.PHONY: killswitch-on
+killswitch-on: ## Engage the emergency kill switch
+	$(RUN) signalforge killswitch on --reason "manual (make)"
+
+.PHONY: killswitch-off
+killswitch-off: ## Release the emergency kill switch
+	$(RUN) signalforge killswitch off --reason "manual (make)"
+
+# ---------------------------------------------------------------------------
+# Quality gates
+# ---------------------------------------------------------------------------
+.PHONY: fmt
+fmt: ## Autofix: ruff --fix + black
+	$(RUN) ruff check --fix src tests
+	$(RUN) black src tests
+
+.PHONY: lint
+lint: ## Ruff + Black --check + mypy + import-linter
+	$(RUN) ruff check src tests
+	$(RUN) black --check src tests
+	$(RUN) mypy
+	$(RUN) lint-imports
+
+.PHONY: test
+test: ## Full test suite with coverage
+	$(RUN) pytest
+
+.PHONY: safety
+safety: ## Only the S1-S10 invariant tests
+	$(RUN) pytest -m safety
+
+.PHONY: secrets
+secrets: ## Scan the tree for committed secrets
+	$(RUN) detect-secrets scan --baseline .secrets.baseline
+
+.PHONY: check
+check: lint test ## Everything CI runs
