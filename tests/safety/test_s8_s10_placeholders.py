@@ -1,14 +1,14 @@
-"""S8 & S10 placeholders — implemented in Phase 1, tracked here so the suite is honest."""
+"""Tracker for safety invariants still landing later in Phase 1.
+
+S8 (stale feed disables live alerts) is now covered by
+``tests/data/test_freshness.py`` and the alert-policy tests.
+"""
 
 from __future__ import annotations
 
 import pytest
 
 pytestmark = pytest.mark.safety
-
-
-@pytest.mark.skip(reason="Phase 1 §1.3/§1.12: FreshnessGate disables live alerts on stale feeds")
-def test_s8_stale_feed_disables_live_alerts() -> None: ...
 
 
 @pytest.mark.skip(
