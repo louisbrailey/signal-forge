@@ -51,7 +51,14 @@ def test_every_default_job_is_wrapped_by_the_guard(
 def test_build_scheduler_registers_every_job(db_url: str) -> None:
     scheduler = build_scheduler()
     ids = {j.id for j in scheduler.get_jobs()}
-    assert {"ingest", "scan_all", "paper_mtm", "feed_probe", "daily_briefing"} <= ids
+    assert {
+        "ingest",
+        "scan_all",
+        "paper_mtm",
+        "feed_probe",
+        "daily_briefing",
+        "strategy_health",
+    } <= ids
 
 
 def test_catch_up_runs_when_no_scan_exists(db_url: str, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -110,6 +110,14 @@ def job_daily_briefing() -> None:
         build_and_store_briefing(session)
 
 
+def job_strategy_health() -> None:
+    from signalforge.db.session import session_scope
+    from signalforge.research.health_monitor import run_health_monitor
+
+    with session_scope() as session:
+        run_health_monitor(session)
+
+
 def default_job_specs() -> list[JobSpec]:
     specs = [
         JobSpec("ingest", job_ingest, 24 * 60, "Fetch daily bars for the universe"),
@@ -121,6 +129,14 @@ def default_job_specs() -> list[JobSpec]:
         JobSpec("daily_briefing", job_daily_briefing, 24 * 60, "Build the daily research briefing")
     )
     specs.append(JobSpec("alerts", job_alerts, 60, "Evaluate and dispatch alerts (policy-gated)"))
+    specs.append(
+        JobSpec(
+            "strategy_health",
+            job_strategy_health,
+            12 * 60,
+            "Compare live-paper vs OOS expectancy; downgrade/disable on shortfall",
+        )
+    )
     return specs
 
 

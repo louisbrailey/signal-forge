@@ -336,6 +336,33 @@ def briefing(
         typer.echo(json.dumps(payload["facts"], indent=2, default=str))
 
 
+@app.command("strategy-health")
+def strategy_health() -> None:
+    """Compare each strategy's live-paper expectancy to its OOS backtest.
+
+    Auto-downgrades/disables on a sustained, material shortfall (rules in
+    ResearchConfig.health_monitor). Every transition is written to the audit log.
+    """
+    ensure_not_engaged()
+    from signalforge.db.session import session_scope
+    from signalforge.research.health_monitor import run_health_monitor
+
+    with session_scope() as session:
+        assessments = run_health_monitor(session)
+
+    for a in assessments:
+        line = (
+            f"{a.strategy}@{a.version:<7} {a.action:<17} "
+            f"n={a.n_paper_trades:<4} live={a.paper_expectancy_r:+.3f}R "
+            f"oos={a.backtest_expectancy_r:+.3f}R z={a.z_score:+.2f}"
+        )
+        if a.action in ("downgrade", "disable"):
+            typer.secho(f"  {line}  {a.from_status} -> {a.to_status}", fg=typer.colors.RED)
+        else:
+            typer.echo(f"  {line}")
+    typer.echo("Research signal only — no order was placed.")
+
+
 @app.command()
 def alerts() -> None:
     """Evaluate the alert policy and dispatch anything due (nothing until enabled in Settings)."""
@@ -377,7 +404,13 @@ def run_scheduler() -> None:
 
 @app.command("run-job")
 def run_job(
-    name: Annotated[str, typer.Argument(help="ingest | scan_all | paper_mtm | feed_probe")],
+    name: Annotated[
+        str,
+        typer.Argument(
+            help="ingest | scan_all | paper_mtm | feed_probe | daily_briefing | alerts | "
+            "strategy_health"
+        ),
+    ],
 ) -> None:
     """Run one scheduled job once (kill-switch guarded)."""
     from signalforge.scheduler import default_job_specs, guarded

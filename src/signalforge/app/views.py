@@ -286,11 +286,16 @@ def journal_context(session: Session) -> dict[str, Any]:
 
 
 def strategies_context(session: Session) -> dict[str, Any]:
+    from signalforge.research.health_monitor import latest_health_by_strategy
+
+    health = latest_health_by_strategy(session)
+    hm_cfg = effective_research_config(session).health_monitor
     out: list[dict[str, Any]] = []
     for strat in default_strategies():
         spec = strat.spec()
         db_strat = session.scalar(select(Strategy).where(Strategy.name == spec.name))
         metric = latest_oos_metric(session, spec)
+        h = health.get(spec.name)
         out.append(
             {
                 "name": spec.name,
@@ -303,9 +308,30 @@ def strategies_context(session: Session) -> dict[str, Any]:
                 "known_failure_modes": list(spec.known_failure_modes),
                 "report_ref": spec.walkforward_result_ref,
                 "oos": metric.metrics_json if metric else None,
+                "health": (
+                    {
+                        "window": h.window_label,
+                        "paper_expectancy_r": round(h.paper_expectancy, 3),
+                        "backtest_expectancy_r": round(h.backtest_expectancy, 3),
+                        "z_score": round(h.z_score, 2),
+                        "action": h.action,
+                        "note": h.note,
+                        "evaluated_at": h.evaluated_at.isoformat(),
+                    }
+                    if h
+                    else None
+                ),
             }
         )
-    return {"strategies": out}
+    return {
+        "strategies": out,
+        "health_rules": {
+            "enabled": hm_cfg.enabled,
+            "min_paper_trades": hm_cfg.min_paper_trades,
+            "downgrade_z": hm_cfg.downgrade_z,
+            "disable_z": hm_cfg.disable_z,
+        },
+    }
 
 
 def settings_context(session: Session) -> dict[str, Any]:

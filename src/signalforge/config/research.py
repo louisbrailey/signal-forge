@@ -17,6 +17,7 @@ from signalforge.domain import Horizon
 __all__ = [
     "DataQualityConfig",
     "EventFilters",
+    "HealthMonitorConfig",
     "Horizon",
     "LiquidityFilters",
     "QualityThresholds",
@@ -63,6 +64,26 @@ class QualityThresholds(BaseModel):
     min_oos_ci_low_r: float = -0.15  # bootstrap lower bound not deeply negative
     min_oos_trades: PositiveInt = 20  # enough OOS trades to trust the number
     require_backtest: bool = True  # no committed backtest => NO TRADE
+
+
+class HealthMonitorConfig(BaseModel):
+    """Rules for downgrading/disabling a strategy after sustained live-paper
+    underperformance versus its out-of-sample expectation (ARCHITECTURE.md §5.3).
+
+    All rules are here (version-controlled, hashed into ``config_hash``), shown in
+    Strategy Lab, and every transition is written to ``audit_log``.
+    """
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    enabled: bool = True
+    # Closed paper trades required before live expectancy is compared at all.
+    min_paper_trades: PositiveInt = 20
+    # z = (paper_expectancy - oos_expectancy) / stderr(paper). Both gates also
+    # require paper expectancy to be outright negative, so a strategy that is
+    # merely below a high backtest bar but still profitable is left alone.
+    downgrade_z: float = -2.0  # paper_approved -> experimental
+    disable_z: float = -3.5  # experimental -> disabled (severe, sustained)
 
 
 class DataQualityConfig(BaseModel):
@@ -132,6 +153,7 @@ class ResearchConfig(BaseModel):
     events: EventFilters = Field(default_factory=EventFilters)
     data_quality: DataQualityConfig = Field(default_factory=DataQualityConfig)
     quality_gates: QualityThresholds = Field(default_factory=QualityThresholds)
+    health_monitor: HealthMonitorConfig = Field(default_factory=HealthMonitorConfig)
 
     # Backtest cost assumptions (displayed on every candidate + report)
     commission_per_share: NonNegativeFloat = 0.0

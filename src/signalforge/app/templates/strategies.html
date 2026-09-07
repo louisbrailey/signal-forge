@@ -6,6 +6,16 @@
 <code>paper_approved</code> — promotion is manual and audited. On the fixture data every strategy has negative
 out-of-sample expectancy, so none should be promoted.</p>
 
+<div class="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+  <span class="font-semibold text-slate-700">Health monitor</span> —
+  {% if health_rules.enabled %}enabled{% else %}<span class="text-red-700">disabled</span>{% endif %}.
+  Needs ≥ {{ health_rules.min_paper_trades }} closed paper trades, then compares live-paper expectancy
+  to the OOS backtest. Auto-downgrade <code>paper_approved → experimental</code> at
+  z ≤ {{ '%.1f' | format(health_rules.downgrade_z) }}; auto-disable an experimental strategy at
+  z ≤ {{ '%.1f' | format(health_rules.disable_z) }} (both also require negative live expectancy).
+  Every transition is written to the audit log.
+</div>
+
 <div class="mt-4 space-y-4">
 {% for s in strategies %}
 <div class="rounded-lg border border-slate-200 bg-white p-4">
@@ -24,6 +34,18 @@ out-of-sample expectancy, so none should be promoted.</p>
     max DD {{ '%.1f' | format(s.oos.get('max_drawdown_r') or 0) }}R</div>
   {% else %}
   <div class="mt-2 text-sm text-slate-400">no committed backtest — run <code>signalforge backtest-report</code></div>
+  {% endif %}
+  {% if s.health %}
+  <div class="mt-2 rounded border px-2 py-1 text-xs
+    {{ 'border-red-200 bg-red-50 text-red-700' if s.health.action in ('downgrade', 'disable')
+       else 'border-slate-200 bg-slate-50 text-slate-600' }}">
+    Health ({{ s.health.window }}): live {{ '%+.3f' | format(s.health.paper_expectancy_r) }}R vs
+    OOS {{ '%+.3f' | format(s.health.backtest_expectancy_r) }}R · z {{ '%+.2f' | format(s.health.z_score) }}
+    {% if s.health.action in ('downgrade', 'disable') %}· <strong>auto-{{ s.health.action }}d</strong>{% endif %}
+    <span class="text-slate-400">· {{ s.health.evaluated_at[:16] }}</span>
+  </div>
+  {% else %}
+  <div class="mt-2 text-xs text-slate-400">Health: not enough closed paper trades yet.</div>
   {% endif %}
   <details class="mt-2 text-sm"><summary class="cursor-pointer text-slate-500">Known failure modes</summary>
     <ul class="mt-1 list-disc pl-5 text-slate-700">{% for f in s.known_failure_modes %}<li>{{ f }}</li>{% endfor %}</ul>
