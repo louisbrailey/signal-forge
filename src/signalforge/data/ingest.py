@@ -9,8 +9,9 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from signalforge.data.adapters.base import (
@@ -34,6 +35,9 @@ from signalforge.db.models import (
 from signalforge.db.types import utcnow
 from signalforge.domain import DataQualityFlag
 from signalforge.observability import get_logger
+
+if TYPE_CHECKING:
+    from signalforge.db.models import IngestionRun
 
 _log = get_logger("ingest")
 
@@ -302,6 +306,139 @@ def ingest_universe(
         errors=len(report.errors),
     )
     return report
+
+
+def _symbol_gaps(
+    session: Session, instrument_id: int, source: str, start: date, end: date
+) -> list[tuple[str, str]]:
+    """Ranges of trading sessions with no bar for this symbol/source in [start, end]."""
+    from signalforge.data.calendar import sessions as _sessions
+
+    have = {
+        d
+        for (d,) in session.execute(
+            select(OHLCVDaily.session_date).where(
+                OHLCVDaily.instrument_id == instrument_id,
+                OHLCVDaily.source == source,
+                OHLCVDaily.session_date >= start,
+                OHLCVDaily.session_date <= end,
+            )
+        )
+    }
+    expected = list(_sessions(start, min(end, date.today())))
+    gaps: list[tuple[str, str]] = []
+    run_start: date | None = None
+    prev: date | None = None
+    for d in expected:
+        if d in have:
+            if run_start is not None and prev is not None:
+                gaps.append((run_start.isoformat(), prev.isoformat()))
+            run_start = None
+        else:
+            if run_start is None:
+                run_start = d
+            prev = d
+    if run_start is not None and prev is not None:
+        gaps.append((run_start.isoformat(), prev.isoformat()))
+    return gaps
+
+
+def ingest_daily_history(
+    session: Session,
+    adapter: MarketDataAdapter,
+    symbols: list[str],
+    start: date,
+    end: date,
+    *,
+    kind: str = "incremental",
+    earliest_available: date | None = None,
+    earliest_probe_at: datetime | None = None,
+    resume_run_id: int | None = None,
+) -> IngestionRun:
+    """Incremental, idempotent, auditable daily-history ingest.
+
+    Writes an ``IngestionRun`` recording the requested window, discovered earliest
+    date, actual coverage, per-symbol gaps, and failures. Re-running (or resuming
+    ``resume_run_id``) only fetches rows not already stored.
+    """
+    from signalforge.db.models import IngestionRun as _Run
+    from signalforge.db.models import Instrument as _Inst
+
+    run: _Run
+    if resume_run_id is not None:
+        found = session.get(_Run, resume_run_id)
+        if found is None:
+            raise ValueError(f"ingestion_run {resume_run_id} not found")
+        run = found
+    else:
+        run = _Run(
+            provider=adapter.provider_name,
+            feed_type=FeedType.BAR_DAILY,
+            kind=kind,
+            requested_start=start,
+            requested_end=end,
+            adjusted=True,
+            symbols_requested=list(symbols),
+            earliest_available_date=earliest_available,
+            earliest_probe_at=earliest_probe_at,
+            status="running",
+            started_at=utcnow(),
+        )
+        session.add(run)
+        session.flush()
+
+    ok: list[str] = list(run.symbols_ok or [])
+    failed: dict[str, str] = dict(run.symbols_failed or {})
+    gaps: dict[str, list[list[str]]] = {}
+    written = int(run.bars_written or 0)
+    skipped = int(run.bars_skipped or 0)
+
+    for sym in symbols:
+        if sym in ok:  # resume: already done cleanly
+            continue
+        r = ingest_symbol(session, adapter, sym, start, end)
+        written += r.bars_written
+        skipped += r.bars_skipped
+        if r.error:
+            failed[sym] = r.error[:200]
+            ok = [s for s in ok if s != sym]
+        else:
+            failed.pop(sym, None)
+            if sym not in ok:
+                ok.append(sym)
+        inst = session.scalar(select(_Inst).where(_Inst.symbol == sym))
+        if inst is not None:
+            g = _symbol_gaps(session, inst.id, adapter.provider_name, start, end)
+            if g:
+                gaps[sym] = [list(x) for x in g]
+        # checkpoint after every symbol
+        run.symbols_ok = list(ok)
+        run.symbols_failed = failed
+        run.gaps_json = gaps
+        run.bars_written = written
+        run.bars_skipped = skipped
+        session.flush()
+
+    cov = session.execute(
+        select(func.min(OHLCVDaily.session_date), func.max(OHLCVDaily.session_date)).where(
+            OHLCVDaily.source == adapter.provider_name
+        )
+    ).one()
+    run.coverage_first, run.coverage_last = cov[0], cov[1]
+    run.status = "ok" if not failed else ("partial" if ok else "failed")
+    run.finished_at = utcnow()
+    session.flush()
+    _log.info(
+        "ingest.history_done",
+        provider=adapter.provider_name,
+        kind=kind,
+        written=written,
+        skipped=skipped,
+        ok=len(ok),
+        failed=len(failed),
+        gap_symbols=len(gaps),
+    )
+    return run
 
 
 def ingest_intraday_symbol(

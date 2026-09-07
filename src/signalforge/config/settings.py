@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     market_data_api_key: SecretStr = SecretStr("")
     market_data_provider_secondary: str = ""
     market_data_api_key_secondary: SecretStr = SecretStr("")
+    # Minimum seconds between HTTP requests to the market-data provider. Default
+    # is the Massive Basic 5-req/min pace; lower it for a higher-tier plan.
+    market_data_min_request_spacing_s: float = 12.1
 
     # --- Options data (education / simulation only; read-only) ---
     # Reuses market_data_api_key unless a distinct key is set here. No provider

@@ -11,9 +11,11 @@ from signalforge.db.models.market import (
     CorporateAction,
     DataFeedStatus,
     DataQualityFlagRow,
+    DataValidationReport,
     EarningsEvent,
     EconomicEvent,
     FundamentalsSnapshot,
+    IngestionRun,
     Instrument,
     NewsItem,
     OHLCVDaily,
@@ -65,6 +67,7 @@ from signalforge.db.models.system import (
 __all__ = [
     "Base",
     # market
+    "IngestionRun",
     "Instrument",
     "Watchlist",
     "WatchlistMember",
@@ -75,6 +78,7 @@ __all__ = [
     "CorporateAction",
     "EarningsEvent",
     "EconomicEvent",
+    "DataValidationReport",
     "NewsItem",
     "OptionContract",
     "OptionQuoteSnapshot",

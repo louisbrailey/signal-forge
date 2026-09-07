@@ -38,7 +38,12 @@ from signalforge.killswitch import ensure_not_engaged
 _BASE_URL = "https://api.massive.com"
 _SYMBOL_RE = re.compile(r"[A-Z][A-Z0-9.-]{0,14}")
 # Basic plan: 5 requests/minute. Pace conservatively, including between symbols.
+# Overridable via MARKET_DATA_MIN_REQUEST_SPACING_S for higher-tier plans.
 _MIN_REQUEST_SPACING_S = 12.1
+_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+_MAX_ATTEMPTS = 5
+_BACKOFF_BASE_S = 1.5
+_BACKOFF_CAP_S = 30.0
 
 
 class MassiveAdapter:
@@ -46,11 +51,21 @@ class MassiveAdapter:
 
     provider_name = "massive"
 
-    def __init__(self, api_key: str | None = None, *, client: httpx.Client | None = None) -> None:
-        self._key = (
-            get_settings().market_data_api_key.get_secret_value() if api_key is None else api_key
-        )
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        client: httpx.Client | None = None,
+        min_request_spacing_s: float | None = None,
+    ) -> None:
+        settings = get_settings()
+        self._key = settings.market_data_api_key.get_secret_value() if api_key is None else api_key
         self._client = client
+        self._spacing_s = (
+            min_request_spacing_s
+            if min_request_spacing_s is not None
+            else settings.market_data_min_request_spacing_s
+        )
         self._last_request = 0.0
         self._raw: dict[tuple[str, date, date], str] = {}
 
@@ -71,37 +86,67 @@ class MassiveAdapter:
             ),
         )
 
+    def _sleep(self, seconds: float) -> None:
+        # break the wait into short chunks so the kill switch stays responsive
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            ensure_not_engaged()
+            time.sleep(min(0.2, max(0.0, end - time.monotonic())))
+
     def _request(self, path: str) -> str:
         ensure_not_engaged()
         if not self._key:
             raise AdapterError("Massive API key missing; set MARKET_DATA_API_KEY locally")
-        # Real HTTP path only: throttle to the Basic-plan rate. Injected clients
-        # (tests) skip the wait.
-        while self._client is None:
-            waited = time.monotonic() - self._last_request
-            if waited >= _MIN_REQUEST_SPACING_S:
-                break
-            ensure_not_engaged()
-            time.sleep(0.1)
-        ensure_not_engaged()
-        self._last_request = time.monotonic()
 
         headers = {"Authorization": f"Bearer {self._key}"}
-        try:
-            getter = httpx.get if self._client is None else self._client.get
-            response = getter(
-                _BASE_URL + path, headers=headers, timeout=15.0, follow_redirects=False
-            )
-        except httpx.HTTPError:
-            raise AdapterError("Massive network request failed") from None
-        ensure_not_engaged()
-        if response.status_code != 200:
-            raise AdapterError(
-                f"Massive HTTP {response.status_code}",
-                rate_limited=response.status_code == 429,
-            )
-        # Never surface a provider body that might echo the credential back.
-        return response.text.replace(self._key, "[REDACTED]")
+        last_status: int | None = None
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            # Pace to the provider rate limit (injected test clients skip the wait).
+            while self._client is None:
+                waited = time.monotonic() - self._last_request
+                if waited >= self._spacing_s:
+                    break
+                ensure_not_engaged()
+                time.sleep(0.1)
+            ensure_not_engaged()
+            self._last_request = time.monotonic()
+
+            try:
+                getter = httpx.get if self._client is None else self._client.get
+                response = getter(
+                    _BASE_URL + path, headers=headers, timeout=15.0, follow_redirects=False
+                )
+            except httpx.HTTPError:
+                if attempt >= _MAX_ATTEMPTS:
+                    raise AdapterError("Massive network request failed") from None
+                self._sleep(min(_BACKOFF_CAP_S, _BACKOFF_BASE_S * 2 ** (attempt - 1)))
+                continue
+            ensure_not_engaged()
+
+            if response.status_code == 200:
+                # Never surface a provider body that might echo the credential back.
+                return response.text.replace(self._key, "[REDACTED]")
+
+            last_status = response.status_code
+            if response.status_code in _RETRY_STATUS and attempt < _MAX_ATTEMPTS:
+                retry_after = response.headers.get("retry-after", "")
+                delay = (
+                    float(retry_after)
+                    if retry_after.replace(".", "", 1).isdigit()
+                    else min(_BACKOFF_CAP_S, _BACKOFF_BASE_S * 2 ** (attempt - 1))
+                )
+                self._sleep(delay)
+                continue
+            break
+
+        raise AdapterError(
+            (
+                f"Massive HTTP {last_status} after {_MAX_ATTEMPTS} attempts"
+                if last_status in _RETRY_STATUS
+                else f"Massive HTTP {last_status}"
+            ),
+            rate_limited=last_status == 429,
+        )
 
     def fetch_daily_bars(self, symbol: str, start: date, end: date) -> Sequence[DailyBar]:
         symbol = symbol.upper().strip()

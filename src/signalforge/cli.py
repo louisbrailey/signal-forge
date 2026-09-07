@@ -63,6 +63,147 @@ def killswitch_status() -> None:
 
 providers_app = typer.Typer(help="Verify provider entitlements (read-only; never prints secrets).")
 app.add_typer(providers_app, name="providers")
+data_app = typer.Typer(help="Historical-data pipeline: discover depth, ingest, validate, coverage.")
+app.add_typer(data_app, name="data")
+
+
+@data_app.command("discover-history")
+def data_discover_history() -> None:
+    """Probe how far back the provider actually serves daily bars (no config change)."""
+    ensure_not_engaged()
+    from signalforge.config import get_settings
+    from signalforge.data.adapters.registry import get_primary_adapter
+    from signalforge.data.discover import discover_history_depth
+
+    depth = discover_history_depth(get_primary_adapter(get_settings()))
+    typer.secho(
+        f"earliest available: {depth.earliest_available}  "
+        f"(first 403 at {depth.first_unavailable}; ref {depth.reference_symbol})",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo(f"safe ingest start (+45d margin): {depth.safe_start()}")
+    typer.echo("Recorded per ingestion run — not hard-coded.")
+
+
+@data_app.command("ingest-history")
+def data_ingest_history(
+    since: Annotated[
+        str, typer.Option(help="Override start YYYY-MM-DD; default = discovered.")
+    ] = "",
+    symbols: Annotated[
+        str, typer.Option(help="Comma-separated; default: configured universe.")
+    ] = "",
+    resume: Annotated[int, typer.Option(help="Resume an existing ingestion_run id.")] = 0,
+) -> None:
+    """Incremental, idempotent, auditable deep-history ingest with a recorded run."""
+    ensure_not_engaged()
+    from datetime import date as _date
+
+    from signalforge.config import get_settings
+    from signalforge.data.adapters.registry import get_primary_adapter
+    from signalforge.data.discover import discover_history_depth
+    from signalforge.data.ingest import ingest_daily_history
+    from signalforge.db.session import session_scope
+
+    s = get_settings()
+    adapter = get_primary_adapter(s)
+    syms = [x.strip().upper() for x in symbols.split(",") if x.strip()] or list(s.research.universe)
+    end = _date.today()
+    earliest = probe_at = None
+    if since:
+        start = _date.fromisoformat(since)
+    else:
+        depth = discover_history_depth(adapter)
+        start = depth.safe_start()
+        earliest, probe_at = depth.earliest_available, None
+        from datetime import datetime as _dt
+
+        probe_at = _dt.fromisoformat(depth.probed_at)
+        typer.echo(f"discovered earliest {depth.earliest_available}; ingesting from {start}")
+
+    with session_scope() as session:
+        run = ingest_daily_history(
+            session,
+            adapter,
+            syms,
+            start,
+            end,
+            kind="full_history",
+            earliest_available=earliest,
+            earliest_probe_at=probe_at,
+            resume_run_id=resume or None,
+        )
+        run_id, status, w, sk = run.id, run.status, run.bars_written, run.bars_skipped
+        cov = (run.coverage_first, run.coverage_last)
+        failed = dict(run.symbols_failed or {})
+    typer.secho(
+        f"ingestion_run #{run_id}: {status} — {w} written, {sk} already present; "
+        f"coverage {cov[0]}..{cov[1]}",
+        fg=typer.colors.GREEN if status == "ok" else typer.colors.YELLOW,
+    )
+    for sym, err in failed.items():
+        typer.secho(f"  ! {sym}: {err}", fg=typer.colors.RED)
+    typer.echo("Research signal only — no order was placed.")
+
+
+@data_app.command("validate")
+def data_validate(
+    symbols: Annotated[
+        str, typer.Option(help="Comma-separated; default: configured universe.")
+    ] = "",
+) -> None:
+    """Run the data-quality validation pass and persist a report."""
+    from signalforge.config import get_settings
+    from signalforge.data.validate import validate_daily
+    from signalforge.db.session import session_scope
+
+    s = get_settings()
+    syms = [x.strip().upper() for x in symbols.split(",") if x.strip()] or list(s.research.universe)
+    with session_scope() as session:
+        res = validate_daily(session, syms, source=s.market_data_provider)
+        checks = [(c.name, c.passed, c.detail) for c in res.checks]
+        passed = res.passed
+    typer.secho(
+        f"validation: {'PASS' if passed else 'FAIL'}",
+        fg=typer.colors.GREEN if passed else typer.colors.RED,
+    )
+    for name, ok, detail in checks:
+        typer.secho(
+            f"  [{'ok ' if ok else 'FAIL'}] {name}: {detail}", fg=None if ok else typer.colors.RED
+        )
+
+
+@data_app.command("coverage")
+def data_coverage(
+    symbols: Annotated[str, typer.Option()] = "",
+) -> None:
+    """Per-symbol first/last/n-bars for the configured provider."""
+    from sqlalchemy import func, select
+
+    from signalforge.config import get_settings
+    from signalforge.db.models import Instrument, OHLCVDaily
+    from signalforge.db.session import session_scope
+
+    s = get_settings()
+    syms = [x.strip().upper() for x in symbols.split(",") if x.strip()] or list(s.research.universe)
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                Instrument.symbol,
+                func.count(OHLCVDaily.id),
+                func.min(OHLCVDaily.session_date),
+                func.max(OHLCVDaily.session_date),
+            )
+            .join(Instrument, OHLCVDaily.instrument_id == Instrument.id)
+            .where(Instrument.symbol.in_(syms), OHLCVDaily.source == s.market_data_provider)
+            .group_by(Instrument.symbol)
+            .order_by(Instrument.symbol)
+        ).all()
+    total = 0
+    for sym, n, lo, hi in rows:
+        total += n
+        typer.echo(f"  {sym:8} {n:6d}  {lo}..{hi}")
+    typer.echo(f"  {'TOTAL':8} {total:6d}  across {len(rows)}/{len(syms)} symbols")
 
 
 @providers_app.command("verify")

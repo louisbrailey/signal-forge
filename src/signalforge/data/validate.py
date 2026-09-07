@@ -1,0 +1,236 @@
+"""Data-quality validation over the normalized daily store.
+
+Read-only. Produces a structured report (persisted as ``DataValidationReport``)
+covering chronological continuity, duplicates, missing sessions vs the XNYS
+calendar, symbol coverage, OHLCV sanity, split/dividend-adjustment behaviour, and
+timezone/date consistency. Callers gate ingestion / backtests on ``passed``.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
+from itertools import pairwise
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from signalforge.data.calendar import sessions
+from signalforge.db.models import DataValidationReport, Instrument, OHLCVDaily
+from signalforge.db.types import utcnow
+
+
+@dataclass(slots=True)
+class Check:
+    name: str
+    passed: bool
+    detail: str = ""
+
+
+@dataclass(slots=True)
+class ValidationResult:
+    provider: str
+    symbols: list[str]
+    checks: list[Check] = field(default_factory=list)
+    findings: list[str] = field(default_factory=list)
+    coverage: dict[str, dict[str, object]] = field(default_factory=dict)
+
+    @property
+    def passed(self) -> bool:
+        return all(c.passed for c in self.checks)
+
+    def to_row(self) -> DataValidationReport:
+        return DataValidationReport(
+            provider=self.provider,
+            symbols=self.symbols,
+            ran_at=utcnow(),
+            passed=self.passed,
+            checks_json={c.name: {"passed": c.passed, "detail": c.detail} for c in self.checks},
+            findings_json=self.findings,
+        )
+
+
+# tolerance: >0.5% median-relative drift in close/adj_close on a NON-split day is odd
+_ADJ_DRIFT_TOL = 0.005
+_MISSING_SESSION_TOL_PCT = 2.0  # allow up to 2% missing sessions (holidays vendors skip, halts)
+
+
+def validate_daily(
+    session: Session,
+    symbols: list[str],
+    *,
+    source: str,
+    persist: bool = True,
+) -> ValidationResult:
+    res = ValidationResult(provider=source, symbols=list(symbols))
+    today = date.today()
+
+    rows_by_sym: dict[str, list[OHLCVDaily]] = defaultdict(list)
+    for sym in symbols:
+        inst = session.scalar(select(Instrument).where(Instrument.symbol == sym))
+        if inst is None:
+            res.findings.append(f"{sym}: no instrument row")
+            continue
+        rows_by_sym[sym] = list(
+            session.scalars(
+                select(OHLCVDaily)
+                .where(OHLCVDaily.instrument_id == inst.id, OHLCVDaily.source == source)
+                .order_by(OHLCVDaily.session_date)
+            )
+        )
+
+    covered = [s for s in symbols if rows_by_sym.get(s)]
+    res.checks.append(
+        Check(
+            "symbol_coverage",
+            passed=len(covered) == len(symbols),
+            detail=f"{len(covered)}/{len(symbols)} symbols have {source} data"
+            + (
+                f"; missing: {sorted(set(symbols) - set(covered))}"
+                if len(covered) != len(symbols)
+                else ""
+            ),
+        )
+    )
+
+    # --- per-symbol coverage summary ---
+    for sym in covered:
+        rows = rows_by_sym[sym]
+        res.coverage[sym] = {
+            "first": rows[0].session_date.isoformat(),
+            "last": rows[-1].session_date.isoformat(),
+            "n_bars": len(rows),
+        }
+
+    # --- chronological continuity + duplicates (per symbol) ---
+    disorder, dupes = [], []
+    for sym in covered:
+        ds = [r.session_date for r in rows_by_sym[sym]]
+        if any(b <= a for a, b in pairwise(ds)):
+            disorder.append(sym)
+        if len(ds) != len(set(ds)):
+            dupes.append(sym)
+    res.checks.append(
+        Check("chronological_order", not disorder, f"out-of-order/dup dates: {disorder or 'none'}")
+    )
+    res.checks.append(
+        Check("no_duplicate_sessions", not dupes, f"duplicate session dates: {dupes or 'none'}")
+    )
+
+    # DB-level duplicate guard (unique constraint should make this impossible)
+    dup_count = session.scalar(
+        select(func.count()).select_from(
+            select(OHLCVDaily.instrument_id, OHLCVDaily.session_date, OHLCVDaily.source)
+            .where(OHLCVDaily.source == source)
+            .group_by(OHLCVDaily.instrument_id, OHLCVDaily.session_date, OHLCVDaily.source)
+            .having(func.count() > 1)
+            .subquery()
+        )
+    )
+    res.checks.append(
+        Check(
+            "db_unique_bars",
+            (dup_count or 0) == 0,
+            f"{dup_count} (instrument,date,source) groups have >1 row",
+        )
+    )
+
+    # --- missing sessions vs XNYS calendar ---
+    missing_detail = []
+    for sym in covered:
+        rows = rows_by_sym[sym]
+        have = {r.session_date for r in rows}
+        expected = set(sessions(rows[0].session_date, min(rows[-1].session_date, today)))
+        miss = sorted(expected - have)
+        pct = 100.0 * len(miss) / max(len(expected), 1)
+        if pct > _MISSING_SESSION_TOL_PCT:
+            missing_detail.append(f"{sym}: {len(miss)} missing ({pct:.1f}%) e.g. {miss[:3]}")
+    res.checks.append(
+        Check(
+            "session_completeness",
+            not missing_detail,
+            "; ".join(missing_detail) or "within tolerance",
+        )
+    )
+
+    # --- OHLCV sanity ---
+    bad_ohlcv = []
+    for sym in covered:
+        n_bad = sum(
+            1
+            for r in rows_by_sym[sym]
+            if min(r.open, r.high, r.low, r.close) <= 0
+            or r.volume < 0
+            or r.high < max(r.open, r.close)
+            or r.low > min(r.open, r.close)
+            or r.high < r.low
+        )
+        if n_bad:
+            bad_ohlcv.append(f"{sym}:{n_bad}")
+    res.checks.append(
+        Check("ohlcv_sanity", not bad_ohlcv, f"rows failing OHLC relations: {bad_ohlcv or 'none'}")
+    )
+
+    # --- split/dividend adjustment behaviour ---
+    adj_findings = []
+    for sym in covered:
+        rows = rows_by_sym[sym]
+        with_adj = [r for r in rows if r.adj_close is not None and r.close]
+        if not with_adj:
+            adj_findings.append(f"{sym}: no adj_close on any row")
+            continue
+        ratios = [r.adj_close / r.close for r in with_adj]  # type: ignore[operator]
+        # ratio should be <= ~1 and change only at split/div dates (few jumps)
+        jumps = sum(
+            1 for a, b in pairwise(ratios) if abs(b - a) / max(abs(a), 1e-9) > _ADJ_DRIFT_TOL
+        )
+        if max(ratios) > 1.02:
+            adj_findings.append(f"{sym}: adj_close exceeds close (ratio max {max(ratios):.3f})")
+        # a huge number of jumps means adj_close is noisy / not a clean back-adjustment
+        if jumps > max(12, len(ratios) // 40):
+            adj_findings.append(
+                f"{sym}: {jumps} adj-ratio jumps (> expected corporate-action count)"
+            )
+    res.checks.append(
+        Check(
+            "adjustment_behaviour",
+            not adj_findings,
+            "; ".join(adj_findings) or "clean back-adjustment",
+        )
+    )
+
+    # --- timezone / date consistency ---
+    tz_bad = []
+    for sym in covered:
+        rows = rows_by_sym[sym]
+        if any(r.session_date > today for r in rows):
+            tz_bad.append(f"{sym}: future-dated bar")
+        ing = [r.ingested_at for r in rows if r.ingested_at is not None]
+        if ing and any(t.tzinfo is None for t in ing):
+            tz_bad.append(f"{sym}: naive ingested_at timestamp")
+    res.checks.append(
+        Check(
+            "timezone_consistency",
+            not tz_bad,
+            "; ".join(tz_bad) or "session_date tz-naive dates, ingested_at UTC-aware",
+        )
+    )
+
+    if persist:
+        session.add(res.to_row())
+        session.flush()
+    return res
+
+
+def latest_validation(session: Session, source: str) -> DataValidationReport | None:
+    return session.scalar(
+        select(DataValidationReport)
+        .where(DataValidationReport.provider == source)
+        .order_by(DataValidationReport.ran_at.desc())
+        .limit(1)
+    )
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(UTC).isoformat()

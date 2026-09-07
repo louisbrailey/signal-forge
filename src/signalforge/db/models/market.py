@@ -284,6 +284,57 @@ class RawPayloadCache(Base, IntPK):
     received_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
 
 
+class IngestionRun(Base, IntPK):
+    """One auditable historical-data ingestion. Records what was *requested* and
+    what was *actually* obtained, plus gaps / failures — so coverage can never be
+    silently over- or under-stated. Resumable: a run in ``running`` state can be
+    re-entered and only missing symbols/rows are fetched."""
+
+    __tablename__ = "ingestion_run"
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    feed_type: Mapped[FeedType] = mapped_column(SAEnum(FeedType, **_ENUM_KW))
+    kind: Mapped[str] = mapped_column(
+        String(16), default="incremental"
+    )  # incremental | full_history
+    requested_start: Mapped[date] = mapped_column()
+    requested_end: Mapped[date] = mapped_column()
+    adjusted: Mapped[bool] = mapped_column(default=True)  # split-adjusted request
+    symbols_requested: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # discovered provider limit (never hard-coded): earliest 'from' that returns data
+    earliest_available_date: Mapped[date | None] = mapped_column(default=None)
+    earliest_probe_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
+    # actual coverage after the run
+    coverage_first: Mapped[date | None] = mapped_column(default=None)
+    coverage_last: Mapped[date | None] = mapped_column(default=None)
+    bars_written: Mapped[int] = mapped_column(Integer, default=0)
+    bars_skipped: Mapped[int] = mapped_column(Integer, default=0)
+    symbols_ok: Mapped[list[str]] = mapped_column(JSON, default=list)
+    symbols_failed: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # symbol -> error
+    gaps_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # symbol -> [ranges]
+    status: Mapped[str] = mapped_column(
+        String(12), default="running"
+    )  # running | ok | partial | failed
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
+    notes: Mapped[str] = mapped_column(Text, default="")
+
+
+class DataValidationReport(Base, IntPK):
+    """Result of a data-quality validation pass over the daily store."""
+
+    __tablename__ = "data_validation_report"
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    symbols: Mapped[list[str]] = mapped_column(JSON, default=list)
+    ran_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    passed: Mapped[bool] = mapped_column(default=False)
+    checks_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict
+    )  # check -> {passed, detail}
+    findings_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
 # --------------------------------------------------------------------------- #
 # Data health (§5.2)
 # --------------------------------------------------------------------------- #
