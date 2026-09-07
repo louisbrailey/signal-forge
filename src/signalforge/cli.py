@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
+
+if TYPE_CHECKING:
+    from signalforge.research.portfolio_metrics import PortfolioMetrics
 
 from signalforge import __version__
 from signalforge.audit import record
@@ -517,6 +520,203 @@ def ingest_intraday_cmd(
     )
     for err in report.errors:
         typer.secho(f"  ! {err}", fg=typer.colors.RED)
+
+
+@app.command("backtest-extended")
+def backtest_extended(
+    out_file: Annotated[str, typer.Option()] = "reports/EXTENDED_HISTORY_RESULTS.md",
+    sealed_days: Annotated[
+        int, typer.Option(help="Length of the untouched final-test window.")
+    ] = 365,
+    n_folds: Annotated[
+        int, typer.Option(help="Rolling walk-forward folds over the pre-sealed span.")
+    ] = 4,
+) -> None:
+    """Frozen-strategy backtest over the full ingested history, with train / rolling
+    walk-forward / sealed-test segmentation, per-regime breakdown, portfolio-level
+    metrics (CAGR, vol, Sharpe/Sortino, max DD, turnover, exposure, hit rate,
+    profit factor) net of the project's cost model, and a benchmark comparison.
+    Does not tune or modify any strategy."""
+    ensure_not_engaged()
+    from pathlib import Path
+
+    from sqlalchemy import func, select
+
+    from signalforge.backtest.costs import CostModel
+    from signalforge.backtest.regime import label_regimes
+    from signalforge.config import get_settings
+    from signalforge.data.series import PriceSeries
+    from signalforge.db.models import Instrument, OHLCVDaily
+    from signalforge.db.session import session_scope
+    from signalforge.domain import Horizon
+    from signalforge.research.backtest_runner import run_strategy_over_universe
+    from signalforge.research.portfolio_metrics import compute_portfolio_metrics
+    from signalforge.research.strategies import default_strategies
+
+    rc = get_settings().research
+    symbols = list(rc.universe)
+    cost_model = CostModel(
+        commission_per_share=rc.commission_per_share,
+        commission_min_per_order=rc.commission_min_per_order,
+        slippage_bps=rc.slippage_bps,
+        half_spread_fill_penalty=rc.half_spread_fill_penalty,
+    )
+    lines: list[str] = []
+
+    with session_scope() as session:
+        first, last = session.execute(
+            select(func.min(OHLCVDaily.session_date), func.max(OHLCVDaily.session_date)).where(
+                OHLCVDaily.source == get_settings().market_data_provider
+            )
+        ).one()
+        if first is None:
+            typer.secho("no real daily data ingested", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+        sealed_start = last - timedelta(days=sealed_days)
+
+        # benchmark: SPY buy-and-hold over the same span
+        spy = PriceSeries.load(session, "SPY", first, last)
+        bench_ret = (spy.close[-1] / spy.close[0] - 1.0) * 100 if len(spy) > 1 else 0.0
+        bench_sealed = None
+        if len(spy) > 1:
+            idx = [i for i, d in enumerate(spy.dates) if d >= sealed_start]
+            if idx:
+                bench_sealed = (spy.close[-1] / spy.close[idx[0]] - 1.0) * 100
+
+        regimes = label_regimes(spy) if len(spy) else {}
+        cov_rows = session.execute(
+            select(Instrument.symbol, func.count(OHLCVDaily.id), func.min(OHLCVDaily.session_date))
+            .join(Instrument, OHLCVDaily.instrument_id == Instrument.id)
+            .where(
+                Instrument.symbol.in_(symbols),
+                OHLCVDaily.source == get_settings().market_data_provider,
+            )
+            .group_by(Instrument.symbol)
+        ).all()
+
+        lines += [
+            "# Extended-history backtest (frozen strategy)",
+            "",
+            "> Hypothetical research output. Costs from the project cost model are baked in. "
+            "The strategy, thresholds, scoring and sizing are unchanged from the prior baseline — "
+            "results are directly comparable. No parameter was tuned in this phase.",
+            "",
+            f"- Data: `{get_settings().market_data_provider}` real daily bars, {first}..{last}",
+            f"- Universe: {len(symbols)} symbols "
+            f"({sum(1 for _, n, _ in cov_rows if n >= 2000)} with >=2000 sessions)",
+            f"- Cost model: {cost_model.slippage_bps} bps slippage + half-spread; "
+            f"commission {cost_model.commission_per_share}/sh",
+            f"- Sealed final-test window: **{sealed_start} .. {last}** (evaluated once)",
+            f"- Rolling walk-forward: {n_folds} contiguous folds over {first} .. {sealed_start}",
+            f"- Benchmark (SPY buy&hold): {bench_ret:+.1f}% full span"
+            + (f", {bench_sealed:+.1f}% sealed" if bench_sealed is not None else ""),
+            "",
+            "## Symbol coverage (survivorship note)",
+            "",
+            "| symbol | sessions | first |",
+            "|---|--:|---|",
+        ]
+        for sym, n, f0 in sorted(cov_rows):
+            lines.append(f"| {sym} | {n} | {f0} |")
+        lines += [
+            "",
+            "META has a short/gapped series (ticker discontinuity FB→META); XLC starts at its "
+            "2018 launch. The universe is a *fixed hand-picked list* of large-cap survivors — "
+            "**it embeds survivorship bias**: no delisted names, no point-in-time membership.",
+            "",
+            "## Per strategy",
+            "",
+        ]
+
+        for strat in default_strategies():
+            spec = strat.spec()
+            if spec.horizon is Horizon.INTRADAY:
+                lines += [f"### {spec.key}", "", "_intraday — no intraday history; skipped_", ""]
+                continue
+            full = run_strategy_over_universe(
+                session,
+                strat,
+                symbols,
+                first,
+                last,
+                cost_model=cost_model,
+                config_hash=rc.config_hash,
+            )
+            trades = full.trades
+            sealed = [t for t in trades if t.entry_date >= sealed_start]
+            pre = [t for t in trades if t.entry_date < sealed_start]
+            # rolling folds over the pre-sealed span
+            span = (sealed_start - first).days
+            fold_lines = []
+            for k in range(n_folds):
+                lo = first + timedelta(days=span * k // n_folds)
+                hi = first + timedelta(days=span * (k + 1) // n_folds)
+                ft = [t for t in pre if lo <= t.entry_date < hi]
+                pm = compute_portfolio_metrics(ft, span_start=lo, span_end=hi)
+                fold_lines.append(
+                    f"| fold {k + 1} ({lo}..{hi}) | {pm.n_trades} | {pm.total_return_pct:+.1f}% | "
+                    f"{pm.sharpe:+.2f} | {pm.max_drawdown_pct:.1f}% | {pm.hit_rate:.0%} |"
+                )
+            pm_full = compute_portfolio_metrics(trades, span_start=first, span_end=last)
+            pm_pre = compute_portfolio_metrics(pre, span_start=first, span_end=sealed_start)
+            pm_sealed = compute_portfolio_metrics(sealed, span_start=sealed_start, span_end=last)
+
+            by_regime: dict[str, list] = {}
+            for t in trades:
+                lbl = regimes.get(t.entry_date, "warmup")
+                by_regime.setdefault(lbl, []).append(t)
+
+            lines += [
+                f"### {spec.key}  (v{spec.version}, status {spec.status.value})",
+                "",
+                "| segment | trades | total ret | CAGR | ann vol | Sharpe | Sortino | maxDD | "
+                "hit | PF | turnover/yr | exposure |",
+                "|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|",
+                _pm_row("full 2016-2026", pm_full),
+                _pm_row("train+WF (pre-sealed)", pm_pre),
+                _pm_row("SEALED final-test", pm_sealed),
+                "",
+                "Rolling walk-forward folds (pre-sealed span):",
+                "",
+                "| fold | trades | total ret | Sharpe | maxDD | hit |",
+                "|---|--:|--:|--:|--:|--:|",
+                *fold_lines,
+                "",
+                "By entry-date regime (full span):",
+                "",
+                "| regime | trades | total ret | Sharpe | maxDD |",
+                "|---|--:|--:|--:|--:|",
+            ]
+            for lbl in sorted(by_regime):
+                pm = compute_portfolio_metrics(by_regime[lbl])
+                lines.append(
+                    f"| {lbl} | {pm.n_trades} | {pm.total_return_pct:+.1f}% | {pm.sharpe:+.2f} | "
+                    f"{pm.max_drawdown_pct:.1f}% |"
+                )
+            top_sym = sorted(
+                {t.symbol for t in trades},
+                key=lambda s: -sum(1 for t in trades if t.symbol == s),
+            )[:3]
+            conc = sum(1 for t in trades if t.symbol in top_sym) / max(len(trades), 1)
+            lines += [
+                "",
+                f"Concentration: top-3 symbols {top_sym} account for {conc:.0%} of trades. "
+                f"Frozen strategy — no tuning applied.",
+                "",
+            ]
+
+    Path(out_file).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_file).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    typer.secho(f"wrote {out_file}", fg=typer.colors.GREEN)
+    typer.echo("Research signal only — no order was placed.")
+
+
+def _pm_row(label: str, p: PortfolioMetrics) -> str:
+    return (
+        f"| {label} | {p.n_trades} | {p.total_return_pct:+.1f}% | {p.cagr_pct:+.1f}% | "
+        f"{p.ann_vol_pct:.1f}% | {p.sharpe:+.2f} | {p.sortino:+.2f} | {p.max_drawdown_pct:.1f}% | "
+        f"{p.hit_rate:.0%} | {p.profit_factor:.2f} | {p.turnover_per_year:.1f} | {p.exposure:.2f} |"
+    )
 
 
 @app.command("backtest-report")
