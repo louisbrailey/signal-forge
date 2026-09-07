@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import Any
 
 import httpx
@@ -144,15 +145,28 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
                 path="/v2/aggs/ticker/AAPL/range/1/day/2024-01-02/2024-01-08?adjusted=true&limit=5",
             )
         )
-        probes.append(
-            _probe(
-                client,
-                stock_key,
-                feed="stocks_history_10y",
-                provider=provider,
-                path="/v2/aggs/ticker/AAPL/range/1/day/2015-01-05/2015-01-16?adjusted=true&limit=5",
-            )
+        # Deep history: request a window ~9 years back (safely inside a 10y plan).
+        deep_from = date.today() - timedelta(days=int(9 * 365.25))
+        deep_to = deep_from + timedelta(days=10)
+        deep = _probe(
+            client,
+            stock_key,
+            feed="stocks_history_deep",
+            provider=provider,
+            path=f"/v2/aggs/ticker/AAPL/range/1/day/{deep_from}/{deep_to}?adjusted=true&limit=5",
         )
+        if deep.available:
+            deep = Probe(
+                deep.feed,
+                deep.provider,
+                deep.reachable,
+                deep.http_status,
+                deep.authorized,
+                deep.available,
+                deep.sample_keys,
+                note=f"~9y lookback OK (sampled from {deep_from}); deeper windows are plan-limited",
+            )
+        probes.append(deep)
         probes.append(
             _probe(
                 client,
