@@ -1,60 +1,64 @@
 # Backtest report — relative_strength.medium_swing v0.1.0
 
-> **Hypothetical research output.** Simulated fills include modeled commission, spread and slippage. Past results do not predict future results. This strategy is **EXPERIMENTAL** (paper only, no alerts) until promoted.
+> **Hypothetical research output.** Simulated fills model spread and slippage; commission uses the configured `commission_per_share` (0 by default). Past results do not predict future results. This strategy is **EXPERIMENTAL** (paper only, no alerts) until promoted.
 
-- Generated: 2026-09-07T02:00:07+00:00
-- git: `e77e3d1`  ·  config hash: `5e703f163d28f0f6bef63551e2e2d3d2fa8c750a7717198b38c376c7874656ae`
+- Generated: 2026-09-07T07:12:11+00:00
+- git: `dd1aff6`  ·  config hash: `010b908750b2d42af161468dee1fcb449a7874954d2cf6e9d7e43ac0e0a6ad47`
 - Horizon: MEDIUM_SWING
-- Window: 2024-08-27 → 2026-09-06
+- Window: 2024-08-28 → 2026-09-07
 - Universe (25): AAPL, AMZN, DIA, GOOGL, HD, IWM, JPM, META, MSFT, NVDA, QQQ, SPY, UNH, XLB, XLC, XLE, XLF, XLI, XLK, XLP, XLRE, XLU, XLV, XLY, XOM
-- Data: fixture/simulated unless a real provider was configured at run time
+- Data: massive · real · 12500 bars · 2024-09-09..2026-09-04
+- Costs: 0.0/sh commission (min 0.0/order) · 3.0 bps slippage · half-spread on
 
 ## In-sample vs out-of-sample
 
 | Segment | Trades | Win rate | Avg win (R) | Avg loss (R) | Expectancy (R) | Profit factor | Max drawdown (R) | Risk-adj ratio* | Avg bars held | Worst losing streak | Total return (R) |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| In-sample (first 60%) | 4 | 0.0% | +0.00 | -1.07 | -1.069 | 0.00 | 4.27 | -69.08 | 9.8 | 4 | -4.3 |
-| Out-of-sample (last 40%) | 0 | 0.0% | +0.00 | +0.00 | +0.000 | 0.00 | 0.00 | 0.00 | 0.0 | 0 | +0.0 |
+| In-sample (first 60%) | 33 | 66.7% | +1.79 | -1.00 | +0.859 | 3.57 | 2.07 | 1.87 | 23.8 | 2 | +28.3 |
+| Out-of-sample (last 40%) | 72 | 44.4% | +1.41 | -0.92 | +0.114 | 1.22 | 16.56 | 0.31 | 19.6 | 9 | +8.2 |
 
 Out-of-sample bootstrap 95% CI:
 
-- Expectancy (R): +0.000 … +0.000 (point +0.000)
-- Profit factor: 0.00 … 0.00
+- Expectancy (R): -0.193 … +0.430 (point +0.114)
+- Win rate: 33.3% … 55.6% (point 44.4%)
+- Profit factor: 0.69 … 2.06
 
 ## Out-of-sample by market regime (entry-date regime)
 
 | Segment | Trades | Win rate | Avg win (R) | Avg loss (R) | Expectancy (R) | Profit factor | Max drawdown (R) | Risk-adj ratio* | Avg bars held | Worst losing streak | Total return (R) |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| bull/high | 23 | 47.8% | +1.07 | -0.99 | -0.004 | 0.99 | 5.07 | -0.01 | 22.7 | 4 | -0.1 |
+| bull/low | 49 | 42.9% | +1.59 | -0.89 | +0.170 | 1.33 | 13.07 | 0.46 | 18.1 | 8 | +8.3 |
 
 ## Trades per symbol
 
 | Symbol | Trades |
 |---|---|
-| AAPL | 0 |
-| AMZN | 0 |
+| AAPL | 7 |
+| AMZN | 5 |
 | DIA | 0 |
-| GOOGL | 0 |
-| HD | 0 |
-| IWM | 0 |
-| JPM | 1 |
-| META | 0 |
-| MSFT | 0 |
-| NVDA | 1 |
-| QQQ | 0 |
+| GOOGL | 10 |
+| HD | 3 |
+| IWM | 5 |
+| JPM | 4 |
+| META | 4 |
+| MSFT | 4 |
+| NVDA | 7 |
+| QQQ | 4 |
 | SPY | 0 |
-| UNH | 0 |
-| XLB | 0 |
-| XLC | 0 |
-| XLE | 0 |
+| UNH | 5 |
+| XLB | 3 |
+| XLC | 1 |
+| XLE | 6 |
 | XLF | 1 |
-| XLI | 1 |
-| XLK | 0 |
-| XLP | 0 |
-| XLRE | 0 |
-| XLU | 0 |
-| XLV | 0 |
+| XLI | 4 |
+| XLK | 10 |
+| XLP | 4 |
+| XLRE | 2 |
+| XLU | 3 |
+| XLV | 5 |
 | XLY | 0 |
-| XOM | 0 |
+| XOM | 8 |
 
 \* Risk-adjusted ratio is a per-trade Sharpe-like figure annualised by trade frequency — not computed from a daily return stream. Read with that limitation in mind.
 
