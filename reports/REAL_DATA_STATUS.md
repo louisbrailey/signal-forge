@@ -45,18 +45,18 @@ All 25 symbols: **500 bars each, 2024-09-09 → 2026-09-04.** Uniform; no gaps, 
 
 ## Quality gates
 
-`min_oos_trades ≥ 20` · `oos_expectancy_r > 0` · `oos_expectancy CI low ≥ -0.15R` · a committed OOS backtest must exist. Clearing all four makes a strategy **eligible to emit PASSED candidates in a scan (paper only)** — it is **not** evidence of a live edge, and status stays `experimental`.
+`min_oos_trades ≥ 20` (G2) · `oos_expectancy_r > 0` (G3) · `oos_expectancy CI low ≥ -0.15R` (G4) · a committed OOS backtest must exist (G1) · **OOS evidence spans ≥ 2 trend regimes (bull/bear/neutral), ≥ 10 trades each (G5)**. Clearing all five makes a strategy **eligible to emit PASSED candidates in a scan (paper only)** — it is **not** evidence of a live edge, and status stays `experimental`.
 
 | Strategy (horizon) | OOS trades | OOS expectancy | OOS 95% CI (expectancy) | IS expectancy | Gates | Status |
 |---|---|---|---|---|---|---|
-| trend_continuation.short_swing | 105 | +0.269 R | **[-0.086, +0.651]** | +0.163 R | **G1–G4 pass** | experimental |
-| mean_reversion.short_swing | 82 | +0.192 R | [+0.021, +0.352] | **-0.198 R** | **G1–G4 pass** | experimental |
-| relative_strength.medium_swing | 72 | +0.114 R | **[-0.193, +0.430]** | +0.859 R | **fails G4** (CI low -0.193 < -0.15) | experimental |
-| trend_continuation.medium_swing | 93 | **-0.049 R** | [-0.363, +0.274] | +0.160 R | **fails G3 & G4** | experimental |
-| volatility_breakout.short_swing | **10** | -0.141 R | [-0.858, +0.701] | -0.311 R | **fails G2, G3, G4** | experimental |
+| trend_continuation.short_swing | 105 | +0.269 R | [-0.086, +0.651] | +0.163 R | **fails G5** (bull-only OOS) | experimental |
+| mean_reversion.short_swing | 82 | +0.192 R | [+0.021, +0.352] | **-0.198 R** | **fails G5** (bull-only OOS) | experimental |
+| relative_strength.medium_swing | 72 | +0.114 R | **[-0.193, +0.430]** | +0.859 R | **fails G4 & G5** | experimental |
+| trend_continuation.medium_swing | 93 | **-0.049 R** | [-0.363, +0.274] | +0.160 R | **fails G3, G4 & G5** | experimental |
+| volatility_breakout.short_swing | **10** | -0.141 R | [-0.858, +0.701] | -0.311 R | **fails G2, G3, G4 & G5** | experimental |
 | intraday_orb.intraday | — | — | — | — | **not evaluable** | experimental |
 
-**2 of 6 clear the gates; 0 of 6 are promotable.**
+**0 of 6 clear the gates; 0 of 6 are promotable.** Every strategy's OOS trades are confined to bull/high + bull/low (one trend regime), so all six now fail the regime-coverage gate G5 regardless of expectancy.
 
 ## Why each strategy is still experimental
 
@@ -89,4 +89,4 @@ OOS expectancy CI low is **-0.193 R < -0.15** floor, so +0.114 R point expectanc
 
 ## What real data changed vs the earlier fixture run
 
-On fixture (random-walk) data every strategy had negative OOS expectancy and sensitivity flagged all as FRAGILE. On real Massive EOD data, 2 strategies now clear the automated gates and their sensitivity grids read "robust" — **but** every positive result is a single bull-market, single-fold, ~10-month hold-out over ~2 years of one 25-name universe with zero commission. None of it is out-of-bull, none of it is walk-forward, none of it is live-paper validated, and both gate-passers have an expectancy CI lower bound at or below ~0.
+On fixture (random-walk) data every strategy had negative OOS expectancy and sensitivity flagged all as FRAGILE. On real Massive EOD data, `trend_continuation.short_swing` (+0.269 R) and `mean_reversion.short_swing` (+0.192 R) show positive OOS expectancy and their sensitivity grids read "robust" — **but** every positive result is a single bull-market, single-fold, ~10-month hold-out over ~2 years of one 25-name universe with zero commission. It is not out-of-bull, not walk-forward, not live-paper validated. The regime-coverage gate (G5) encodes this: with OOS trades confined to one trend regime, **no strategy is eligible**, and none can be promoted.
