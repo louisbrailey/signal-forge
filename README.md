@@ -25,9 +25,12 @@ predictive value.
   paper-trade creation immediately.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and the safety invariants
-(S1–S10), [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the phased plan and
-the Phase 1 exit report, and [docs/architecture-diagram.md](docs/architecture-diagram.md)
-for diagrams.
+(S1–S12), [docs/METHODOLOGY.md](docs/METHODOLOGY.md) for the verified data
+entitlement, pipeline, evaluation method, coverage, and honest limitations,
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for local vs always-on operation,
+[reports/EXTENDED_HISTORY_RESULTS.md](reports/EXTENDED_HISTORY_RESULTS.md) for the
+10-year frozen-strategy results, and
+[docs/architecture-diagram.md](docs/architecture-diagram.md) for diagrams.
 
 ## Status — Phase 1 MVP complete
 
@@ -70,8 +73,18 @@ Overview / Scanner / Briefing / Portfolio / Strategy Lab / Journal / Settings.
 | `make lint` | Ruff + Black + mypy + import-linter |
 | `make migrate` / `make downgrade` | Alembic up / down |
 | `signalforge seed` | SIMULATED demo data (idempotent) |
-| `signalforge ingest [--provider stooq]` | Fetch daily bars (kill-switch guarded) |
+| `signalforge providers verify` | Probe provider entitlements (read-only; never prints secrets) |
+| `signalforge data discover-history` | Binary-search the provider's real history depth |
+| `signalforge data ingest-history [--since …] [--resume N]` | Incremental, idempotent, audited deep-history ingest |
+| `signalforge data validate` / `data coverage` | Data-quality pass / per-symbol coverage |
+| `signalforge ingest [--provider stooq]` | Fetch recent daily bars (kill-switch guarded) |
 | `signalforge backtest-report` | Backtests → `reports/` + DB metrics |
+| `signalforge backtest-extended` | Frozen-strategy 10y backtest: train / walk-forward / sealed test / regimes / benchmark → `reports/EXTENDED_HISTORY_RESULTS.md` |
+| `signalforge options ingest\|simulate` | Read-only options data / education payoff simulators (no execution) |
+| `signalforge news ingest\|summarize` | Licensed read-only news / AI summary (never drives a recommendation) |
+| `signalforge notify test-discord --yes` | Send one Discord test message (no policy, no paper trade) |
+| `signalforge universe` | Preview the conservative liquid-universe screen |
+| `signalforge strategy-health` / `sensitivity <k>` / `calibrate <k>` | Health monitor / parameter grid / probability calibration |
 | `signalforge scan --horizon …` | Run + persist one horizon's scan |
 | `signalforge briefing` | Build today's briefing (LLM narrative if configured) |
 | `signalforge alerts` | Evaluate + dispatch alerts (nothing until enabled in Settings) |
