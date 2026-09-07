@@ -214,6 +214,24 @@ def _sparkline(closes: list[float], width: int = 480, height: int = 120) -> str:
     )
 
 
+def _calibration_meta(
+    strategy_name: str | None, version: str | None, calibration_ref: str | None
+) -> dict[str, Any] | None:
+    if not (strategy_name and version and calibration_ref):
+        return None
+    from signalforge.research.probability import load_calibration
+
+    art = load_calibration(strategy_name, version)
+    if art is None:
+        return None
+    return {
+        "n_validation_trades": art.n_validation_trades,
+        "validation_start": art.validation_start,
+        "validation_end": art.validation_end,
+        "version": art.version,
+    }
+
+
 def candidate_context(session: Session, candidate_id: int) -> dict[str, Any] | None:
     cand = session.get(Candidate, candidate_id)
     if cand is None:
@@ -270,6 +288,9 @@ def candidate_context(session: Session, candidate_id: int) -> dict[str, Any] | N
             cand.probability_calibrated, cand.calibration_ref
         ),
         "confidence_note": confidence_note(cand.calibration_ref),
+        "calibration_meta": _calibration_meta(
+            strat.name if strat else None, ver.version if ver else None, cand.calibration_ref
+        ),
         "no_trade_message": (
             NO_TRADE_MESSAGE if cand.quality_gate_status is not QualityGate.PASSED else None
         ),

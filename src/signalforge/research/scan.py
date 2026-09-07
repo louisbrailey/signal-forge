@@ -275,6 +275,7 @@ def run_scan(
                 fresh=fresh.as_dict(),
                 cfg=cfg,
                 equity=equity,
+                regime_label=f"{ctx.regime.trend.value}/{ctx.regime.vol.value}",
             )
             result.candidates.append(draft)  # both PASSED and NO_TRADE drafts are recorded
             if draft.quality_gate_status is not QualityGate.PASSED:
@@ -319,6 +320,7 @@ def _build_draft(
     fresh: dict[str, object],
     cfg: ResearchConfig,
     equity: float,
+    regime_label: str = "unknown",
 ) -> CandidateDraft:
     lo, hi = _entry_band(close, atr_val)
     entry_ref = (lo + hi) / 2
@@ -372,6 +374,16 @@ def _build_draft(
         failed.append(f"risk: {sizing.rejected_reason}")
 
     status = QualityGate.PASSED if not failed else QualityGate.NO_TRADE
+
+    # Probability: shown only on a setup that already clears every quality gate
+    # AND has a time-separated calibration artifact for this exact strategy
+    # version + regime (invariant S10). Otherwise the candidate carries no
+    # number and the UI shows the canonical NO-TRADE line.
+    prob = None
+    if status is QualityGate.PASSED:
+        from signalforge.research.probability import calibrated_probability, load_calibration
+
+        prob, _ = calibrated_probability(regime_label, load_calibration(spec.name, spec.version))
     return CandidateDraft(
         symbol=sym,
         instrument_id=inst.id,
@@ -401,8 +413,8 @@ def _build_draft(
         quality_gate_status=status,
         failed_gates=failed,
         ranking={},
-        probability_calibrated=None,  # S10: only with a calibrated OOS calibration_ref
-        calibration_ref=None,
+        probability_calibrated=(prob.p if prob else None),
+        calibration_ref=(prob.calibration_ref if prob else None),
     )
 
 

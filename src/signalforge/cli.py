@@ -307,6 +307,72 @@ def sensitivity(
 
 
 @app.command()
+def calibrate(
+    strategy: Annotated[str, typer.Argument(help="Strategy key, e.g. mean_reversion.short_swing")],
+    years: Annotated[int, typer.Option(help="History window to test over.")] = 5,
+) -> None:
+    """Fit a regime-conditional, shrunk, validation-calibrated win-probability model.
+
+    A probability is only ever shown for setups whose strategy version has an
+    artifact from this command with enough validation trades (invariant S10).
+    """
+    ensure_not_engaged()
+    from datetime import date as _date
+
+    from signalforge.config import get_settings
+    from signalforge.data.series import PriceSeries
+    from signalforge.db.session import session_scope
+    from signalforge.domain import Horizon
+    from signalforge.research.backtest_runner import run_strategy_over_universe
+    from signalforge.research.probability import fit_calibration, save_calibration
+    from signalforge.research.regime import regime_lookup
+    from signalforge.research.strategies import default_strategies
+
+    strat = next((s for s in default_strategies() if s.spec().key == strategy), None)
+    if strat is None:
+        typer.secho(f"unknown strategy {strategy!r}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    if strat.spec().horizon is Horizon.INTRADAY:
+        typer.secho("intraday calibration is not supported yet", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    settings = get_settings()
+    symbols = list(settings.research.universe)
+    end = _date.today()
+    start = end - timedelta(days=365 * years + 10)
+
+    with session_scope() as session:
+        result = run_strategy_over_universe(session, strat, symbols, start, end)
+        proxy = PriceSeries.load(session, "SPY", start, end)
+        regimes = regime_lookup(proxy) if len(proxy) else {}
+        rows: list[tuple[_date, str, bool]] = []
+        for tr in result.trades:
+            rs = regimes.get(tr.entry_date)
+            label = f"{rs.trend.value}/{rs.vol.value}" if rs else "unknown"
+            rows.append((tr.entry_date, label, tr.pnl_r > 0))
+
+        artifact = fit_calibration(
+            strategy_key=strat.spec().name, version=strat.spec().version, trades=rows
+        )
+        if artifact is None:
+            typer.secho(
+                f"{strategy}: only {len(rows)} trades — not enough to calibrate. "
+                "No probability will be shown for this strategy (correct per S10).",
+                fg=typer.colors.YELLOW,
+            )
+            raise typer.Exit(code=0)
+        ref = save_calibration(artifact)
+
+    typer.secho(
+        f"{strategy}: calibrated on {artifact.n_validation_trades} validation trades "
+        f"({artifact.validation_start}..{artifact.validation_end}); "
+        f"{len(artifact.regime_estimates)} regimes, {len(artifact.bins)} reliability bins -> {ref}",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo("Research signal only — no order was placed.")
+
+
+@app.command()
 def scan(
     horizon: Annotated[
         str, typer.Option(help="SHORT_SWING | MEDIUM_SWING | POSITION")

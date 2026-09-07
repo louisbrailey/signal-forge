@@ -42,6 +42,13 @@
       <div class="flex justify-between"><dt>Probability</dt><dd>{{ probability_display or '—' }}</dd></div>
     </dl>
     <p class="mt-2 text-xs text-slate-500">{{ confidence_note }}</p>
+    {% if probability_display and calibration_meta %}
+    <p class="mt-1 text-xs text-slate-500">
+      Calibrated on {{ calibration_meta.n_validation_trades }} validation trades
+      ({{ calibration_meta.validation_start }} … {{ calibration_meta.validation_end }}),
+      strategy v{{ calibration_meta.version }}.
+    </p>
+    {% endif %}
   </div>
 </div>
 
