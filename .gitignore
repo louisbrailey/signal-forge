@@ -25,14 +25,17 @@ dist/
 build/
 
 # --- Local data / runtime state (never versioned) ---
-data/
+# These MUST stay anchored with a leading slash: an unanchored `data/` also
+# matches the source packages src/signalforge/data/ and tests/data/, which
+# silently dropped the entire data layer from version control (see git history).
+/data/
 *.sqlite
 *.sqlite3
 *.db
-logs/
+/logs/
 *.log
-backups/
-raw_cache/
+/backups/
+/raw_cache/
 
 # --- Editors / OS ---
 .DS_Store

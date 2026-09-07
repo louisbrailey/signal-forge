@@ -28,6 +28,15 @@ def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
     monkeypatch.setenv("SIGNALFORGE_DATA_DIR", str(tmp_path))
     # TestClient sends Host: testserver; allow it (plus the real defaults) in tests.
     monkeypatch.setenv("APP_ALLOWED_HOSTS", "testserver,localhost,127.0.0.1")
+    # The suite must be hermetic and offline: never inherit the developer's real
+    # provider selection or API keys from a local .env. Everything runs against
+    # the deterministic fixture adapter unless a test opts in explicitly.
+    monkeypatch.setenv("MARKET_DATA_PROVIDER", "fixture")
+    monkeypatch.setenv("MARKET_DATA_API_KEY", "")
+    monkeypatch.setenv("MARKET_DATA_PROVIDER_SECONDARY", "")
+    monkeypatch.setenv("MARKET_DATA_API_KEY_SECONDARY", "")
+    monkeypatch.setenv("NOTIFICATION_PROVIDER", "")
+    monkeypatch.setenv("LLM_PROVIDER", "")
 
     import signalforge.killswitch as ks
     from signalforge.config.settings import get_settings
