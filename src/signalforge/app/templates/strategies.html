@@ -35,6 +35,15 @@ out-of-sample expectancy, so none should be promoted.</p>
   {% else %}
   <div class="mt-2 text-sm text-slate-400">no committed backtest — run <code>signalforge backtest-report</code></div>
   {% endif %}
+  {% if s.sensitivity %}
+  <div class="mt-2 rounded border px-2 py-1 text-xs
+    {{ 'border-red-200 bg-red-50 text-red-700' if s.sensitivity.fragile
+       else 'border-emerald-200 bg-emerald-50 text-emerald-700' }}">
+    Parameter sensitivity: {{ 'FRAGILE' if s.sensitivity.fragile else 'robust' }} —
+    {{ s.sensitivity.n_positive }}/{{ s.sensitivity.n_evaluable }} grid points positive
+    {% if s.sensitivity.reasons %}<br>{{ s.sensitivity.reasons | join('; ') }}{% endif %}
+  </div>
+  {% endif %}
   {% if s.health %}
   <div class="mt-2 rounded border px-2 py-1 text-xs
     {{ 'border-red-200 bg-red-50 text-red-700' if s.health.action in ('downgrade', 'disable')

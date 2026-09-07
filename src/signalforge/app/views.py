@@ -303,6 +303,7 @@ def strategies_context(session: Session) -> dict[str, Any]:
         db_strat = session.scalar(select(Strategy).where(Strategy.name == spec.name))
         metric = latest_oos_metric(session, spec)
         h = health.get(spec.name)
+        sens = get_setting(session, f"sensitivity:{spec.name}", None)
         out.append(
             {
                 "name": spec.name,
@@ -326,6 +327,17 @@ def strategies_context(session: Session) -> dict[str, Any]:
                         "evaluated_at": h.evaluated_at.isoformat(),
                     }
                     if h
+                    else None
+                ),
+                "sensitivity": (
+                    {
+                        "fragile": sens.get("fragile"),
+                        "n_evaluable": sens.get("n_evaluable"),
+                        "n_positive": sens.get("n_positive"),
+                        "positive_fraction": sens.get("positive_fraction"),
+                        "reasons": sens.get("reasons", []),
+                    }
+                    if isinstance(sens, dict)
                     else None
                 ),
             }

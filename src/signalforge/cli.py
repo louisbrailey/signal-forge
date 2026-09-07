@@ -203,6 +203,109 @@ def backtest_report(
             )
 
 
+def _sensitivity_grid_builders() -> (
+    dict[str, tuple[object, dict[str, object], dict[str, list[object]]]]
+):
+    """strategy key -> (factory(params)->strategy, baseline params dict, grid)."""
+    from dataclasses import asdict
+
+    from signalforge.domain import Horizon
+    from signalforge.research.strategies.breakout import BreakoutParams, VolatilityBreakout
+    from signalforge.research.strategies.mean_reversion import MeanReversion, MeanReversionParams
+    from signalforge.research.strategies.relative_strength import (
+        RelativeStrength,
+        RelativeStrengthParams,
+    )
+    from signalforge.research.strategies.trend_continuation import TrendContinuation, TrendParams
+
+    return {
+        "trend_continuation.short_swing": (
+            lambda p: TrendContinuation(Horizon.SHORT_SWING, TrendParams(**p)),
+            asdict(TrendParams()),
+            {"sma_fast": [15, 20, 25], "vol_mult": [1.1, 1.3, 1.5], "stop_atr": [1.25, 1.5, 1.75]},
+        ),
+        "mean_reversion.short_swing": (
+            lambda p: MeanReversion(MeanReversionParams(**p)),
+            asdict(MeanReversionParams()),
+            {
+                "z_lookback": [15, 20, 25],
+                "z_entry": [-2.5, -2.0, -1.5],
+                "stop_atr": [1.5, 2.0, 2.5],
+            },
+        ),
+        "relative_strength.medium_swing": (
+            lambda p: RelativeStrength(Horizon.MEDIUM_SWING, RelativeStrengthParams(**p)),
+            asdict(RelativeStrengthParams()),
+            {"lookback": [42, 63, 84], "excess_return_min": [0.03, 0.05, 0.08]},
+        ),
+        "volatility_breakout.short_swing": (
+            lambda p: VolatilityBreakout(Horizon.SHORT_SWING, BreakoutParams(**p)),
+            asdict(BreakoutParams()),
+            {
+                "channel": [15, 20, 25],
+                "contraction_max": [0.6, 0.75, 0.9],
+                "stop_atr": [1.5, 1.75, 2.0],
+            },
+        ),
+    }
+
+
+@app.command()
+def sensitivity(
+    strategy: Annotated[
+        str, typer.Argument(help="Strategy key, e.g. trend_continuation.short_swing")
+    ],
+    years: Annotated[int, typer.Option(help="History window to test over.")] = 3,
+) -> None:
+    """Parameter-sensitivity grid: reject a strategy whose edge lives at one lucky point."""
+    ensure_not_engaged()
+    from signalforge.config import get_settings
+    from signalforge.db.session import session_scope
+    from signalforge.research.sensitivity import run_parameter_sensitivity
+    from signalforge.settings_store import set_setting
+
+    builders = _sensitivity_grid_builders()
+    if strategy not in builders:
+        typer.secho(
+            f"no grid defined for {strategy!r}. Known: {sorted(builders)}", fg=typer.colors.RED
+        )
+        raise typer.Exit(code=1)
+    factory, baseline, grid = builders[strategy]
+
+    settings = get_settings()
+    symbols = list(settings.research.universe)
+    end = date.today()
+    start = end - timedelta(days=365 * years + 10)
+
+    with session_scope() as session:
+        report = run_parameter_sensitivity(
+            session,
+            strategy_key=strategy,
+            version="0.1.0",
+            factory=factory,  # type: ignore[arg-type]
+            baseline_params=baseline,  # type: ignore[arg-type]
+            grid=grid,  # type: ignore[arg-type]
+            symbols=symbols,
+            start=start,
+            end=end,
+        )
+        set_setting(session, f"sensitivity:{strategy}", report.to_dict(), actor="cli")
+
+    typer.echo(
+        f"{strategy}: {report.n_points} grid points, {report.n_evaluable} evaluable, "
+        f"{report.n_positive} positive (baseline {report.baseline_expectancy_r:+.3f}R, "
+        f"median {report.median_expectancy_r:+.3f}R, worst {report.worst_expectancy_r:+.3f}R)"
+    )
+    verdict = "FRAGILE" if report.fragile else "robust across the grid"
+    typer.secho(
+        f"  verdict: {verdict}",
+        fg=typer.colors.RED if report.fragile else typer.colors.GREEN,
+    )
+    for r in report.reasons:
+        typer.secho(f"    - {r}", fg=typer.colors.YELLOW)
+    typer.echo("Research signal only — no order was placed.")
+
+
 @app.command()
 def scan(
     horizon: Annotated[
