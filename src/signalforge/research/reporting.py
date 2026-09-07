@@ -41,17 +41,18 @@ def render_report_md(result: StrategyBacktestResult) -> str:
     lines = [
         f"# Backtest report — {spec.key} v{spec.version}",
         "",
-        "> **Hypothetical research output.** Simulated fills include modeled "
-        "commission, spread and slippage. Past results do not predict future "
-        "results. This strategy is **EXPERIMENTAL** (paper only, no alerts) until "
-        "promoted.",
+        "> **Hypothetical research output.** Simulated fills model spread and "
+        "slippage; commission uses the configured `commission_per_share` (0 by "
+        "default). Past results do not predict future results. This strategy is "
+        "**EXPERIMENTAL** (paper only, no alerts) until promoted.",
         "",
         f"- Generated: {datetime.now(UTC).isoformat(timespec='seconds')}",
         f"- git: `{spec.git_sha}`  ·  config hash: `{result.config_hash or 'n/a'}`",
         f"- Horizon: {spec.horizon.value}",
         f"- Window: {result.start} → {result.end}",
         f"- Universe ({len(result.symbols)}): {', '.join(result.symbols)}",
-        "- Data: fixture/simulated unless a real provider was configured at run time",
+        f"- Data: {result.data.label}",
+        f"- Costs: {result.costs_label}",
         "",
         "## In-sample vs out-of-sample",
         "",

@@ -35,6 +35,11 @@ def test_runner_produces_is_and_oos_metrics(session: Session) -> None:
     assert d["strategy"] == "trend_continuation.short_swing"
     assert "out_of_sample_ci" in d
     assert set(result.per_symbol_trades) <= set(SYMS)
+    # provenance reflects the fixture ingest, never silently claims real data
+    assert result.data.sources == ("fixture",)
+    assert result.data.simulated is True
+    assert result.data.bars > 0 and result.data.first is not None
+    assert "fixture" in render_report_md(result) and "SIMULATED" in render_report_md(result)
 
 
 def test_report_markdown_has_the_required_sections(session: Session) -> None:

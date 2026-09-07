@@ -65,7 +65,7 @@ def persist_backtest_result(
         date_end=result.end,
         oos_start=result.start,  # coarse; IS/OOS split is by fraction in the runner
         oos_end=result.end,
-        costs_json={},
+        costs_json=dict(result.costs),
         config_hash=result.config_hash,
         git_sha=version.git_sha,
     )

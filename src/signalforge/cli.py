@@ -158,6 +158,7 @@ def backtest_report(
     """Run every baseline strategy over the configured universe and write reports/."""
     from pathlib import Path
 
+    from signalforge.backtest.costs import CostModel
     from signalforge.config import get_settings
     from signalforge.db.session import session_scope
     from signalforge.research.backtest_runner import run_strategy_over_universe
@@ -165,11 +166,18 @@ def backtest_report(
     from signalforge.research.strategies import default_strategies
 
     settings = get_settings()
-    symbols = list(settings.research.universe)
+    rc = settings.research
+    symbols = list(rc.universe)
     end = date.today()
     start = end - timedelta(days=365 * years + 10)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    cost_model = CostModel(
+        commission_per_share=rc.commission_per_share,
+        commission_min_per_order=rc.commission_min_per_order,
+        slippage_bps=rc.slippage_bps,
+        half_spread_fill_penalty=rc.half_spread_fill_penalty,
+    )
 
     from signalforge.domain import Horizon
     from signalforge.research.persistence import (
@@ -186,10 +194,11 @@ def backtest_report(
                 symbols,
                 (end - timedelta(days=45)) if is_intraday else start,
                 end,
-                allow_short=settings.research.allow_short_candidates,
-                config_hash=settings.research.config_hash,
+                allow_short=rc.allow_short_candidates,
+                config_hash=rc.config_hash,
+                cost_model=cost_model,
                 intraday=is_intraday,
-                bar_size=settings.research.intraday_bar_size,
+                bar_size=rc.intraday_bar_size,
                 min_bars=40 if is_intraday else 60,
             )
             version = upsert_strategy_version(session, strat.spec())
