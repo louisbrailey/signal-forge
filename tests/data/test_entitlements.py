@@ -1,12 +1,16 @@
 """Offline contract tests for the per-endpoint entitlement verifier.
 
 No network. A MockTransport stands in for api.massive.com and returns a realistic
-mix of 200 / 403 / 404 responses. Asserts: the report groups by subscription,
-maps HTTP status to (available, error_category, latency), records only path-level
-endpoints, and never leaks the API key into any returned string.
+mix of 200 / 403 responses. Asserts: the report groups by subscription, maps HTTP
+status to (available, error_category, latency), the Benzinga-news check is
+*content + freshness* based (a lapsed feed still carrying old Benzinga items is
+NOT "available"), endpoints are path templates only, and the API key never leaks
+into any returned string.
 """
 
 from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -15,6 +19,7 @@ from signalforge.data import entitlements as ent
 from signalforge.data.entitlements import _classify, _scrub, verify_entitlements
 
 _SECRET = "sk-live-DEADBEEF-must-never-appear"
+_REAL_HTTPX_CLIENT = httpx.Client  # captured before any monkeypatch replaces it
 
 
 def test_classify_maps_status_codes() -> None:
@@ -35,56 +40,95 @@ def test_scrub_removes_key_and_querystring_secrets() -> None:
     assert "[REDACTED]" in clean
 
 
-def _handler(request: httpx.Request) -> httpx.Response:
-    # the key must only ever be in the Authorization header
-    assert request.headers["authorization"] == f"Bearer {_SECRET}"
-    assert _SECRET not in str(request.url)
-    url = str(request.url)
-    if "/benzinga/v1/news" in url:
-        return httpx.Response(404, json={"status": "NOT_FOUND"})
-    if "/benzinga/v1/" in url:  # ratings, analyst-insights
-        return httpx.Response(
-            403, json={"message": f"You are not entitled to this data (key {_SECRET})"}
+def _news_page(benzinga_age_days: int | None) -> dict[str, object]:
+    """~40 current Motley-Fool items + (optionally) 6 Benzinga items aged
+    ``benzinga_age_days``. One page, no ``next_url``."""
+    now = datetime.now(UTC)
+    results: list[dict[str, object]] = []
+    for i in range(40):
+        results.append(
+            {
+                "id": f"mf-{i}",
+                "publisher": {"name": "The Motley Fool"},
+                "title": f"Fool piece {i}",
+                "article_url": "https://www.fool.com/x",
+                "published_utc": (now - timedelta(hours=i)).isoformat().replace("+00:00", "Z"),
+                "tickers": ["AAPL"],
+            }
         )
-    if "/v3/quotes/" in url:  # NBBO not entitled for stocks and options
-        return httpx.Response(403, json={"message": "You are not entitled to this data."})
-    if "/v3/snapshot/options/" in url:
-        return httpx.Response(
-            200,
-            json={
-                "status": "OK",
-                "results": [
-                    {
-                        "details": {"ticker": "O:SPY_C1", "strike_price": 500},
-                        "underlying_asset": {"price": 500.0},
-                        "greeks": {"delta": 0.5},
-                        "implied_volatility": 0.2,
-                        "open_interest": 1234,
-                        "break_even_price": 505.0,
-                    }
-                ],
-            },
-        )
-    if "/v3/reference/options/contracts" in url:
-        return httpx.Response(
-            200,
-            json={
-                "status": "OK",
-                "results": [{"ticker": "O:SPY_C1", "expiration_date": "2099-01-15"}],
-            },
-        )
-    if "/v2/last/trade/" in url:
-        return httpx.Response(200, json={"status": "OK", "results": {"p": 500.0}})
-    # default: aggregate / trade endpoints -> entitled
-    return httpx.Response(200, json={"status": "OK", "results": [{"c": 1.0, "t": 1}]})
+    if benzinga_age_days is not None:
+        for i in range(6):
+            results.append(
+                {
+                    "id": f"bz-{i}",
+                    "publisher": {"name": "Benzinga"},
+                    "title": f"Benzinga piece {i}",
+                    "article_url": "https://www.benzinga.com/x",
+                    "published_utc": (
+                        (now - timedelta(days=benzinga_age_days, hours=i))
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    ),
+                    "tickers": ["AAPL"],
+                    "insights": [{"sentiment": "positive"}],
+                    "keywords": ["markets"],
+                }
+            )
+    return {"status": "OK", "count": len(results), "results": results}
 
 
-@pytest.fixture
-def _mock_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    real = httpx.Client
+def _make_handler(benzinga_age_days: int | None):
+    def handler(request: httpx.Request) -> httpx.Response:
+        # the key must only ever be in the Authorization header
+        assert request.headers["authorization"] == f"Bearer {_SECRET}"
+        assert _SECRET not in str(request.url)
+        url = str(request.url)
+        if "/v2/reference/news" in url:
+            return httpx.Response(200, json=_news_page(benzinga_age_days))
+        if "/benzinga/v1/" in url:  # ratings, analyst-insights — separate entitlement
+            return httpx.Response(
+                403, json={"message": f"You are not entitled to this data (key {_SECRET})"}
+            )
+        if "/v3/quotes/" in url:  # NBBO not entitled for stocks or options
+            return httpx.Response(403, json={"message": "You are not entitled to this data."})
+        if "/v3/snapshot/options/" in url:
+            return httpx.Response(
+                200,
+                json={
+                    "status": "OK",
+                    "results": [
+                        {
+                            "details": {"ticker": "O:SPY_C1", "strike_price": 500},
+                            "underlying_asset": {"price": 500.0},
+                            "greeks": {"delta": 0.5},
+                            "implied_volatility": 0.2,
+                            "open_interest": 1234,
+                            "break_even_price": 505.0,
+                        }
+                    ],
+                },
+            )
+        if "/v3/reference/options/contracts" in url:
+            return httpx.Response(
+                200,
+                json={
+                    "status": "OK",
+                    "results": [{"ticker": "O:SPY_C1", "expiration_date": "2099-01-15"}],
+                },
+            )
+        if "/v2/last/trade/" in url:
+            return httpx.Response(200, json={"status": "OK", "results": {"p": 500.0}})
+        # default: aggregate / trade endpoints -> entitled
+        return httpx.Response(200, json={"status": "OK", "results": [{"c": 1.0, "t": 1}]})
+
+    return handler
+
+
+def _mock(monkeypatch: pytest.MonkeyPatch, *, benzinga_age_days: int | None) -> None:
+    handler = _make_handler(benzinga_age_days)
 
     def factory(**kw: object) -> httpx.Client:
-        return real(transport=httpx.MockTransport(_handler))
+        return _REAL_HTTPX_CLIENT(transport=httpx.MockTransport(handler))
 
     monkeypatch.setattr(ent.httpx, "Client", factory)
 
@@ -101,9 +145,8 @@ def _settings(monkeypatch: pytest.MonkeyPatch) -> object:
     return get_settings()
 
 
-def test_verify_entitlements_groups_and_classifies(
-    _mock_client: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_verify_entitlements_groups_and_classifies(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock(monkeypatch, benzinga_age_days=None)
     report = verify_entitlements(_settings(monkeypatch))
 
     subs = {c.subscription for c in report.checks}
@@ -126,16 +169,42 @@ def test_verify_entitlements_groups_and_classifies(
     oi = next(c for c in report.checks if c.feed == "options_open_interest")
     assert oi.latency_category == "END_OF_DAY"
 
-    # benzinga: dedicated endpoint 404, ratings/insights 403, generic feed OK
-    dedicated = next(c for c in report.checks if c.feed == "benzinga_news_dedicated")
-    assert dedicated.http_status == 404 and dedicated.error_category == "not_found"
-    assert not report.available("benzinga_news_dedicated")
-    assert report.available("news_generic_multipublisher")
+    # licensed news feed reachable; Benzinga structured sub-products not entitled
+    assert report.available("news_licensed_feed")
+    assert not report.available("benzinga_ratings")
+    assert not report.available("benzinga_analyst_insights")
 
 
-def test_verify_entitlements_never_leaks_the_key(
-    _mock_client: None, monkeypatch: pytest.MonkeyPatch
+def test_benzinga_news_available_only_when_feed_is_currently_delivering_it(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # fresh Benzinga items -> available, DELAYED
+    _mock(monkeypatch, benzinga_age_days=1)
+    report = verify_entitlements(_settings(monkeypatch))
+    bz = next(c for c in report.checks if c.feed == "benzinga_news")
+    assert bz.available is True
+    assert bz.latency_category == "DELAYED"
+    assert "live via /v2/reference/news" in bz.detail
+
+    # Benzinga items present but 81 days stale -> NOT available
+    _mock(monkeypatch, benzinga_age_days=81)
+    report = verify_entitlements(_settings(monkeypatch))
+    bz = next(c for c in report.checks if c.feed == "benzinga_news")
+    assert bz.available is False
+    assert bz.error_category == "empty"
+    assert "STALE" in bz.detail
+    assert "not currently delivering Benzinga" in bz.detail
+
+    # no Benzinga items at all -> NOT available, distinct message
+    _mock(monkeypatch, benzinga_age_days=None)
+    report = verify_entitlements(_settings(monkeypatch))
+    bz = next(c for c in report.checks if c.feed == "benzinga_news")
+    assert bz.available is False
+    assert "no Benzinga-published articles" in bz.detail
+
+
+def test_verify_entitlements_never_leaks_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock(monkeypatch, benzinga_age_days=1)
     report = verify_entitlements(_settings(monkeypatch))
     blob = repr(report.to_rows())
     assert _SECRET not in blob
@@ -146,13 +215,12 @@ def test_verify_entitlements_never_leaks_the_key(
 
     # endpoints are path templates only — no query string, no host with a secret
     for c in report.checks:
-        assert "?" not in c.endpoint or "{" in c.endpoint
+        assert "?" not in c.endpoint or "{" in c.endpoint or "publisher=" in c.endpoint
         assert _SECRET not in c.endpoint
 
 
-def test_discord_is_presence_checked_not_contacted(
-    _mock_client: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_discord_is_presence_checked_not_contacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock(monkeypatch, benzinga_age_days=None)
     _settings(monkeypatch)
     monkeypatch.setenv(
         "DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/123456/abcdef-token_XYZ"

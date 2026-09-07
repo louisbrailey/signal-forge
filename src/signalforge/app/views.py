@@ -507,31 +507,31 @@ def news_context(session: Session, *, symbol: str | None = None, limit: int = 40
     from signalforge.db.models import EntitlementCheck as _EC
 
     benz = session.scalar(
-        select(_EC)
-        .where(_EC.feed == "benzinga_news_dedicated")
-        .order_by(_EC.checked_at.desc())
-        .limit(1)
+        select(_EC).where(_EC.feed == "benzinga_news").order_by(_EC.checked_at.desc()).limit(1)
     )
+    benz_ok = bool(benz and benz.available)
     if benz is None:
         benz_limitation = "not yet verified — run `signalforge providers verify`"
     elif benz.available:
         benz_limitation = ""
     else:
         _http = f"HTTP {benz.http_status} " if benz.http_status else ""
-        benz_limitation = (
-            f"{_http}{benz.error_category} on {benz.endpoint} "
-            f"(dedicated Benzinga news feed not provisioned on this key)"
-            + (f" — vendor said: {benz.detail}" if benz.detail else "")
+        # the verifier's detail already carries the precise reason (stale feed,
+        # not_authorized, empty sample); surface it verbatim.
+        benz_limitation = benz.detail or (
+            f"{_http}{benz.error_category} on {benz.endpoint} — Benzinga not entitled on this key"
         )
     return {
         "news_items": _news_items(session, symbol, limit),
         "news_symbol": symbol,
-        "benzinga_available": bool(benz and benz.available),
+        "benzinga_available": benz_ok,
         "benzinga_limitation": benz_limitation,
+        "benzinga_note": (benz.detail if benz else ""),  # verifier's verbatim finding, either state
+        "benzinga_checked_at": benz.checked_at.isoformat() if benz else None,
         "news_source_label": (
-            "Benzinga (licensed primary)"
-            if (benz and benz.available)
-            else "Licensed multi-publisher feed (no dedicated Benzinga entitlement)"
+            "Benzinga News (licensed primary) + other licensed publishers"
+            if benz_ok
+            else "Licensed multi-publisher feed (Benzinga not currently entitled on this key)"
         ),
     }
 

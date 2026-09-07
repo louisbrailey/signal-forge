@@ -18,7 +18,7 @@ from signalforge.db.session import session_scope
 from signalforge.domain import LatencyCategory
 
 
-def _seed_news_and_entitlements() -> None:
+def _seed_news_and_entitlements(*, benzinga_ok: bool = False) -> None:
     from signalforge.db.models import EntitlementCheck, NewsItem
 
     with session_scope() as s:
@@ -26,15 +26,25 @@ def _seed_news_and_entitlements() -> None:
             EntitlementCheck(
                 batch_id="test-batch",
                 subscription="benzinga_news",
-                feed="benzinga_news_dedicated",
-                endpoint="/benzinga/v1/news",
-                source="massive",
+                feed="benzinga_news",
+                endpoint="/v2/reference/news (publisher=Benzinga)",
+                source="benzinga",
                 checked_at=datetime(2026, 9, 6, 12, 0, tzinfo=UTC),
-                http_status=404,
-                available=False,
-                latency_category="none",
-                error_category="not_found",
-                detail="HTTP 404 — dedicated Benzinga news endpoint not provisioned on this key",
+                http_status=200,
+                available=benzinga_ok,
+                latency_category="DELAYED" if benzinga_ok else "none",
+                error_category="none" if benzinga_ok else "empty",
+                detail=(
+                    "live via /v2/reference/news — 8/200 sampled articles Benzinga-published, "
+                    "newest 2026-09-06 (0d old); also seen: The Motley Fool, Zacks"
+                    if benzinga_ok
+                    else (
+                        "STALE — 152 Benzinga articles in the sample but the newest is "
+                        "2026-06-18 (81d old); the feed is not currently delivering Benzinga "
+                        "(other publishers current to 2026-09-07). The account may show "
+                        "Benzinga active but this API key is not receiving it."
+                    )
+                ),
             )
         )
         s.add(
@@ -123,8 +133,8 @@ def test_news_page_states_benzinga_is_unavailable(registered_client: TestClient)
     _seed_news_and_entitlements()
     r = registered_client.get("/news")
     assert r.status_code == 200
-    assert "no dedicated Benzinga entitlement" in r.text
-    assert "not provisioned on this key" in r.text
+    assert "not currently entitled on this API key" in r.text
+    assert "STALE" in r.text and "81d old" in r.text
     # real publishers shown, not relabelled as Benzinga
     assert "Reuters" in r.text and "MarketWatch" in r.text
     assert "Chipmaker raises full-year outlook" in r.text
@@ -138,10 +148,24 @@ def test_news_context_reports_limitation_and_source_label(db_url: str) -> None:
     with session_scope() as s:
         ctx = news_context(s)
     assert ctx["benzinga_available"] is False
-    assert "not provisioned" in ctx["benzinga_limitation"]
-    assert "multi-publisher" in ctx["news_source_label"]
+    assert "STALE" in ctx["benzinga_limitation"]
+    assert "not currently entitled" in ctx["news_source_label"]
     assert len(ctx["news_items"]) == 2
     assert {i["publisher"] for i in ctx["news_items"]} == {"Reuters", "MarketWatch"}
+
+
+def test_news_context_label_switches_when_benzinga_is_live(db_url: str) -> None:
+    from signalforge.app.views import news_context
+
+    _seed_news_and_entitlements(benzinga_ok=True)
+    with session_scope() as s:
+        ctx = news_context(s)
+    assert ctx["benzinga_available"] is True
+    assert (
+        ctx["news_source_label"] == "Benzinga News (licensed primary) + other licensed publishers"
+    )
+    assert ctx["benzinga_limitation"] == ""  # no limitation when live
+    assert "live via /v2/reference/news" in ctx["benzinga_note"]
 
 
 def test_news_filter_by_symbol(db_url: str) -> None:

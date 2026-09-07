@@ -64,6 +64,15 @@ class EntitlementReport:
         return [c.to_row() for c in self.checks]
 
 
+def _parse_iso(s: Any) -> datetime | None:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return None
+
+
 def _scrub(text: str, *secrets: str) -> str:
     out = text
     for s in secrets:
@@ -370,53 +379,44 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
         checks.extend(gc)
 
         # ---- Benzinga News ------------------------------------------------- #
+        # On this vendor Benzinga *news* is delivered through the unified
+        # /v2/reference/news feed (there is no /benzinga/v1/news path — it 404s
+        # with an empty body, unlike the real, structured-403 /benzinga/v1/*
+        # sub-products). The entitlement gates *which publishers appear* in that
+        # feed, so the only honest check is content-based: sample the feed and
+        # look for Benzinga-published articles.
+        checks.append(_benzinga_news_check(client, news_key, provider))
+        # licensed-feed reachability, independent of Benzinga content
         checks.append(
             _check(
                 client,
                 news_key,
-                feed="benzinga_news_dedicated",
+                feed="news_licensed_feed",
                 subscription="benzinga_news",
-                endpoint_display="/benzinga/v1/news",
-                path="/benzinga/v1/news?limit=1",
+                endpoint_display="/v2/reference/news",
+                path="/v2/reference/news?ticker=AAPL&limit=1&order=desc",
                 latency="DELAYED",
-                source="benzinga",
+                source=provider,
             )
         )
-        checks.append(
-            _check(
-                client,
-                news_key,
-                feed="benzinga_ratings",
-                subscription="benzinga_news",
-                endpoint_display="/benzinga/v1/ratings",
-                path="/benzinga/v1/ratings?limit=1",
-                latency="DELAYED",
-                source="benzinga",
+        # Benzinga *structured* sub-products (ratings / analyst insights) are a
+        # separate entitlement from Benzinga news — probed so the report is exact.
+        for feed, seg in (
+            ("benzinga_ratings", "ratings"),
+            ("benzinga_analyst_insights", "analyst-insights"),
+        ):
+            checks.append(
+                _check(
+                    client,
+                    news_key,
+                    feed=feed,
+                    subscription="benzinga_news",
+                    endpoint_display=f"/benzinga/v1/{seg}",
+                    path=f"/benzinga/v1/{seg}?limit=1",
+                    latency="DELAYED",
+                    source="benzinga",
+                )
             )
-        )
-        checks.append(
-            _check(
-                client,
-                news_key,
-                feed="benzinga_analyst_insights",
-                subscription="benzinga_news",
-                endpoint_display="/benzinga/v1/analyst-insights",
-                path="/benzinga/v1/analyst-insights?limit=1",
-                latency="DELAYED",
-                source="benzinga",
-            )
-        )
-        generic = _check(
-            client,
-            news_key,
-            feed="news_generic_multipublisher",
-            subscription="benzinga_news",
-            endpoint_display="/v2/reference/news",
-            path="/v2/reference/news?ticker=AAPL&limit=1&order=desc",
-            latency="DELAYED",
-            source=provider,
-        )
-        checks.append(generic)
 
     webhook = s.discord_webhook_url.get_secret_value()
     discord_ok = bool(re.match(r"https://(discord(app)?\.com)/api/webhooks/\d+/[\w-]+", webhook))
@@ -427,6 +427,136 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
     )
     return EntitlementReport(
         checks=checks, discord_configured=discord_ok, discord_note=discord_note
+    )
+
+
+_BENZINGA_SAMPLE_TICKERS = ("SPY", "AAPL", "NVDA", "TSLA", "MSFT", "NFLX")
+_BENZINGA_SAMPLE_PER_TICKER = 50
+_BENZINGA_SAMPLE_PAGES = 4  # paginate: Benzinga items may sit deeper than page 1
+_BENZINGA_FRESH_DAYS = 10  # a live licensed feed carries Benzinga items this recent
+
+
+def _benzinga_news_check(client: httpx.Client, key: str, provider: str) -> EndpointCheck:
+    """Content-based Benzinga-news entitlement probe.
+
+    On this vendor Benzinga news rides the unified ``/v2/reference/news`` feed and
+    the entitlement decides whether Benzinga-published articles appear in it — so
+    a bare "is any Benzinga article present" check is not enough: a lapsed feed
+    still returns historical Benzinga items. ``available`` therefore requires a
+    Benzinga article no older than ``_BENZINGA_FRESH_DAYS`` (i.e. the feed is
+    *currently* delivering Benzinga), sampled across several liquid tickers and a
+    few pages deep.
+    """
+    now_dt = datetime.now(UTC)
+    now = now_dt.isoformat()
+    feed = sub = "benzinga_news"
+    endpoint = "/v2/reference/news (publisher=Benzinga)"
+    if not key:
+        return EndpointCheck(
+            feed,
+            sub,
+            endpoint,
+            "benzinga",
+            now,
+            None,
+            False,
+            "none",
+            "auth_missing",
+            "no API key configured",
+        )
+
+    total = benzinga = 0
+    publishers: set[str] = set()
+    newest_bz: datetime | None = None
+    newest_any: datetime | None = None
+    last_status: int | None = None
+    for tk in _BENZINGA_SAMPLE_TICKERS:
+        path: str | None = (
+            f"/v2/reference/news?ticker={tk}&order=desc&limit={_BENZINGA_SAMPLE_PER_TICKER}"
+        )
+        for _ in range(_BENZINGA_SAMPLE_PAGES):
+            if not path:
+                break
+            status, body = _get(client, path, key)
+            last_status = status
+            if status != 200 or not body:
+                break
+            for art in body.get("results") or []:
+                if not isinstance(art, dict):
+                    continue
+                total += 1
+                name = str((art.get("publisher") or {}).get("name") or "").strip()
+                if name:
+                    publishers.add(name)
+                pub_dt = _parse_iso(art.get("published_utc"))
+                if pub_dt and (newest_any is None or pub_dt > newest_any):
+                    newest_any = pub_dt
+                parts = str(art.get("article_url") or "").split("/")
+                host = (parts[2] if len(parts) > 2 else "").lower()
+                if name.lower() == "benzinga" or "benzinga.com" in host:
+                    benzinga += 1
+                    if pub_dt and (newest_bz is None or pub_dt > newest_bz):
+                        newest_bz = pub_dt
+            follow = body.get("next_url") or ""
+            path = re.sub(r"^https?://[^/]+", "", follow) if follow else None
+
+    if last_status in (401, 403):
+        return EndpointCheck(
+            feed,
+            sub,
+            endpoint,
+            "benzinga",
+            now,
+            last_status,
+            False,
+            "none",
+            "not_authorized",
+            "licensed news feed rejected the key",
+        )
+    if total == 0:
+        return EndpointCheck(
+            feed,
+            sub,
+            endpoint,
+            "benzinga",
+            now,
+            last_status,
+            False,
+            "none",
+            "empty",
+            "licensed news feed returned no articles for the sample",
+        )
+
+    bz_date = newest_bz.date().isoformat() if newest_bz else "never"
+    any_date = newest_any.date().isoformat() if newest_any else "?"
+    age_days = (now_dt - newest_bz).days if newest_bz else None
+    available = age_days is not None and age_days <= _BENZINGA_FRESH_DAYS
+    seen = ", ".join(sorted(publishers)[:6]) or "none"
+    if available:
+        detail = (
+            f"live via /v2/reference/news — {benzinga}/{total} sampled articles "
+            f"Benzinga-published, newest {bz_date} ({age_days}d old); also seen: {seen}"
+        )
+    elif benzinga > 0:
+        detail = (
+            f"STALE — {benzinga} Benzinga articles in the sample but the newest is "
+            f"{bz_date} ({age_days}d old); the feed is not currently delivering Benzinga "
+            f"(other publishers current to {any_date}). The account may show Benzinga active "
+            f"but this API key is not receiving it."
+        )
+    else:
+        detail = f"no Benzinga-published articles in a {total}-article sample (seen: {seen})"
+    return EndpointCheck(
+        feed,
+        sub,
+        endpoint,
+        "benzinga",
+        now,
+        last_status,
+        available,
+        "DELAYED" if available else "none",
+        "none" if available else "empty",
+        detail,
     )
 
 
