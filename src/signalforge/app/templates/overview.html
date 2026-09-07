@@ -19,11 +19,26 @@
     <h2 class="text-sm font-medium text-slate-500">Data feeds</h2>
     {% if feeds %}
       <div class="mt-2 flex flex-wrap gap-1">{% for f in feeds %}{{ feed_badge(f) }}{% endfor %}</div>
+      <table class="mt-2 w-full text-xs text-slate-600">
+        <thead class="text-left text-slate-400"><tr><th class="pr-3">Feed</th><th class="pr-3">Label</th><th class="pr-3">Market-data timestamp</th><th class="pr-3">Age</th><th>State</th></tr></thead>
+        <tbody>
+        {% for f in feeds %}
+          <tr class="border-t border-slate-100">
+            <td class="pr-3">{{ f.provider }}/{{ f.feed_type }}</td>
+            <td class="pr-3">{{ f.latency_category }}{% if not f.is_live %} (not live){% endif %}{% if f.is_simulated %} · SIMULATED{% endif %}</td>
+            <td class="pr-3">{{ f.last_success_at or '—' }}</td>
+            <td class="pr-3">{% if f.age_seconds is not none %}{{ (f.age_seconds / 3600) | round(1) }} h{% else %}—{% endif %}</td>
+            <td class="{{ 'text-red-600 font-medium' if f.is_stale else 'text-emerald-700' }}">{{ 'STALE' if f.is_stale else 'fresh' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
       <p class="mt-2 text-xs {{ 'text-red-600' if not live_alerts_enabled else 'text-slate-500' }}">
-        Live alerts: {{ 'DISABLED (stale/unavailable feed)' if not live_alerts_enabled else 'eligible when a strategy is promoted' }}
+        Live alerts: {% if not live_alerts_enabled %}DISABLED (stale/unavailable feed){% else %}feed fresh — still gated by a promoted strategy AND alerts_enabled in Settings (both OFF by default){% endif %}
       </p>
+      <p class="mt-1 text-xs text-slate-500">END-OF-DAY data only — never labelled live. Intraday strategies and intraday alerts are disabled.</p>
     {% else %}
-      <p class="mt-2 text-sm text-slate-500">No feeds registered — run an ingest job.</p>
+      <p class="mt-2 text-sm text-slate-500">No feeds registered — run <code>signalforge ingest</code>.</p>
     {% endif %}
   </div>
 
@@ -35,7 +50,7 @@
       <p class="text-sm text-slate-600">cash ${{ '%.2f' | format(paper.cash) }} · {{ paper.n_open }} open · {{ paper.n_closed }} closed</p>
       <p class="text-sm text-slate-600">unrealized {{ '%+.2f' | format(paper.unrealized_pnl) }} · realized {{ '%+.2f' | format(paper.realized_pnl) }}</p>
     {% else %}
-      <p class="mt-2 text-sm text-slate-500">No paper account — run <code>signalforge seed</code>.</p>
+      <p class="mt-2 text-sm text-slate-500">No paper account — run <code>signalforge paper init --cash 10000</code>.</p>
     {% endif %}
   </div>
 </section>
