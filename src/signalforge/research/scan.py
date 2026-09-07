@@ -299,7 +299,9 @@ def run_scan(
 
 
 def _oos_regime_coverage(session: Session, run_id: int, min_trades: int) -> tuple[int, list[str]]:
-    """Distinct OOS market regimes with >= ``min_trades`` trades for this run."""
+    """Distinct OOS *trend* regimes (bull / bear / neutral) with >= ``min_trades``
+    trades for this run. bull/high + bull/low count as **one** — different
+    volatility inside the same trend is not "multiple market regimes"."""
     from signalforge.db.models import BacktestMetric
 
     rows = session.scalars(
@@ -307,12 +309,14 @@ def _oos_regime_coverage(session: Session, run_id: int, min_trades: int) -> tupl
             BacktestMetric.run_id == run_id, BacktestMetric.phase == "oos_by_regime"
         )
     )
-    labels: list[str] = []
+    by_trend: dict[str, int] = {}
     for r in rows:
         mj = r.metrics_json
-        if float(mj.get("n_trades", 0)) >= min_trades:
-            labels.append(str(mj.get("regime_label", r.segment)))
-    return len(labels), sorted(labels)
+        label = str(mj.get("regime_label", r.segment))
+        trend = label.split("/", 1)[0] or label
+        by_trend[trend] = by_trend.get(trend, 0) + int(float(mj.get("n_trades", 0)))
+    covered = sorted(t for t, n in by_trend.items() if n >= min_trades)
+    return len(covered), covered
 
 
 def _NEUTRAL_STATE(as_of: date) -> RegimeState:

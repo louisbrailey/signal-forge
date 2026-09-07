@@ -124,10 +124,12 @@ def test_oos_regime_coverage_helper_counts_distinct_regimes(session: Session) ->
     )
     session.flush()
 
+    # bull/high + bull/low would collapse to one trend; here bear/high is under
+    # the per-regime trade floor, so only "bull" is covered.
     n, labels = _oos_regime_coverage(session, run.id, q.min_trades_per_regime)
-    assert n == 1 and labels == ["bull/low"]  # bear/high has too few trades
+    assert n == 1 and labels == ["bull"]
     n2, labels2 = _oos_regime_coverage(session, run.id, 1)
-    assert n2 == 2 and labels2 == ["bear/high", "bull/low"]
+    assert n2 == 2 and labels2 == ["bear", "bull"]
 
 
 def test_intraday_scan_without_an_intraday_feed_is_stale(session: Session) -> None:

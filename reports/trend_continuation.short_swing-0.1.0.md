@@ -2,8 +2,8 @@
 
 > **Hypothetical research output.** Simulated fills model spread and slippage; commission uses the configured `commission_per_share` (0 by default). Past results do not predict future results. This strategy is **EXPERIMENTAL** (paper only, no alerts) until promoted.
 
-- Generated: 2026-09-07T07:12:10+00:00
-- git: `dd1aff6`  ·  config hash: `010b908750b2d42af161468dee1fcb449a7874954d2cf6e9d7e43ac0e0a6ad47`
+- Generated: 2026-09-07T07:35:05+00:00
+- git: `79a5b05`  ·  config hash: `e96861ba16f3f717651b1e9a52115060328dd3b5d82dcd5c6834a0e622a6fa1c`
 - Horizon: SHORT_SWING
 - Window: 2024-08-28 → 2026-09-07
 - Universe (25): AAPL, AMZN, DIA, GOOGL, HD, IWM, JPM, META, MSFT, NVDA, QQQ, SPY, UNH, XLB, XLC, XLE, XLF, XLI, XLK, XLP, XLRE, XLU, XLV, XLY, XOM
