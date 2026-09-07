@@ -139,6 +139,7 @@ def overview_context(session: Session) -> dict[str, Any]:
         "kill_switch": ks,
         "market_proxy_present": last_bar is not None,
         "config_hash": cfg.config_hash,
+        "news": _news_items(session, None, 6),
     }
 
 
@@ -296,6 +297,242 @@ def candidate_context(session: Session, candidate_id: int) -> dict[str, Any] | N
         ),
         "data_freshness": cand.data_freshness_json,
         "ranking": cand.ranking_json,
+        "news": _news_items(session, inst.symbol if inst else None, 6),
+    }
+
+
+def _payoff_svg(points: list[tuple[float, float]], w: int = 520, h: int = 180) -> str:
+    """Payoff chart: x = underlying price, y = P&L. Zero line drawn."""
+    if len(points) < 2:
+        return ""
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    xlo, xhi = min(xs), max(xs)
+    ylo, yhi = min([*ys, 0.0]), max([*ys, 0.0])
+    xspan = (xhi - xlo) or 1.0
+    yspan = (yhi - ylo) or 1.0
+
+    def px(x: float) -> float:
+        return (x - xlo) / xspan * (w - 8) + 4
+
+    def py(y: float) -> float:
+        return h - ((y - ylo) / yspan * (h - 16) + 8)
+
+    line = " ".join(f"{px(x):.1f},{py(y):.1f}" for x, y in points)
+    zero_y = py(0.0)
+    return (
+        f'<svg viewBox="0 0 {w} {h}" width="100%" height="{h}" role="img" '
+        f'aria-label="option payoff at expiry">'
+        f'<line x1="0" y1="{zero_y:.1f}" x2="{w}" y2="{zero_y:.1f}" stroke="#94a3b8" '
+        f'stroke-dasharray="3 3" stroke-width="1"/>'
+        f'<polyline fill="none" stroke="currentColor" stroke-width="2" points="{line}"/>'
+        f"</svg>"
+    )
+
+
+_OPT_RISK_WARNINGS = [
+    "Long options can expire worthless — the entire premium is at risk.",
+    "Liquidity/spread: wide bid-ask on illiquid strikes materially raises real cost; "
+    "this build has no live quote entitlement, so spread is estimated, not observed.",
+    "Assignment: a short call (covered) or short put (cash-secured) can be assigned early, "
+    "especially around ex-dividend dates.",
+    "Event risk: earnings and macro releases can gap the underlying through your stop or strike.",
+    "All figures are hypothetical, education-only. No order is ever placed.",
+]
+
+
+def options_context(
+    session: Session,
+    *,
+    underlying: str | None = None,
+    expiration: str | None = None,
+    contract: str | None = None,
+    sim: str = "long_call",
+    spot: float | None = None,
+    strike: float | None = None,
+    premium: float | None = None,
+) -> dict[str, Any]:
+    from sqlalchemy import func
+
+    from signalforge.db.models import EntitlementCheck as _EC
+    from signalforge.db.models import OptionContract, OptionQuoteSnapshot
+    from signalforge.options import COMPUTED_NOTE, DISCLAIMER
+    from signalforge.options import simulators as _sim
+    from signalforge.settings_store import effective_research_config
+
+    cfg = effective_research_config(session).options
+    underlyings = list(cfg.underlyings)
+    u = (underlying or (underlyings[0] if underlyings else "SPY")).upper()
+
+    # entitlement snapshot for the options-quote caveat
+    quote_row = session.scalar(
+        select(_EC)
+        .where(_EC.feed == "options_quotes_bidask")
+        .order_by(_EC.checked_at.desc())
+        .limit(1)
+    )
+    quotes_available = bool(quote_row and quote_row.available)
+
+    # chain explorer — latest snapshot per contract for this underlying
+    latest_asof = session.scalar(
+        select(func.max(OptionQuoteSnapshot.as_of)).where(
+            OptionQuoteSnapshot.underlying_symbol == u
+        )
+    )
+    chain: list[dict[str, Any]] = []
+    expirations: list[str] = []
+    if latest_asof is not None:
+        rows = session.execute(
+            select(OptionQuoteSnapshot, OptionContract)
+            .join(
+                OptionContract,
+                OptionContract.option_ticker == OptionQuoteSnapshot.option_ticker,
+            )
+            .where(
+                OptionQuoteSnapshot.underlying_symbol == u,
+                OptionQuoteSnapshot.as_of == latest_asof,
+            )
+            .order_by(OptionContract.expiration_date, OptionContract.strike_price)
+        ).all()
+        expirations = sorted({c.expiration_date.isoformat() for _, c in rows})
+        for snap, c in rows:
+            if expiration and c.expiration_date.isoformat() != expiration:
+                continue
+            g = snap.vendor_greeks_json or {}
+            chain.append(
+                {
+                    "ticker": c.option_ticker,
+                    "type": c.contract_type,
+                    "strike": c.strike_price,
+                    "expiration": c.expiration_date.isoformat(),
+                    "day_close": snap.day_close,
+                    "last_trade": snap.last_trade_price,
+                    "last_trade_at": snap.last_trade_at.isoformat() if snap.last_trade_at else None,
+                    "volume": snap.day_volume,
+                    "open_interest": snap.open_interest,
+                    "iv": snap.vendor_iv,
+                    "delta": g.get("delta"),
+                    "gamma": g.get("gamma"),
+                    "theta": g.get("theta"),
+                    "vega": g.get("vega"),
+                    "break_even": snap.break_even_price,
+                    "underlying_price": snap.underlying_price,
+                }
+            )
+
+    # contract detail
+    detail = next((c for c in chain if c["ticker"] == contract), None)
+
+    # simulator — pure math, always available
+    ref_spot = spot or (detail["underlying_price"] if detail else None) or 100.0
+    ref_strike = strike or (detail["strike"] if detail else round(ref_spot))
+    ref_prem = premium or (
+        (detail["last_trade"] or detail["day_close"]) if detail else round(ref_spot * 0.02, 2)
+    )
+    fns = {
+        "long_call": _sim.long_call,
+        "long_put": _sim.long_put,
+        "covered_call": _sim.covered_call,
+        "cash_secured_put": _sim.cash_secured_put,
+    }
+    sim_fn = fns.get(sim, _sim.long_call)
+    res = sim_fn(float(ref_spot), float(ref_strike), float(ref_prem))
+    payoff_pts = [(p.underlying, p.pnl) for p in res.payoff_at_expiry]
+    decay = _sim.time_decay_curve(
+        float(ref_spot),
+        float(ref_strike),
+        iv=(detail["iv"] if detail and detail.get("iv") else 0.25),
+        days_to_expiry=30,
+        call=sim not in ("long_put",),
+    )
+
+    return {
+        "underlyings": underlyings,
+        "selected_underlying": u,
+        "expirations": expirations,
+        "selected_expiration": expiration,
+        "chain": chain,
+        "chain_as_of": latest_asof.isoformat() if latest_asof else None,
+        "detail": detail,
+        "quotes_available": quotes_available,
+        "quote_note": (
+            "Live bid/ask (NBBO) quotes are NOT entitled on this plan — "
+            "spread is estimated, not observed. Prices shown are the last delayed "
+            "trade and the delayed daily close."
+        ),
+        "computed_note": COMPUTED_NOTE,
+        "sim": {
+            "kind": sim,
+            "spot": ref_spot,
+            "strike": ref_strike,
+            "premium": ref_prem,
+            "result": res,
+            "payoff_svg": _payoff_svg(payoff_pts),
+            "decay": decay,
+        },
+        "risk_warnings": _OPT_RISK_WARNINGS,
+        "disclaimer": DISCLAIMER,
+    }
+
+
+def _news_items(session: Session, symbol: str | None, limit: int) -> list[dict[str, Any]]:
+    """Shared news read-model row shaping (used by /news, overview, candidate)."""
+    from signalforge.db.models import NewsItem
+
+    stmt = select(NewsItem).order_by(NewsItem.published_at.desc()).limit(limit)
+    if symbol:
+        stmt = (
+            select(NewsItem)
+            .where(NewsItem.instrument_symbols.contains([symbol.upper()]))
+            .order_by(NewsItem.published_at.desc())
+            .limit(limit)
+        )
+    return [
+        {
+            "headline": r.headline,
+            "url": r.url,
+            "publisher": r.source,
+            "author": r.author,
+            "category": r.category,
+            "published_at": r.published_at.isoformat(),
+            "retrieved_at": r.retrieved_at.isoformat() if r.retrieved_at else None,
+            "tickers": r.instrument_symbols,
+            "dedupe_key": r.dedupe_key,
+        }
+        for r in session.scalars(stmt)
+    ]
+
+
+def news_context(session: Session, *, symbol: str | None = None, limit: int = 40) -> dict[str, Any]:
+    from signalforge.db.models import EntitlementCheck as _EC
+
+    benz = session.scalar(
+        select(_EC)
+        .where(_EC.feed == "benzinga_news_dedicated")
+        .order_by(_EC.checked_at.desc())
+        .limit(1)
+    )
+    if benz is None:
+        benz_limitation = "not yet verified — run `signalforge providers verify`"
+    elif benz.available:
+        benz_limitation = ""
+    else:
+        _http = f"HTTP {benz.http_status} " if benz.http_status else ""
+        benz_limitation = (
+            f"{_http}{benz.error_category} on {benz.endpoint} "
+            f"(dedicated Benzinga news feed not provisioned on this key)"
+            + (f" — vendor said: {benz.detail}" if benz.detail else "")
+        )
+    return {
+        "news_items": _news_items(session, symbol, limit),
+        "news_symbol": symbol,
+        "benzinga_available": bool(benz and benz.available),
+        "benzinga_limitation": benz_limitation,
+        "news_source_label": (
+            "Benzinga (licensed primary)"
+            if (benz and benz.available)
+            else "Licensed multi-publisher feed (no dedicated Benzinga entitlement)"
+        ),
     }
 
 

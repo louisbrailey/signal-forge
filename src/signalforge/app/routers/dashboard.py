@@ -131,10 +131,40 @@ def act_build_briefing(db: DbDep) -> RedirectResponse:
 
 
 @router.get("/options", response_class=HTMLResponse)
-def options_page(request: Request, user: UserDep) -> HTMLResponse:
-    return templates.TemplateResponse(
-        request, "options.html", {"user": user, "nav_active": "options.html"}
+def options_page(
+    request: Request,
+    db: DbDep,
+    user: UserDep,
+    underlying: str | None = None,
+    expiration: str | None = None,
+    contract: str | None = None,
+    sim: str = "long_call",
+    spot: float | None = None,
+    strike: float | None = None,
+    premium: float | None = None,
+) -> HTMLResponse:
+    from signalforge.app.views import options_context
+
+    ctx = options_context(
+        db,
+        underlying=underlying,
+        expiration=expiration,
+        contract=contract,
+        sim=sim,
+        spot=spot,
+        strike=strike,
+        premium=premium,
     )
+    return _page(request, user, "options.html", ctx)
+
+
+@router.get("/news", response_class=HTMLResponse)
+def news_page(
+    request: Request, db: DbDep, user: UserDep, symbol: str | None = None
+) -> HTMLResponse:
+    from signalforge.app.views import news_context
+
+    return _page(request, user, "news.html", news_context(db, symbol=symbol))
 
 
 @router.get("/settings", response_class=HTMLResponse)

@@ -31,6 +31,35 @@
 </span>
 {% endmacro %}
 
+{% macro news_timeline(items, empty="No news stored.", compact=False) %}
+  {% if not items %}
+    <p class="text-xs text-slate-400">{{ empty }}</p>
+  {% else %}
+  <ol class="divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white">
+    {% for n in items %}
+    <li class="px-3 py-2 text-sm">
+      <div class="flex items-baseline gap-2">
+        <a href="{{ n.url }}" target="_blank" rel="noopener noreferrer"
+           class="font-medium text-sky-700 hover:underline">{{ n.headline }}</a>
+      </div>
+      <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-500">
+        <span class="rounded bg-slate-100 px-1.5 py-0.5 text-slate-600">{{ n.publisher or 'unknown publisher' }}</span>
+        {% if n.category %}<span>{{ n.category }}</span>{% endif %}
+        <span title="publication time">pub {{ n.published_at[:16] }}</span>
+        {% if n.retrieved_at %}<span title="retrieval time">· retrieved {{ n.retrieved_at[:16] }}</span>{% endif %}
+        {% if not compact %}<span class="text-slate-400">· dedupe {{ n.dedupe_key[:10] if n.dedupe_key else 'n/a' }}</span>{% endif %}
+      </div>
+      {% if n.tickers and not compact %}
+      <div class="mt-1 flex flex-wrap gap-1">
+        {% for t in n.tickers %}<span class="rounded bg-sky-50 px-1.5 py-0.5 text-xs text-sky-700">{{ t }}</span>{% endfor %}
+      </div>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+{% endmacro %}
+
 {% macro freshness(df) %}
   {% if df and df.per_feed %}
     {% for key, entry in df.per_feed.items() %}

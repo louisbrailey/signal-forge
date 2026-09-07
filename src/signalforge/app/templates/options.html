@@ -1,14 +1,140 @@
 {% extends "base.html" %}
-{% block title %}Options (learn) — Signal Forge{% endblock %}
+{% block title %}Options — learn & simulate — Signal Forge{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-semibold text-slate-900">Options — Education &amp; Simulation</h1>
-<div class="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-  <p><strong>Phase 3.</strong> The options module is education and simulation only. It will cover:
-  plain-language calls/puts, a break-even calculator, long-option maximum-loss, theta / time-decay
-  visualisation, implied-volatility and earnings-event risk, and covered-call / cash-secured-put /
-  defined-risk vertical simulators — all paper-only.</p>
-  <p class="mt-2">There will be <strong>no</strong> naked short options, uncovered calls, margin-dependent
-  strategies, 0DTE recommendation alerts, or any execution workflow. Long options can expire worthless;
-  multi-leg strategies carry additional risk.</p>
+<p class="mt-1 text-sm text-slate-500">{{ disclaimer }} {{ computed_note }}</p>
+
+<div class="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+  {{ quote_note }}
+  <span class="block mt-1">No naked/uncovered options, margin strategies, 0DTE alerts, options
+  recommendations, or execution — anywhere.</span>
 </div>
+
+<!-- ===== chain explorer ===== -->
+<section class="mt-5 rounded-lg border border-slate-200 bg-white p-4">
+  <div class="flex flex-wrap items-end gap-3 text-sm">
+    <form method="get" action="/options" class="flex flex-wrap items-end gap-3">
+      <input type="hidden" name="sim" value="{{ sim.kind }}" />
+      <label class="flex flex-col">Underlying
+        <select name="underlying" class="mt-1 rounded border border-slate-300 px-2 py-1">
+          {% for u in underlyings %}<option value="{{ u }}" {{ 'selected' if u == selected_underlying }}>{{ u }}</option>{% endfor %}
+        </select>
+      </label>
+      <label class="flex flex-col">Expiration
+        <select name="expiration" class="mt-1 rounded border border-slate-300 px-2 py-1">
+          <option value="">all</option>
+          {% for e in expirations %}<option value="{{ e }}" {{ 'selected' if e == selected_expiration }}>{{ e }}</option>{% endfor %}
+        </select>
+      </label>
+      <button class="rounded bg-slate-900 px-3 py-1.5 text-white">Load chain</button>
+    </form>
+    <span class="text-xs text-slate-500">
+      {% if chain_as_of %}snapshot as of {{ chain_as_of[:16] }} · DELAYED (≥15 min){% else %}no snapshot — run <code>signalforge options ingest</code>{% endif %}
+    </span>
+  </div>
+
+  {% if chain %}
+  <div class="mt-3 overflow-x-auto">
+    <table class="min-w-full text-xs">
+      <thead class="text-left text-slate-500"><tr>
+        <th class="py-1 pr-3">Type</th><th class="pr-3">Strike</th><th class="pr-3">Exp</th>
+        <th class="pr-3">Last (dly)</th><th class="pr-3">Day close</th><th class="pr-3">Vol</th>
+        <th class="pr-3">OI (EOD)</th><th class="pr-3">IV</th><th class="pr-3">Δ</th>
+        <th class="pr-3">Θ</th><th class="pr-3">Break-even</th><th></th></tr></thead>
+      <tbody>
+      {% for c in chain %}
+        <tr class="border-t border-slate-100 {{ 'bg-sky-50' if detail and c.ticker == detail.ticker }}">
+          <td class="py-1 pr-3 {{ 'text-emerald-700' if c.type == 'call' else 'text-red-700' }}">{{ c.type }}</td>
+          <td class="pr-3">{{ '%.2f' | format(c.strike) }}</td>
+          <td class="pr-3">{{ c.expiration }}</td>
+          <td class="pr-3">{{ '%.2f' | format(c.last_trade) if c.last_trade is not none else '—' }}</td>
+          <td class="pr-3">{{ '%.2f' | format(c.day_close) if c.day_close is not none else '—' }}</td>
+          <td class="pr-3">{{ '%.0f' | format(c.volume) if c.volume is not none else '—' }}</td>
+          <td class="pr-3">{{ c.open_interest if c.open_interest is not none else '—' }}</td>
+          <td class="pr-3">{{ '%.1f%%' | format(c.iv * 100) if c.iv is not none else '—' }}</td>
+          <td class="pr-3">{{ '%.2f' | format(c.delta) if c.delta is not none else '—' }}</td>
+          <td class="pr-3">{{ '%.3f' | format(c.theta) if c.theta is not none else '—' }}</td>
+          <td class="pr-3">{{ '%.2f' | format(c.break_even) if c.break_even is not none else '—' }}</td>
+          <td><a class="text-sky-700 hover:underline"
+                 href="/options?underlying={{ selected_underlying }}&expiration={{ c.expiration }}&contract={{ c.ticker }}&sim={{ 'long_call' if c.type == 'call' else 'long_put' }}&spot={{ c.underlying_price }}&strike={{ c.strike }}&premium={{ c.last_trade or c.day_close or 0 }}">use →</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+
+<!-- ===== contract detail ===== -->
+{% if detail %}
+<section class="mt-4 rounded-lg border border-slate-200 bg-white p-4 text-sm">
+  <h2 class="text-sm font-medium text-slate-500">Contract — <code>{{ detail.ticker }}</code></h2>
+  <dl class="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-4">
+    <div><dt class="text-slate-500">Type / strike</dt><dd>{{ detail.type }} @ {{ '%.2f' | format(detail.strike) }}</dd></div>
+    <div><dt class="text-slate-500">Expiration</dt><dd>{{ detail.expiration }}</dd></div>
+    <div><dt class="text-slate-500">Underlying</dt><dd>{{ '%.2f' | format(detail.underlying_price) if detail.underlying_price else '—' }}</dd></div>
+    <div><dt class="text-slate-500">Open interest (EOD)</dt><dd>{{ detail.open_interest if detail.open_interest is not none else '—' }}</dd></div>
+    <div><dt class="text-slate-500">Last trade (delayed)</dt><dd>{{ '%.2f' | format(detail.last_trade) if detail.last_trade is not none else '—' }} <span class="text-slate-400">{{ detail.last_trade_at[:16] if detail.last_trade_at }}</span></dd></div>
+    <div><dt class="text-slate-500">Day close (delayed)</dt><dd>{{ '%.2f' | format(detail.day_close) if detail.day_close is not none else '—' }}</dd></div>
+    <div><dt class="text-slate-500">Bid / ask</dt><dd class="text-slate-400">not entitled (spread estimated)</dd></div>
+    <div><dt class="text-slate-500">IV / Δ / Θ / ν</dt><dd>
+      {{ '%.1f%%' | format(detail.iv*100) if detail.iv is not none else '—' }} /
+      {{ '%.2f' | format(detail.delta) if detail.delta is not none else '—' }} /
+      {{ '%.3f' | format(detail.theta) if detail.theta is not none else '—' }} /
+      {{ '%.2f' | format(detail.vega) if detail.vega is not none else '—' }}</dd></div>
+  </dl>
+  <p class="mt-1 text-xs text-slate-400">Price/volume/last-trade timestamps are DELAYED; open interest is END-OF-DAY; IV/Greeks update intraday but the chain is still delayed — never live.</p>
+</section>
+{% endif %}
+
+<!-- ===== simulator ===== -->
+<section class="mt-4 rounded-lg border border-slate-300 bg-slate-50 p-4">
+  <h2 class="text-sm font-medium text-slate-700">Paper simulator (hypothetical payoff at expiry)</h2>
+  <form method="get" action="/options" class="mt-2 flex flex-wrap items-end gap-3 text-sm">
+    <input type="hidden" name="underlying" value="{{ selected_underlying }}" />
+    {% if selected_expiration %}<input type="hidden" name="expiration" value="{{ selected_expiration }}" />{% endif %}
+    {% if detail %}<input type="hidden" name="contract" value="{{ detail.ticker }}" />{% endif %}
+    <label class="flex flex-col">Strategy
+      <select name="sim" class="mt-1 rounded border border-slate-300 px-2 py-1">
+        {% for k in ['long_call','long_put','covered_call','cash_secured_put'] %}
+          <option value="{{ k }}" {{ 'selected' if k == sim.kind }}>{{ k.replace('_',' ') }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="flex flex-col">Spot<input name="spot" value="{{ '%.2f' | format(sim.spot) }}" class="mt-1 w-24 rounded border border-slate-300 px-2 py-1" /></label>
+    <label class="flex flex-col">Strike<input name="strike" value="{{ '%.2f' | format(sim.strike) }}" class="mt-1 w-24 rounded border border-slate-300 px-2 py-1" /></label>
+    <label class="flex flex-col">Premium<input name="premium" value="{{ '%.2f' | format(sim.premium) }}" class="mt-1 w-24 rounded border border-slate-300 px-2 py-1" /></label>
+    <button class="rounded bg-slate-900 px-3 py-1.5 text-white">Simulate</button>
+  </form>
+
+  <div class="mt-3 grid gap-4 lg:grid-cols-2">
+    <div class="rounded border border-slate-200 bg-white p-3">
+      <h3 class="text-xs font-medium text-slate-500">Payoff at expiry — {{ sim.result.strategy }}</h3>
+      <div class="mt-1 text-sky-700">{{ sim.payoff_svg | safe }}</div>
+      <dl class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+        <div><dt class="text-slate-500">Entry cost</dt><dd>{{ '%+.2f' | format(sim.result.entry_cost) }}</dd></div>
+        <div><dt class="text-slate-500">Max loss</dt><dd class="font-medium text-red-700">{{ '%.2f' | format(sim.result.max_loss) }}</dd></div>
+        <div><dt class="text-slate-500">Max gain</dt><dd>{{ 'unbounded' if sim.result.max_gain|string == 'inf' else '%.2f' | format(sim.result.max_gain) }}</dd></div>
+        <div><dt class="text-slate-500">Break-even</dt><dd>{{ sim.result.break_evens | join(', ') }}</dd></div>
+      </dl>
+      <ul class="mt-2 list-disc pl-5 text-xs text-slate-600">{% for n in sim.result.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+    </div>
+    <div class="rounded border border-slate-200 bg-white p-3">
+      <h3 class="text-xs font-medium text-slate-500">Time decay (Black-Scholes mark, iv assumption)</h3>
+      <table class="mt-1 w-full text-xs">
+        <thead class="text-left text-slate-400"><tr><th>DTE</th><th>Mark</th><th>Θ/day</th></tr></thead>
+        <tbody>
+        {% for d in sim.decay %}{% if loop.index0 % 3 == 0 %}
+          <tr><td>{{ d.days_to_expiry }}</td><td>{{ '%.3f' | format(d.mark) }}</td><td>{{ '%.4f' | format(d.theta_per_day) }}</td></tr>
+        {% endif %}{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+  <h2 class="font-medium">Risk warnings</h2>
+  <ul class="mt-1 list-disc pl-5">{% for w in risk_warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+</section>
 {% endblock %}
