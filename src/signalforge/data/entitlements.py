@@ -1,22 +1,21 @@
 """Provider-entitlement verification (read-only, secret-safe).
 
-Probes the endpoints Signal Forge would use with the credentials already in the
-local environment and reports, per feed, whether it is *actually* reachable and
-authorized. Nothing here changes ingestion behaviour — callers decide what to do
-with an ``unavailable`` result, and an unavailable feed is never assumed live.
+Probes each concrete endpoint Signal Forge would use with the credentials already
+in the local environment and records, per feed: entitlement status, endpoint,
+source, timestamp, latency category, and error category. Nothing here changes
+ingestion behaviour — an ``unavailable`` feed is never assumed available.
 
 Secret safety: the API key travels only in the ``Authorization`` header; it is
 scrubbed from every returned string; no key, header, full URL with query, or
-webhook URL is ever logged, cached, or returned. Discord is checked for
-presence/format only — no request is made (a test post is a separate, explicitly
-confirmed action).
+webhook URL is ever logged, cached, committed, or returned. Discord is checked
+for presence/format only — no request is made.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from datetime import date, timedelta
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -24,48 +23,45 @@ import httpx
 from signalforge.config import Settings, get_settings
 
 _MASSIVE_BASE = "https://api.massive.com"
-_TIMEOUT = 15.0
+_TIMEOUT = 20.0
 _REDACTED = "[REDACTED]"
+
+# error categories: none | auth_missing | not_authorized | rate_limited
+#                   | not_found | network | parse | empty
+LatencyLabel = str  # REALTIME | DELAYED | END_OF_DAY | HISTORICAL | none
 
 
 @dataclass(frozen=True, slots=True)
-class Probe:
-    feed: str  # stocks_daily | stocks_history_10y | options_contracts | options_chain | news
-    provider: str
-    reachable: bool
+class EndpointCheck:
+    feed: str
+    subscription: str  # stocks_developer | options_developer | benzinga_news | discord
+    endpoint: str  # path only, no query secrets
+    source: str  # provider name
+    checked_at: str  # ISO-8601 UTC
     http_status: int | None
-    authorized: bool
     available: bool
-    sample_keys: tuple[str, ...] = ()
-    note: str = ""
+    latency_category: LatencyLabel
+    error_category: str
+    detail: str = ""
+
+    def to_row(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
 class EntitlementReport:
-    probes: list[Probe] = field(default_factory=list)
+    checks: list[EndpointCheck] = field(default_factory=list)
     discord_configured: bool = False
     discord_note: str = ""
 
-    def available_feeds(self) -> list[str]:
-        return [p.feed for p in self.probes if p.available]
+    def by_subscription(self, sub: str) -> list[EndpointCheck]:
+        return [c for c in self.checks if c.subscription == sub]
 
-    def unavailable_feeds(self) -> list[str]:
-        return [p.feed for p in self.probes if not p.available]
+    def available(self, feed: str) -> bool:
+        return any(c.feed == feed and c.available for c in self.checks)
 
     def to_rows(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "feed": p.feed,
-                "provider": p.provider,
-                "reachable": p.reachable,
-                "http_status": p.http_status,
-                "authorized": p.authorized,
-                "available": p.available,
-                "sample_keys": list(p.sample_keys),
-                "note": p.note,
-            }
-            for p in self.probes
-        ]
+        return [c.to_row() for c in self.checks]
 
 
 def _scrub(text: str, *secrets: str) -> str:
@@ -73,15 +69,39 @@ def _scrub(text: str, *secrets: str) -> str:
     for s in secrets:
         if s:
             out = out.replace(s, _REDACTED)
-    # Also drop any apiKey/token-looking query fragment defensively.
     out = re.sub(r"(api[_-]?key|token|apikey)=[^&\s\"']+", r"\1=" + _REDACTED, out, flags=re.I)
-    return out[:400]
+    return out[:300]
 
 
-def _get(
-    client: httpx.Client, path: str, key: str
-) -> tuple[int | None, dict[str, Any] | None, str]:
-    """GET a Massive path with the key in the header only. Returns (status, json, note)."""
+def _classify(status: int | None, body: dict[str, Any] | None) -> tuple[bool, str]:
+    """Return (available, error_category)."""
+    if status is None:
+        return False, "network"
+    if status in (401,):
+        return False, "not_authorized"
+    if status == 403:
+        return False, "not_authorized"
+    if status == 404:
+        return False, "not_found"
+    if status == 429:
+        return False, "rate_limited"
+    if status != 200:
+        return False, "network"
+    if body is None:
+        return False, "parse"
+    # a 200 with an explicit non-OK status field, or no rows for the sample query
+    st = str(body.get("status", "")).upper()
+    if st not in ("OK", "DELAYED", ""):
+        return False, "empty"
+    rows = body.get("results")
+    count = body.get("resultsCount") or body.get("count")
+    has_rows = bool(rows) if isinstance(rows, list) else (rows not in (None, {}, []))
+    if not has_rows and (count in (0, None)) and "results" in body:
+        return False, "empty"
+    return True, "none"
+
+
+def _get(client: httpx.Client, path: str, key: str) -> tuple[int | None, dict[str, Any] | None]:
     try:
         resp = client.get(
             _MASSIVE_BASE + path,
@@ -89,42 +109,92 @@ def _get(
             timeout=_TIMEOUT,
             follow_redirects=False,
         )
-    except httpx.HTTPError as exc:
-        return None, None, _scrub(f"network error: {type(exc).__name__}", key)
-    status = resp.status_code
+    except httpx.HTTPError:
+        return None, None
     body: dict[str, Any] | None = None
     if resp.headers.get("content-type", "").startswith("application/json"):
         try:
             parsed = resp.json()
-            body = parsed if isinstance(parsed, dict) else {"_list": parsed}
+            body = parsed if isinstance(parsed, dict) else {"results": parsed}
         except ValueError:
             body = None
-    note = "" if status == 200 else _scrub(resp.text, key)
-    return status, body, note
+    return resp.status_code, body
 
 
-def _probe(
+def _check(
     client: httpx.Client,
     key: str,
     *,
     feed: str,
-    provider: str,
+    subscription: str,
+    endpoint_display: str,
     path: str,
-    ok_keys: tuple[str, ...] = ("results", "data", "_list"),
-) -> Probe:
+    latency: LatencyLabel,
+    source: str,
+) -> EndpointCheck:
+    now = datetime.now(UTC).isoformat()
     if not key:
-        return Probe(feed, provider, False, None, False, False, note="no API key configured")
-    status, body, note = _get(client, path, key)
-    reachable = status is not None
-    authorized = status not in (401, 403)
-    keys = tuple(sorted(body.keys()))[:12] if isinstance(body, dict) else ()
-    has_payload = isinstance(body, dict) and any(
-        k in body and body[k] not in (None, [], {}) for k in ok_keys
+        return EndpointCheck(
+            feed,
+            subscription,
+            endpoint_display,
+            source,
+            now,
+            None,
+            False,
+            "none",
+            "auth_missing",
+            "no API key configured",
+        )
+    status, body = _get(client, path, key)
+    available, err = _classify(status, body)
+    # trust the provider's own DELAYED marker over our assumption
+    body_status = str((body or {}).get("status", "")).upper()
+    eff_latency = "DELAYED" if body_status == "DELAYED" else latency
+    detail = ""
+    if not available and body is not None:
+        detail = _scrub(str(body.get("message") or body.get("error") or ""), key)
+    return EndpointCheck(
+        feed,
+        subscription,
+        endpoint_display,
+        source,
+        now,
+        status,
+        available,
+        eff_latency if available else "none",
+        err,
+        detail,
     )
-    available = bool(status == 200 and (has_payload or not ok_keys))
-    if status == 200 and not has_payload:
-        note = "200 OK but no data rows for the sample query — entitlement unclear"
-    return Probe(feed, provider, reachable, status, authorized, available, keys, note)
+
+
+def _sample_option_contract(client: httpx.Client, key: str) -> tuple[str | None, str | None]:
+    """Pick a *liquid, near-the-money* SPY call ~20-45 days out so per-contract
+    probes don't false-negative on an illiquid deep strike. Returns (contract, expiry)."""
+    _, spy = _get(
+        client, "/v2/aggs/ticker/SPY/range/1/day/2024-01-02/2024-01-05?adjusted=true", key
+    )
+    _, last = _get(client, "/v2/last/trade/SPY", key)
+    px = None
+    if last and isinstance(last.get("results"), dict):
+        px = last["results"].get("p")
+    if px is None and spy and spy.get("results"):
+        px = spy["results"][-1].get("c")
+    lo = round((px or 500) * 0.98)
+    hi = round((px or 500) * 1.02)
+    exp_lo = (date.today() + timedelta(days=20)).isoformat()
+    exp_hi = (date.today() + timedelta(days=45)).isoformat()
+    status, body = _get(
+        client,
+        f"/v3/reference/options/contracts?underlying_ticker=SPY&contract_type=call"
+        f"&expiration_date.gte={exp_lo}&expiration_date.lte={exp_hi}"
+        f"&strike_price.gte={lo}&strike_price.lte={hi}&limit=1",
+        key,
+    )
+    if status == 200 and body and body.get("results"):
+        r0 = body["results"][0]
+        return str(r0.get("ticker") or "") or None, str(r0.get("expiration_date") or "") or None
+    return None, None
 
 
 def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
@@ -133,77 +203,220 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
     opt_key = s.options_api_key.get_secret_value() or stock_key
     news_key = s.news_api_key.get_secret_value() or stock_key
     provider = s.market_data_provider or "unset"
+    today = date.today()
+    d9 = today - timedelta(days=int(9 * 365.25))
 
-    probes: list[Probe] = []
+    checks: list[EndpointCheck] = []
     with httpx.Client() as client:
-        probes.append(
-            _probe(
+        # ---- Stocks Developer -------------------------------------------------
+        checks.append(
+            _check(
                 client,
                 stock_key,
-                feed="stocks_daily",
-                provider=provider,
+                feed="stocks_daily_bars",
+                subscription="stocks_developer",
+                endpoint_display="/v2/aggs/ticker/{sym}/range/1/day/{from}/{to}",
                 path="/v2/aggs/ticker/AAPL/range/1/day/2024-01-02/2024-01-08?adjusted=true&limit=5",
+                latency="END_OF_DAY",
+                source=provider,
             )
         )
-        # Deep history: request a window ~9 years back (safely inside a 10y plan).
-        deep_from = date.today() - timedelta(days=int(9 * 365.25))
-        deep_to = deep_from + timedelta(days=10)
-        deep = _probe(
-            client,
-            stock_key,
-            feed="stocks_history_deep",
-            provider=provider,
-            path=f"/v2/aggs/ticker/AAPL/range/1/day/{deep_from}/{deep_to}?adjusted=true&limit=5",
-        )
-        if deep.available:
-            deep = Probe(
-                deep.feed,
-                deep.provider,
-                deep.reachable,
-                deep.http_status,
-                deep.authorized,
-                deep.available,
-                deep.sample_keys,
-                note=f"~9y lookback OK (sampled from {deep_from}); deeper windows are plan-limited",
+        checks.append(
+            _check(
+                client,
+                stock_key,
+                feed="stocks_history_10y",
+                subscription="stocks_developer",
+                endpoint_display="/v2/aggs/ticker/{sym}/range/1/day/{~9y}/{...}",
+                path=f"/v2/aggs/ticker/AAPL/range/1/day/{d9}/{d9 + timedelta(days=10)}"
+                "?adjusted=true&limit=5",
+                latency="HISTORICAL",
+                source=provider,
             )
-        probes.append(deep)
-        probes.append(
-            _probe(
+        )
+        checks.append(
+            _check(
+                client,
+                stock_key,
+                feed="stocks_intraday_aggs_5m",
+                subscription="stocks_developer",
+                endpoint_display="/v2/aggs/ticker/{sym}/range/5/minute/{from}/{to}",
+                path=f"/v2/aggs/ticker/AAPL/range/5/minute/{today - timedelta(days=4)}/"
+                f"{today - timedelta(days=1)}?adjusted=true&limit=5",
+                latency="DELAYED",
+                source=provider,
+            )
+        )
+        checks.append(
+            _check(
+                client,
+                stock_key,
+                feed="stocks_last_trade",
+                subscription="stocks_developer",
+                endpoint_display="/v2/last/trade/{sym}",
+                path="/v2/last/trade/AAPL",
+                latency="DELAYED",
+                source=provider,
+            )
+        )
+        checks.append(
+            _check(
+                client,
+                stock_key,
+                feed="stocks_nbbo_quotes",
+                subscription="stocks_developer",
+                endpoint_display="/v3/quotes/{sym}",
+                path="/v3/quotes/AAPL?limit=1",
+                latency="DELAYED",
+                source=provider,
+            )
+        )
+
+        # ---- Options Developer ---------------------------------------------- #
+        oc, oc_exp = _sample_option_contract(client, opt_key)
+        checks.append(
+            _check(
                 client,
                 opt_key,
                 feed="options_contracts",
-                provider=s.options_provider or provider,
+                subscription="options_developer",
+                endpoint_display="/v3/reference/options/contracts",
                 path="/v3/reference/options/contracts?underlying_ticker=SPY&limit=1",
+                latency="HISTORICAL",
+                source=provider,
             )
         )
-        probes.append(
-            _probe(
+        checks.append(
+            _check(
                 client,
                 opt_key,
-                feed="options_chain",
-                provider=s.options_provider or provider,
+                feed="options_chain_snapshot",
+                subscription="options_developer",
+                endpoint_display="/v3/snapshot/options/{underlying}",
                 path="/v3/snapshot/options/SPY?limit=1",
+                latency="DELAYED",
+                source=provider,
             )
         )
-        # News: try the two documented shapes; report the first that authorizes.
-        news_probe = _probe(
-            client,
-            news_key,
-            feed="news",
-            provider=s.news_provider or "benzinga-via-massive",
-            path="/v2/reference/news?ticker=AAPL&limit=1&order=desc",
+        checks.append(
+            _check(
+                client,
+                opt_key,
+                feed="options_contract_snapshot",
+                subscription="options_developer",
+                endpoint_display="/v3/snapshot/options/{underlying}/{contract}",
+                path=f"/v3/snapshot/options/SPY/{oc}" if oc else "/v3/snapshot/options/SPY/O:NONE",
+                latency="DELAYED",
+                source=provider,
+            )
         )
-        if not news_probe.available:
-            alt = _probe(
+        checks.append(
+            _check(
+                client,
+                opt_key,
+                feed="options_historical_aggs",
+                subscription="options_developer",
+                endpoint_display="/v2/aggs/ticker/{O:contract}/range/1/day/{from}/{to}",
+                path=(
+                    (
+                        f"/v2/aggs/ticker/{oc}/range/1/day/{today - timedelta(days=30)}/"
+                        f"{today - timedelta(days=1)}?limit=5"
+                    )
+                    if oc
+                    else "/v2/aggs/ticker/O:NONE/range/1/day/2024-01-01/2024-01-05"
+                ),
+                latency="HISTORICAL",
+                source=provider,
+            )
+        )
+        checks.append(
+            _check(
+                client,
+                opt_key,
+                feed="options_delayed_trades",
+                subscription="options_developer",
+                endpoint_display="/v3/trades/{O:contract}",
+                path=f"/v3/trades/{oc}?limit=2" if oc else "/v3/trades/O:NONE",
+                latency="DELAYED",
+                source=provider,
+            )
+        )
+        checks.append(
+            _check(
+                client,
+                opt_key,
+                feed="options_last_trade",
+                subscription="options_developer",
+                endpoint_display="/v2/last/trade/{O:contract}",
+                path=f"/v2/last/trade/{oc}" if oc else "/v2/last/trade/O:NONE",
+                latency="DELAYED",
+                source=provider,
+            )
+        )
+        checks.append(
+            _check(
+                client,
+                opt_key,
+                feed="options_quotes_bidask",
+                subscription="options_developer",
+                endpoint_display="/v3/quotes/{O:contract}",
+                path=f"/v3/quotes/{oc}?limit=2" if oc else "/v3/quotes/O:NONE",
+                latency="DELAYED",
+                source=provider,
+            )
+        )
+        # greeks / IV / OI live inside the chain snapshot — probe field presence
+        gc = _greeks_iv_oi(client, opt_key, provider, expiry=oc_exp)
+        checks.extend(gc)
+
+        # ---- Benzinga News ------------------------------------------------- #
+        checks.append(
+            _check(
                 client,
                 news_key,
-                feed="news",
-                provider=s.news_provider or "benzinga-via-massive",
-                path="/benzinga/v1/news?tickers=AAPL&pageSize=1",
-                ok_keys=("_list", "data", "results"),
+                feed="benzinga_news_dedicated",
+                subscription="benzinga_news",
+                endpoint_display="/benzinga/v1/news",
+                path="/benzinga/v1/news?limit=1",
+                latency="DELAYED",
+                source="benzinga",
             )
-            news_probe = alt if alt.available or alt.authorized else news_probe
-        probes.append(news_probe)
+        )
+        checks.append(
+            _check(
+                client,
+                news_key,
+                feed="benzinga_ratings",
+                subscription="benzinga_news",
+                endpoint_display="/benzinga/v1/ratings",
+                path="/benzinga/v1/ratings?limit=1",
+                latency="DELAYED",
+                source="benzinga",
+            )
+        )
+        checks.append(
+            _check(
+                client,
+                news_key,
+                feed="benzinga_analyst_insights",
+                subscription="benzinga_news",
+                endpoint_display="/benzinga/v1/analyst-insights",
+                path="/benzinga/v1/analyst-insights?limit=1",
+                latency="DELAYED",
+                source="benzinga",
+            )
+        )
+        generic = _check(
+            client,
+            news_key,
+            feed="news_generic_multipublisher",
+            subscription="benzinga_news",
+            endpoint_display="/v2/reference/news",
+            path="/v2/reference/news?ticker=AAPL&limit=1&order=desc",
+            latency="DELAYED",
+            source=provider,
+        )
+        checks.append(generic)
 
     webhook = s.discord_webhook_url.get_secret_value()
     discord_ok = bool(re.match(r"https://(discord(app)?\.com)/api/webhooks/\d+/[\w-]+", webhook))
@@ -213,5 +426,62 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
         else ("no DISCORD_WEBHOOK_URL set" if not webhook else "DISCORD_WEBHOOK_URL is malformed")
     )
     return EntitlementReport(
-        probes=probes, discord_configured=discord_ok, discord_note=discord_note
+        checks=checks, discord_configured=discord_ok, discord_note=discord_note
     )
+
+
+def _greeks_iv_oi(
+    client: httpx.Client, key: str, provider: str, *, expiry: str | None = None
+) -> list[EndpointCheck]:
+    """Probe greeks / implied_volatility / open_interest presence in a near-the-money
+    chain snapshot for a single near expiry (they are fields, not endpoints)."""
+    now = datetime.now(UTC).isoformat()
+    out: list[EndpointCheck] = []
+    exp_q = f"&expiration_date={expiry}" if expiry else ""
+    status, body = _get(
+        client,
+        f"/v3/snapshot/options/SPY?limit=50{exp_q}",
+        key,
+    )
+    rows = (body or {}).get("results") or []
+    # keep only the near-the-money slice
+    ua = next(
+        (r.get("underlying_asset", {}).get("price") for r in rows if isinstance(r, dict)), None
+    )
+    if ua:
+        rows = [
+            r
+            for r in rows
+            if isinstance(r, dict)
+            and abs((r.get("details", {}).get("strike_price") or 0) - ua) / ua < 0.05
+        ] or rows
+    for feed, field_names in (
+        ("options_greeks", ("greeks",)),
+        ("options_implied_vol", ("implied_volatility",)),
+        ("options_open_interest", ("open_interest",)),
+    ):
+        present = any(
+            all(r.get(fn) not in (None, {}, []) for fn in field_names)
+            for r in rows
+            if isinstance(r, dict)
+        )
+        latency = "END_OF_DAY" if feed == "options_open_interest" else "DELAYED"
+        out.append(
+            EndpointCheck(
+                feed=feed,
+                subscription="options_developer",
+                endpoint=f"/v3/snapshot/options/{{underlying}} :: {field_names[0]}",
+                source=provider,
+                checked_at=now,
+                http_status=status,
+                available=bool(status == 200 and present),
+                latency_category=latency if (status == 200 and present) else "none",
+                error_category=(
+                    "none"
+                    if (status == 200 and present)
+                    else ("not_authorized" if status in (401, 403) else "empty")
+                ),
+                detail="" if present else "field absent from a near-the-money snapshot sample",
+            )
+        )
+    return out

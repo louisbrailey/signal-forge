@@ -210,32 +210,63 @@ def data_coverage(
 
 
 @providers_app.command("verify")
-def providers_verify() -> None:
-    """Probe the configured providers with the local credentials. No behaviour changes.
+def providers_verify(
+    no_store: Annotated[
+        bool, typer.Option(help="Skip persisting the run to entitlement_check.")
+    ] = False,
+) -> None:
+    """Probe every concrete endpoint per subscription and record the result.
 
-    Prints only feed / reachable / HTTP status / authorized / available. Never
-    prints, logs, or caches an API key or the Discord webhook URL.
+    Records only: subscription / feed / endpoint / source / timestamp / HTTP
+    status / available / latency category / error category. Never prints, logs,
+    caches, or commits an API key or the Discord webhook URL.
     """
+    import uuid
+
     from signalforge.data.entitlements import verify_entitlements
+    from signalforge.db.models import EntitlementCheck
+    from signalforge.db.session import session_scope
 
     report = verify_entitlements()
-    typer.secho("Provider entitlement check (read-only):", fg=typer.colors.CYAN)
-    typer.echo(f"  {'feed':22} {'provider':22} {'status':8} {'auth':5} {'available'}")
-    for r in report.to_rows():
-        colour = typer.colors.GREEN if r["available"] else typer.colors.YELLOW
+    batch = uuid.uuid4().hex[:12]
+
+    last_sub = ""
+    for c in report.checks:
+        if c.subscription != last_sub:
+            typer.secho(f"\n[{c.subscription}]", fg=typer.colors.CYAN)
+            last_sub = c.subscription
+        mark = "OK  " if c.available else "----"
+        colour = typer.colors.GREEN if c.available else typer.colors.YELLOW
         typer.secho(
-            f"  {r['feed']:22} {r['provider']:22} "
-            f"{r['http_status'] or 'n/a'!s:8} {('yes' if r['authorized'] else 'no'):5} "
-            f"{'YES' if r['available'] else 'unavailable'}",
+            f"  {mark} {c.feed:28} {c.http_status or 'n/a'!s:5} "
+            f"lat={c.latency_category:10} err={c.error_category:14} {c.endpoint}",
             fg=colour,
         )
-        if r["note"]:
-            typer.echo(f"      note: {r['note']}")
-        if r["sample_keys"]:
-            typer.echo(f"      response keys: {', '.join(r['sample_keys'])}")
-    typer.echo(f"  discord: {report.discord_note}")
+        if c.detail:
+            typer.echo(f"       {c.detail}")
+    typer.secho(f"\n[discord] {report.discord_note}", fg=typer.colors.CYAN)
+
+    if not no_store:
+        with session_scope() as session:
+            for c in report.checks:
+                session.add(
+                    EntitlementCheck(
+                        batch_id=batch,
+                        subscription=c.subscription,
+                        feed=c.feed,
+                        endpoint=c.endpoint,
+                        source=c.source,
+                        checked_at=datetime.fromisoformat(c.checked_at),
+                        http_status=c.http_status,
+                        available=c.available,
+                        latency_category=c.latency_category,
+                        error_category=c.error_category,
+                        detail=c.detail[:300],
+                    )
+                )
+        typer.echo(f"\nrecorded {len(report.checks)} checks (batch {batch}) to entitlement_check.")
     typer.echo(
-        "\nUnavailable feeds are treated as unavailable — access is never inferred. "
+        "Unavailable feeds are treated as unavailable — access is never inferred. "
         "Research signal only — no order was placed."
     )
 

@@ -320,6 +320,25 @@ class IngestionRun(Base, IntPK):
     notes: Mapped[str] = mapped_column(Text, default="")
 
 
+class EntitlementCheck(Base, IntPK):
+    """One recorded provider-entitlement probe. Never stores a key or a URL with
+    a secret — only status / endpoint / source / timestamp / latency / error."""
+
+    __tablename__ = "entitlement_check"
+
+    batch_id: Mapped[str] = mapped_column(String(36), index=True)  # groups one verify run
+    subscription: Mapped[str] = mapped_column(String(32), index=True)
+    feed: Mapped[str] = mapped_column(String(48), index=True)
+    endpoint: Mapped[str] = mapped_column(String(120))
+    source: Mapped[str] = mapped_column(String(40))
+    checked_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    http_status: Mapped[int | None] = mapped_column(Integer, default=None)
+    available: Mapped[bool] = mapped_column(default=False)
+    latency_category: Mapped[str] = mapped_column(String(16), default="none")
+    error_category: Mapped[str] = mapped_column(String(24), default="none")
+    detail: Mapped[str] = mapped_column(String(300), default="")
+
+
 class DataValidationReport(Base, IntPK):
     """Result of a data-quality validation pass over the daily store."""
 
