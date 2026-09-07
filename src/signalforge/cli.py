@@ -195,6 +195,68 @@ def options_simulate_cmd(
     typer.echo(f"  {res.disclaimer}")
 
 
+@app.command()
+def universe() -> None:
+    """Preview the conservative liquid-universe screen against the local data."""
+    from signalforge.db.session import session_scope
+    from signalforge.research.universe import screen_universe
+    from signalforge.settings_store import effective_research_config
+
+    with session_scope() as session:
+        scr = screen_universe(session, effective_research_config(session))
+    typer.secho(f"kept {len(scr.kept)}: {', '.join(scr.kept)}", fg=typer.colors.GREEN)
+    for sym, reasons in sorted(scr.dropped.items()):
+        typer.secho(f"  dropped {sym}: {'; '.join(reasons)}", fg=typer.colors.YELLOW)
+    if scr.data_unavailable:
+        typer.echo("filters not evaluable (no feed): " + "; ".join(scr.data_unavailable))
+
+
+@news_app.command("summarize")
+def news_summarize_cmd(
+    ticker: Annotated[str, typer.Argument(help="Ticker to summarize recent headlines for.")],
+    limit: Annotated[int, typer.Option()] = 8,
+) -> None:
+    """AI summary of *retrieved* headlines with citations (never a trade instruction)."""
+    from sqlalchemy import select
+
+    from signalforge.db.models import NewsItem
+    from signalforge.db.session import session_scope
+    from signalforge.llm.summarize_news import summarize_news
+
+    with session_scope() as session:
+        rows = list(
+            session.scalars(
+                select(NewsItem)
+                .where(NewsItem.instrument_symbols.contains([ticker.upper()]))
+                .order_by(NewsItem.published_at.desc())
+                .limit(limit)
+            )
+        )
+        items = [
+            {
+                "headline": r.headline,
+                "source": r.source,
+                "url": r.url,
+                "published_at": r.published_at.isoformat(),
+            }
+            for r in rows
+        ]
+    if not items:
+        typer.secho(f"no stored news for {ticker.upper()} — run `signalforge news ingest` first.")
+        raise typer.Exit(code=1)
+    summary = summarize_news(items)
+    if summary is None:
+        typer.secho(
+            "LLM layer not configured or output rejected by a guard.", fg=typer.colors.YELLOW
+        )
+        raise typer.Exit(code=1)
+    typer.echo(summary.text)
+    typer.echo(
+        f"\n[{summary.n_items} items · retrieved {summary.retrieved_at} · "
+        f"feed stale: {summary.stale} · model {summary.model}]"
+    )
+
+
 @news_app.command("ingest")
 def news_ingest_cmd(
     tickers: Annotated[

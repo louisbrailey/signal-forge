@@ -1,0 +1,67 @@
+# Always-on deployment for Signal Forge — paper-trading / research only.
+#
+# There is NO brokerage connector in any service here. Secrets come from the
+# local ./.env (git-ignored); nothing is baked into an image.
+#
+#   docker compose up -d          # start api + worker + postgres
+#   docker compose logs -f worker # watch the scheduled jobs
+#   docker compose down           # stop (data survives in the named volume)
+#
+# The Mac/host must stay awake and this stack must keep running for the daily
+# post-close ingest/scan and news polling to happen — see docs/DEPLOYMENT.md.
+
+x-app: &app
+  build: .
+  env_file: [.env]
+  environment:
+    DATABASE_URL: postgresql+psycopg://signalforge:signalforge@postgres:5432/signalforge
+    SIGNALFORGE_DATA_DIR: /data
+    APP_HOST: 0.0.0.0
+  volumes:
+    - sf_data:/data          # kill-switch state, raw-payload cache, logs, backups
+    - sf_secrets:/secrets    # encrypted local secret store
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: signalforge
+      POSTGRES_PASSWORD: signalforge
+      POSTGRES_DB: signalforge
+    volumes:
+      - sf_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U signalforge"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    <<: *app
+    command: >
+      sh -c "python -m alembic -c alembic.ini upgrade head &&
+             uvicorn signalforge.app.main:app --host 0.0.0.0 --port 8787"
+    ports:
+      - "127.0.0.1:8787:8787"   # loopback-only by default
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/healthz').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    <<: *app
+    # The persistent job worker: post-close EOD ingest/scan (cron), news polling
+    # (US sessions only), paper mark-to-market, strategy-health, 24/7 health check.
+    # A no-op whenever the kill switch is engaged.
+    command: ["python", "-m", "signalforge.cli", "run-scheduler"]
+
+volumes:
+  sf_pg:
+  sf_data:
+  sf_secrets:

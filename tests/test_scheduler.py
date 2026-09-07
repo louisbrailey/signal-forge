@@ -55,6 +55,8 @@ def test_build_scheduler_registers_every_job(db_url: str) -> None:
         "daily_eod_update",
         "paper_mtm",
         "feed_probe",
+        "health_check",
+        "news_poll",
         "daily_briefing",
         "strategy_health",
     } <= set(jobs)

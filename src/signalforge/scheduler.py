@@ -133,6 +133,46 @@ def job_daily_eod_update() -> None:
     job_scan_all()
 
 
+def _in_us_market_session(now: datetime | None = None) -> bool:
+    """Roughly 08:00-18:00 America/New_York on a weekday (pre-market to after-hours)."""
+    from zoneinfo import ZoneInfo
+
+    n = (now or datetime.now(UTC)).astimezone(ZoneInfo("America/New_York"))
+    return n.weekday() < 5 and 8 <= n.hour < 18
+
+
+def job_news_poll() -> None:
+    """Poll licensed news for the universe — only during U.S. market sessions and
+    only when explicitly enabled in config. Never influences a recommendation."""
+    from signalforge.config import get_settings
+    from signalforge.data.adapters.massive_news import MassiveNewsAdapter
+    from signalforge.data.news_ingest import ingest_news
+    from signalforge.db.session import session_scope
+
+    cfg = get_settings().research.news
+    if not cfg.poll_enabled:
+        return
+    if cfg.us_session_only and not _in_us_market_session():
+        return
+    tickers = list(get_settings().research.universe)
+    with session_scope() as session:
+        ingest_news(
+            session,
+            MassiveNewsAdapter(),
+            tickers,
+            lookback_days=cfg.lookback_days,
+            limit=cfg.per_ticker_limit,
+        )
+
+
+def job_health_check() -> None:
+    """Around-the-clock: confirm the DB is reachable and log feed staleness."""
+    from signalforge.db.health import check_db
+
+    check_db()
+    job_feed_probe()
+
+
 def default_job_specs() -> list[JobSpec]:
     return [
         # One safe daily update, 17:30 America/New_York — ~90 min after the 16:00
@@ -147,6 +187,13 @@ def default_job_specs() -> list[JobSpec]:
         ),
         JobSpec("paper_mtm", job_paper_mtm, 12 * 60, "Mark paper positions to market"),
         JobSpec("feed_probe", job_feed_probe, 60, "Warn on stale data feeds"),
+        JobSpec("health_check", job_health_check, 15, "24/7 DB + feed-staleness health check"),
+        JobSpec(
+            "news_poll",
+            job_news_poll,
+            30,
+            "Poll licensed news (config-gated OFF; U.S. sessions only; not on the decision path)",
+        ),
         JobSpec("daily_briefing", job_daily_briefing, 24 * 60, "Build the daily research briefing"),
         JobSpec(
             "alerts", job_alerts, 60, "Evaluate and dispatch alerts (policy-gated, OFF by default)"

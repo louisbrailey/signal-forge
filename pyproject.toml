@@ -36,6 +36,8 @@ dependencies = [
 # The LLM explanation layer is OPTIONAL. The system is fully functional without it.
 # It is never imported by research/, risk/, backtest/, or paper/ (enforced by import-linter).
 llm = ["anthropic>=0.42"]
+# Postgres backend for the always-on Docker Compose deployment (local dev stays SQLite).
+postgres = ["psycopg[binary]>=3.2"]
 
 [project.scripts]
 signalforge = "signalforge.cli:main"
