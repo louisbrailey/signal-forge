@@ -129,7 +129,5 @@ class PriceSeries:
         if source is not None:
             stmt = stmt.where(OHLCVIntraday.source == source)
         bars = list(session.scalars(stmt))
-        rows = [
-            (b.bar_start, b.open, b.high, b.low, b.close, b.volume) for b in bars
-        ]
+        rows = [(b.bar_start, b.open, b.high, b.low, b.close, b.volume) for b in bars]
         return cls.from_bars(symbol, rows)  # type: ignore[arg-type]

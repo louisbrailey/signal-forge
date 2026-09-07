@@ -22,6 +22,7 @@ from signalforge.data.adapters.base import (
     LatencyCategory,
     MarketDataAdapter,
 )
+from signalforge.data.repository import get_or_create_instrument
 from signalforge.db.models import (
     CorporateAction,
     DataFeedStatus,
@@ -33,7 +34,6 @@ from signalforge.db.models import (
 from signalforge.db.types import utcnow
 from signalforge.domain import DataQualityFlag
 from signalforge.observability import get_logger
-from signalforge.data.repository import get_or_create_instrument
 
 _log = get_logger("ingest")
 
@@ -180,15 +180,24 @@ def ingest_symbol(
     except AdapterError as exc:
         result.error = str(exc)
         record_feed_failure(
-            session, adapter.provider_name, FeedType.BAR_DAILY, str(exc),
-            rate_limited=exc.rate_limited, capability=bar_cap,
+            session,
+            adapter.provider_name,
+            FeedType.BAR_DAILY,
+            str(exc),
+            rate_limited=exc.rate_limited,
+            capability=bar_cap,
         )
         _log.warning("ingest.bar_fetch_failed", symbol=symbol, error=str(exc))
         return result
 
     raw = getattr(adapter, "raw_payload", None)
     if callable(raw):
-        _cache_raw(session, adapter.provider_name, f"daily_bars/{symbol.upper()}", raw(symbol, start, end))
+        _cache_raw(
+            session,
+            adapter.provider_name,
+            f"daily_bars/{symbol.upper()}",
+            raw(symbol, start, end),
+        )
 
     existing = {
         d
@@ -312,8 +321,12 @@ def ingest_intraday_symbol(
     except AdapterError as exc:
         result.error = str(exc)
         record_feed_failure(
-            session, adapter.provider_name, FeedType.BAR_INTRADAY, str(exc),
-            rate_limited=exc.rate_limited, capability=cap,
+            session,
+            adapter.provider_name,
+            FeedType.BAR_INTRADAY,
+            str(exc),
+            rate_limited=exc.rate_limited,
+            capability=cap,
         )
         return result
 

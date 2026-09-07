@@ -40,9 +40,9 @@ class AdapterCapability:
     latency_category: LatencyCategory
     supports_point_in_time: bool
     entitlement_note: str
-    delay_estimate: str = ""              # e.g. "15 min" when DELAYED
+    delay_estimate: str = ""  # e.g. "15 min" when DELAYED
     rate_limit_per_min: int | None = None
-    is_simulated: bool = False            # fixture/demo data — always shown as SIMULATED
+    is_simulated: bool = False  # fixture/demo data — always shown as SIMULATED
 
     def __post_init__(self) -> None:
         if self.latency_category is LatencyCategory.REALTIME and self.is_simulated:
@@ -78,8 +78,8 @@ class DailyBar:
 class IntradayBar:
     symbol: str
     bar_start: datetime  # UTC, start of the bar
-    bar_size: str        # "5m" | "15m" | "1h" ...
-    session: str         # pre | rth | post
+    bar_size: str  # "5m" | "15m" | "1h" ...
+    session: str  # pre | rth | post
     open: float
     high: float
     low: float

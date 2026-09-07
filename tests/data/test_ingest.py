@@ -87,11 +87,7 @@ def test_adapter_error_is_recorded_as_feed_failure(session: Session) -> None:
 
 
 def test_rate_limited_failure_sets_backoff(session: Session) -> None:
-    record_feed_failure(
-        session, "stooq", FeedType.BAR_DAILY, "HTTP 429", rate_limited=True
-    )
+    record_feed_failure(session, "stooq", FeedType.BAR_DAILY, "HTTP 429", rate_limited=True)
     session.commit()
-    row = session.scalar(
-        select(DataFeedStatus).where(DataFeedStatus.provider == "stooq")
-    )
+    row = session.scalar(select(DataFeedStatus).where(DataFeedStatus.provider == "stooq"))
     assert row is not None and row.rate_limited_until is not None

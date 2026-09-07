@@ -38,7 +38,9 @@ def test_fixture_intraday_is_deterministic_rth_only_and_simulated() -> None:
     second = a.fetch_intraday_bars("SPY", start, end, bar_size="30m")
     assert first and [b.close for b in first] == [b.close for b in second]
     assert all(b.session == "rth" and is_rth(b.bar_start) for b in first)
-    assert all(b.provenance.is_simulated and not b.provenance.latency_category.is_live for b in first)
+    assert all(
+        b.provenance.is_simulated and not b.provenance.latency_category.is_live for b in first
+    )
 
 
 def test_fixture_intraday_validates_inputs() -> None:
@@ -71,11 +73,14 @@ def test_ingest_intraday_persists_dedupes_and_records_feed_status(session: Sessi
     feed = feed_status_report(session)
     intraday = [f for f in feed["feeds"] if f["feed_type"] == FeedType.BAR_INTRADAY.value]
     assert intraday and intraday[0]["is_live"] is False and intraday[0]["is_simulated"] is True
-    assert session.scalar(
-        select(DataFeedStatus.last_success_at).where(
-            DataFeedStatus.feed_type == FeedType.BAR_INTRADAY
+    assert (
+        session.scalar(
+            select(DataFeedStatus.last_success_at).where(
+                DataFeedStatus.feed_type == FeedType.BAR_INTRADAY
+            )
         )
-    ) is not None
+        is not None
+    )
 
 
 def test_price_series_load_intraday(session: Session) -> None:

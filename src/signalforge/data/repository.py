@@ -22,9 +22,7 @@ def get_or_create_instrument(
     symbol = symbol.strip().upper()
     inst = session.scalar(select(Instrument).where(Instrument.symbol == symbol))
     if inst is None:
-        inst = Instrument(
-            symbol=symbol, name=name, instrument_type=instrument_type, sector=sector
-        )
+        inst = Instrument(symbol=symbol, name=name, instrument_type=instrument_type, sector=sector)
         session.add(inst)
         session.flush()
     return inst
@@ -66,9 +64,7 @@ def latest_bar_date(session: Session, symbol: str, *, source: str | None = None)
     return session.scalar(stmt)
 
 
-def get_feed_status(
-    session: Session, provider: str, feed_type: FeedType
-) -> DataFeedStatus | None:
+def get_feed_status(session: Session, provider: str, feed_type: FeedType) -> DataFeedStatus | None:
     return session.scalar(
         select(DataFeedStatus).where(
             DataFeedStatus.provider == provider, DataFeedStatus.feed_type == feed_type

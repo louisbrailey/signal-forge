@@ -14,7 +14,6 @@ import math
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 
-from signalforge.data.calendar import rth_bounds_utc, sessions
 from signalforge.data.adapters.base import (
     AdapterCapability,
     CorporateActionRecord,
@@ -25,6 +24,7 @@ from signalforge.data.adapters.base import (
     LatencyCategory,
     Provenance,
 )
+from signalforge.data.calendar import rth_bounds_utc, sessions
 
 _BAR_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60}
 
@@ -33,8 +33,21 @@ PROVIDER_NAME = "fixture"
 # Symbols the fixture treats as ETFs (no earnings events).
 _ETF_SYMBOLS = frozenset(
     {
-        "SPY", "QQQ", "IWM", "DIA",
-        "XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLB", "XLU", "XLRE", "XLC",
+        "SPY",
+        "QQQ",
+        "IWM",
+        "DIA",
+        "XLK",
+        "XLF",
+        "XLE",
+        "XLV",
+        "XLY",
+        "XLP",
+        "XLI",
+        "XLB",
+        "XLU",
+        "XLRE",
+        "XLC",
     }
 )
 
@@ -130,8 +143,7 @@ class FixtureMarketDataAdapter:
         step = timedelta(minutes=_BAR_MINUTES[bar_size])
         prov = self._provenance()
         daily = {
-            b.session_date: b.close
-            for b in self.fetch_daily_bars(symbol, start.date(), end.date())
+            b.session_date: b.close for b in self.fetch_daily_bars(symbol, start.date(), end.date())
         }
         vol = 0.01 + 0.02 * _seed_float(symbol, "vol")
         out: list[IntradayBar] = []
@@ -177,9 +189,7 @@ class FixtureMarketDataAdapter:
         # The fixture series is already "adjusted"; no discrete actions modelled.
         return ()
 
-    def fetch_earnings(
-        self, symbol: str, start: date, end: date
-    ) -> Sequence[EarningsRecord]:
+    def fetch_earnings(self, symbol: str, start: date, end: date) -> Sequence[EarningsRecord]:
         if symbol.upper() in _ETF_SYMBOLS:
             return ()
         # Quarterly, on a symbol-specific day offset so they are not all identical.

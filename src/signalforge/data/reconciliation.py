@@ -49,7 +49,7 @@ def reconcile_closes(
             stmt = stmt.where(OHLCVDaily.session_date >= start)
         if end is not None:
             stmt = stmt.where(OHLCVDaily.session_date <= end)
-        return {d: c for d, c in session.execute(stmt)}
+        return dict(session.execute(stmt).tuples().all())
 
     a, b = _closes(source_a), _closes(source_b)
     now = utcnow()

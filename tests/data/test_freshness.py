@@ -29,9 +29,7 @@ def _age_last_success(session: Session, provider: str, delta: timedelta) -> None
 
 
 def _ingest(session: Session) -> None:
-    ingest_symbol(
-        session, FixtureMarketDataAdapter(), "AAPL", date(2023, 1, 1), date(2023, 6, 30)
-    )
+    ingest_symbol(session, FixtureMarketDataAdapter(), "AAPL", date(2023, 1, 1), date(2023, 6, 30))
     session.flush()
 
 
@@ -58,9 +56,7 @@ def test_stale_feed_fails_the_gate(session: Session) -> None:
 
 def test_rate_limited_feed_fails_the_gate(session: Session) -> None:
     _ingest(session)
-    record_feed_failure(
-        session, "fixture", FeedType.BAR_DAILY, "429", rate_limited=True
-    )
+    record_feed_failure(session, "fixture", FeedType.BAR_DAILY, "429", rate_limited=True)
     session.flush()
     result = check_feeds_fresh(session, REQUIRED, timedelta(days=999))
     assert result.fresh is False

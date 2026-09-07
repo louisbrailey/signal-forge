@@ -36,10 +36,7 @@ def build_url(symbol: str, start: date, end: date) -> str:
     sym = symbol.strip().lower()
     if not sym.endswith(".us"):
         sym = f"{sym}.us"
-    return (
-        f"{_BASE}?s={sym}"
-        f"&d1={start.strftime('%Y%m%d')}&d2={end.strftime('%Y%m%d')}&i=d"
-    )
+    return f"{_BASE}?s={sym}" f"&d1={start.strftime('%Y%m%d')}&d2={end.strftime('%Y%m%d')}&i=d"
 
 
 def parse_stooq_csv(text: str, symbol: str, provenance: Provenance) -> list[DailyBar]:
@@ -93,7 +90,9 @@ class StooqAdapter:
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             rate_limited = exc.response.status_code == 429
-            raise AdapterError(f"stooq HTTP {exc.response.status_code}", rate_limited=rate_limited)
+            raise AdapterError(
+                f"stooq HTTP {exc.response.status_code}", rate_limited=rate_limited
+            ) from exc
         except httpx.HTTPError as exc:
             raise AdapterError(f"stooq request failed: {exc}") from exc
         return resp.text
@@ -133,9 +132,7 @@ class StooqAdapter:
     ) -> Sequence[CorporateActionRecord]:
         return ()  # not offered by this feed
 
-    def fetch_earnings(
-        self, symbol: str, start: date, end: date
-    ) -> Sequence[EarningsRecord]:
+    def fetch_earnings(self, symbol: str, start: date, end: date) -> Sequence[EarningsRecord]:
         return ()  # not offered by this feed
 
     def raw_payload(self, symbol: str, start: date, end: date) -> str:
