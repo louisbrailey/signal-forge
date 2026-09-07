@@ -61,6 +61,41 @@ def killswitch_status() -> None:
     typer.echo(f"active={st.active} reason={st.reason!r} actor={st.actor} since={st.changed_at}")
 
 
+providers_app = typer.Typer(help="Verify provider entitlements (read-only; never prints secrets).")
+app.add_typer(providers_app, name="providers")
+
+
+@providers_app.command("verify")
+def providers_verify() -> None:
+    """Probe the configured providers with the local credentials. No behaviour changes.
+
+    Prints only feed / reachable / HTTP status / authorized / available. Never
+    prints, logs, or caches an API key or the Discord webhook URL.
+    """
+    from signalforge.data.entitlements import verify_entitlements
+
+    report = verify_entitlements()
+    typer.secho("Provider entitlement check (read-only):", fg=typer.colors.CYAN)
+    typer.echo(f"  {'feed':22} {'provider':22} {'status':8} {'auth':5} {'available'}")
+    for r in report.to_rows():
+        colour = typer.colors.GREEN if r["available"] else typer.colors.YELLOW
+        typer.secho(
+            f"  {r['feed']:22} {r['provider']:22} "
+            f"{r['http_status'] or 'n/a'!s:8} {('yes' if r['authorized'] else 'no'):5} "
+            f"{'YES' if r['available'] else 'unavailable'}",
+            fg=colour,
+        )
+        if r["note"]:
+            typer.echo(f"      note: {r['note']}")
+        if r["sample_keys"]:
+            typer.echo(f"      response keys: {', '.join(r['sample_keys'])}")
+    typer.echo(f"  discord: {report.discord_note}")
+    typer.echo(
+        "\nUnavailable feeds are treated as unavailable — access is never inferred. "
+        "Research signal only — no order was placed."
+    )
+
+
 @app.command()
 def seed(years: Annotated[int, typer.Option(help="Years of simulated history.")] = 3) -> None:
     """Load clearly-labelled SIMULATED demo data (fixture adapter only)."""

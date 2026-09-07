@@ -49,9 +49,18 @@ class Settings(BaseSettings):
     market_data_provider_secondary: str = ""
     market_data_api_key_secondary: SecretStr = SecretStr("")
 
+    # --- Options data (education / simulation only; read-only) ---
+    # Reuses market_data_api_key unless a distinct key is set here. No provider
+    # string toggles execution — there is no options execution path.
+    options_provider: str = ""
+    options_api_key: SecretStr = SecretStr("")
+
     # --- News ---
     news_provider: str = ""
     news_api_key: SecretStr = SecretStr("")
+
+    # --- Discord (incoming webhook only; never a bot token, never OAuth) ---
+    discord_webhook_url: SecretStr = SecretStr("")
 
     # --- LLM (optional; never on the decision path) ---
     llm_provider: str = ""
