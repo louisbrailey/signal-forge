@@ -14,7 +14,7 @@ def test_defaults_are_conservative() -> None:
     cfg = ResearchConfig()
     assert cfg.allow_short_candidates is False
     assert cfg.risk.per_trade_risk_pct <= 1.0
-    assert Horizon.INTRADAY not in cfg.enabled_horizons  # Phase 2
+    assert set(cfg.enabled_horizons) == set(Horizon)  # Phase 2: all four horizons on
     assert cfg.liquidity.min_avg_dollar_volume >= 1_000_000
 
 

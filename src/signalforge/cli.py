@@ -171,6 +171,7 @@ def backtest_report(
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    from signalforge.domain import Horizon
     from signalforge.research.persistence import (
         persist_backtest_result,
         upsert_strategy_version,
@@ -178,14 +179,18 @@ def backtest_report(
 
     with session_scope() as session:
         for strat in default_strategies():
+            is_intraday = strat.spec().horizon is Horizon.INTRADAY
             result = run_strategy_over_universe(
                 session,
                 strat,
                 symbols,
-                start,
+                (end - timedelta(days=45)) if is_intraday else start,
                 end,
                 allow_short=settings.research.allow_short_candidates,
                 config_hash=settings.research.config_hash,
+                intraday=is_intraday,
+                bar_size=settings.research.intraday_bar_size,
+                min_bars=40 if is_intraday else 60,
             )
             version = upsert_strategy_version(session, strat.spec())
             persist_backtest_result(session, version, result)

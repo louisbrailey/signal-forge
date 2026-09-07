@@ -120,10 +120,12 @@ class ResearchConfig(BaseModel):
     )
     allow_short_candidates: bool = False
     enabled_horizons: tuple[Horizon, ...] = (
+        Horizon.INTRADAY,
         Horizon.SHORT_SWING,
         Horizon.MEDIUM_SWING,
         Horizon.POSITION,
     )
+    intraday_bar_size: str = "15m"
 
     liquidity: LiquidityFilters = Field(default_factory=LiquidityFilters)
     risk: RiskLimits = Field(default_factory=RiskLimits)

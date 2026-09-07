@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from signalforge.data.adapters.base import FeedType
 from signalforge.data.adapters.fixture import FixtureMarketDataAdapter
 from signalforge.data.ingest import ingest_universe
 from signalforge.db.models import BacktestMetric, BacktestRun, Candidate, PaperAccount, ScanRun
@@ -69,13 +70,46 @@ def test_scan_accounting_reconciles(session: Session) -> None:
         assert any("OOS expectancy" in g for g in c.failed_gates)
 
 
-def test_no_strategy_for_intraday_excludes_everything(session: Session) -> None:
+def test_intraday_scan_without_an_intraday_feed_is_stale(session: Session) -> None:
+    # Only daily bars are seeded — the BAR_INTRADAY feed has never succeeded, so
+    # the INTRADAY freshness gate fails: every symbol excluded, live alerts off.
     _seed(session, oos_expectancy_r=0.3)
     result = run_scan(session, Horizon.INTRADAY, as_of=AS_OF, symbols=UNIVERSE)
     assert result.scanned == []
-    assert result.excluded.get("no_strategy_for_horizon") == UNIVERSE or set(
-        result.excluded.get("no_strategy_for_horizon", [])
-    ) == set(UNIVERSE)
+    assert result.live_alerts_enabled is False
+    assert set(result.excluded.get("stale_or_unavailable_feed", [])) == set(UNIVERSE)
+
+
+def test_intraday_scan_runs_end_to_end_with_intraday_bars(session: Session) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from signalforge.data.adapters.fixture import FixtureMarketDataAdapter
+    from signalforge.data.ingest import ingest_intraday_universe
+    from signalforge.db.models import DataFeedStatus
+    from signalforge.db.types import utcnow
+
+    _seed(session, oos_expectancy_r=-0.8)
+    now = datetime(2024, 6, 28, 19, 0, tzinfo=UTC)
+    ingest_intraday_universe(
+        session,
+        FixtureMarketDataAdapter(),
+        UNIVERSE,
+        now - timedelta(days=6),
+        now,
+        bar_size="15m",
+    )
+    # make the intraday feed look fresh relative to the scan's "now"
+    for row in session.scalars(
+        select(DataFeedStatus).where(DataFeedStatus.feed_type == FeedType.BAR_INTRADAY)
+    ):
+        row.last_success_at = utcnow()
+    session.flush()
+
+    result = run_scan(session, Horizon.INTRADAY, as_of=date(2024, 6, 28), symbols=UNIVERSE)
+    assert result.live_alerts_enabled is True
+    assert set(result.scanned) <= set(UNIVERSE) and result.scanned  # some were evaluated
+    # NO TRADE candidates (negative OOS expectancy) or plain "no trigger" — both fine
+    assert result.excluded_count + len(result.scanned) == len(UNIVERSE)
 
 
 def test_stale_feed_excludes_all_and_disables_live_alerts(session: Session) -> None:

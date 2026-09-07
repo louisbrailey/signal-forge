@@ -19,7 +19,10 @@ from signalforge.research.strategies.base import (
     StrategyContext,
     signal_fn_for,
 )
+from signalforge.research.strategies.breakout import VolatilityBreakout
+from signalforge.research.strategies.intraday_orb import IntradayORB
 from signalforge.research.strategies.mean_reversion import MeanReversion
+from signalforge.research.strategies.relative_strength import RelativeStrength
 from signalforge.research.strategies.trend_continuation import TrendContinuation
 
 __all__ = [
@@ -28,6 +31,9 @@ __all__ = [
     "signal_fn_for",
     "TrendContinuation",
     "MeanReversion",
+    "RelativeStrength",
+    "VolatilityBreakout",
+    "IntradayORB",
     "default_strategies",
     "build_registry",
 ]
@@ -35,9 +41,12 @@ __all__ = [
 
 def default_strategies() -> list[BaselineStrategy]:
     return [
+        IntradayORB(),
         TrendContinuation(Horizon.SHORT_SWING),
         TrendContinuation(Horizon.MEDIUM_SWING),
         MeanReversion(),
+        RelativeStrength(Horizon.MEDIUM_SWING),
+        VolatilityBreakout(Horizon.SHORT_SWING),
     ]
 
 

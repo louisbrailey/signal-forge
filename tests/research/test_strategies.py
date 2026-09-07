@@ -32,13 +32,19 @@ def _mk(closes: list[float], volumes: list[float] | None = None) -> PriceSeries:
     return PriceSeries.from_bars("X", rows)
 
 
-def test_registry_has_three_experimental_strategies() -> None:
+def test_registry_holds_the_baseline_strategies_all_experimental() -> None:
     reg = build_registry()
-    assert len(reg.scan_eligible()) == 3
+    strats = default_strategies()
+    assert len(reg.scan_eligible()) == len(strats) >= 6
     assert reg.alert_eligible() == []
-    for strat in default_strategies():
+    for strat in strats:
         assert strat.spec().missing_fields() == []
         assert strat.spec().status is StrategyStatus.EXPERIMENTAL
+    # every enabled horizon has at least one strategy
+    from signalforge.domain import Horizon
+
+    covered = {s.spec().horizon for s in strats}
+    assert {Horizon.INTRADAY, Horizon.SHORT_SWING, Horizon.MEDIUM_SWING} <= covered
 
 
 def test_trend_continuation_fires_long_on_confirmed_uptrend() -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Protocol
 
 from signalforge.backtest.engine import EntrySignal, SignalFn
@@ -36,7 +36,9 @@ def signal_fn_for(
     regimes = regime_by_date or {}
 
     def _fn(series: PriceSeries, t: int) -> EntrySignal | None:
-        regime = regimes.get(series.dates[t], NEUTRAL)
+        stamp = series.dates[t]
+        key = stamp.date() if isinstance(stamp, datetime) else stamp
+        regime = regimes.get(key, NEUTRAL)
         return strategy.evaluate(series, t, StrategyContext(regime=regime, allow_short=allow_short))
 
     return _fn

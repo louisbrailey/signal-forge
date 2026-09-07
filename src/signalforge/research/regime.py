@@ -14,7 +14,7 @@ from datetime import date
 from enum import StrEnum
 
 from signalforge.data.series import PriceSeries
-from signalforge.research.features.daily import realized_vol, sma
+from signalforge.research.features.daily import realized_vol, rolling_return, sma
 
 
 class Trend(StrEnum):
@@ -34,6 +34,8 @@ class RegimeState:
     vol: Vol
     as_of: date
     breadth_pct_above_ma: float | None = None
+    market_ret_20d: float | None = None  # proxy trailing 20-session return
+    market_ret_63d: float | None = None  # proxy trailing ~quarter return
 
     @property
     def risk_off(self) -> bool:
@@ -49,6 +51,8 @@ class RegimeState:
             "vol": self.vol.value,
             "as_of": self.as_of.isoformat(),
             "breadth_pct_above_ma": self.breadth_pct_above_ma,
+            "market_ret_20d": self.market_ret_20d,
+            "market_ret_63d": self.market_ret_63d,
         }
 
 
@@ -80,7 +84,16 @@ def regime_from_proxy(
         median = sorted(hist)[len(hist) // 2]
         vol = Vol.HIGH if rv > median * 1.15 else Vol.LOW
 
-    return RegimeState(trend=trend, vol=vol, as_of=as_of, breadth_pct_above_ma=breadth_pct)
+    r20 = rolling_return(proxy, t, 20)
+    r63 = rolling_return(proxy, t, 63)
+    return RegimeState(
+        trend=trend,
+        vol=vol,
+        as_of=as_of,
+        breadth_pct_above_ma=breadth_pct,
+        market_ret_20d=None if r20 != r20 else r20,
+        market_ret_63d=None if r63 != r63 else r63,
+    )
 
 
 def regime_lookup(proxy: PriceSeries) -> dict[date, RegimeState]:

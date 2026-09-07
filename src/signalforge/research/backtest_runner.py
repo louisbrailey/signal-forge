@@ -8,7 +8,7 @@ market regime on their entry date.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 
 from sqlalchemy.orm import Session
 
@@ -62,6 +62,10 @@ def _is_boundary(series: PriceSeries) -> date:
     return series.dates[cut - 1]
 
 
+def _as_date(x: object) -> date:
+    return x.date() if isinstance(x, datetime) else x  # type: ignore[return-value]
+
+
 def run_strategy_over_universe(
     session: Session,
     strategy: BaselineStrategy,
@@ -74,6 +78,9 @@ def run_strategy_over_universe(
     allow_short: bool = False,
     cost_model: CostModel | None = None,
     config_hash: str = "",
+    intraday: bool = False,
+    bar_size: str = "15m",
+    min_bars: int = 60,
 ) -> StrategyBacktestResult:
     proxy = PriceSeries.load(session, proxy_symbol, start, end, source=source)
     regimes = regime_lookup(proxy) if len(proxy) else {}
@@ -84,20 +91,31 @@ def run_strategy_over_universe(
     oos_trades: list[SimTrade] = []
     per_symbol: dict[str, int] = {}
 
+    win_start = datetime.combine(start, datetime.min.time(), tzinfo=UTC)
+    win_end = datetime.combine(end, datetime.min.time(), tzinfo=UTC)
+
     for sym in symbols:
-        series = PriceSeries.load(session, sym, start, end, source=source)
-        if len(series) < 60:
+        series = (
+            PriceSeries.load_intraday(
+                session, sym, win_start, win_end, bar_size=bar_size, source=source
+            )
+            if intraday
+            else PriceSeries.load(session, sym, start, end, source=source)
+        )
+        if len(series) < min_bars:
             continue
-        outcome: BacktestOutcome = run_backtest(series, fn, cost_model=cost_model)
-        boundary = _is_boundary(series)
+        outcome: BacktestOutcome = run_backtest(
+            series, fn, cost_model=cost_model, warmup=min_bars // 2
+        )
+        boundary = _as_date(_is_boundary(series))
         per_symbol[sym] = len(outcome.trades)
         for tr in outcome.trades:
             all_trades.append(tr)
-            (is_trades if tr.entry_date <= boundary else oos_trades).append(tr)
+            (is_trades if _as_date(tr.entry_date) <= boundary else oos_trades).append(tr)
 
     by_regime: dict[str, list[SimTrade]] = {}
     for tr in oos_trades:
-        r: RegimeState | None = regimes.get(tr.entry_date)
+        r: RegimeState | None = regimes.get(_as_date(tr.entry_date))
         label = f"{r.trend.value}/{r.vol.value}" if r else "unknown"
         by_regime.setdefault(label, []).append(tr)
 

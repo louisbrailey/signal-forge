@@ -126,7 +126,7 @@ def test_pages_redirect_when_signed_out(client: TestClient) -> None:
 
 
 def test_scanner_reports_no_trade_accounting(seeded: TestClient) -> None:
-    r = seeded.get("/scanner")
+    r = seeded.get("/scanner?horizon=SHORT_SWING")
     assert r.status_code == 200
     assert "NO TRADE" in r.text  # the "universe scanned / excluded / NO TRADE" line
     assert "universe scanned" in r.text

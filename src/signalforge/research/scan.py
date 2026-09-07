@@ -10,7 +10,7 @@ Every scan records three separate populations (ARCHITECTURE.md §7.1):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 
 from sqlalchemy import select
@@ -167,10 +167,12 @@ def run_scan(
         result.finished_at = utcnow().isoformat()
         return result
 
+    intraday = horizon is Horizon.INTRADAY
+    provider = settings.market_data_provider or "fixture"
+
     # Feed freshness is scan-wide (our feed status is per provider/feed_type).
-    fresh = gate_for_horizon(
-        session, horizon, [(settings.market_data_provider or "fixture", FeedType.BAR_DAILY)]
-    )
+    feed_type = FeedType.BAR_INTRADAY if intraday else FeedType.BAR_DAILY
+    fresh = gate_for_horizon(session, horizon, [(provider, feed_type)])
     result.live_alerts_enabled = fresh.fresh
     if not fresh.fresh:
         result.notes.append("Live alerts disabled: " + "; ".join(fresh.reasons))
@@ -178,8 +180,15 @@ def run_scan(
     end = as_of or date.today()
     start = end - timedelta(days=365 * 6)
 
+    # Regime always comes from the daily proxy (it does not flip intraday).
     proxy = PriceSeries.load(session, proxy_symbol, start, end, source=source)
     regime = regime_from_proxy(proxy, len(proxy) - 1) if len(proxy) >= _MIN_HISTORY else None
+
+    intraday_window = (
+        datetime.combine(end - timedelta(days=6), datetime.min.time(), tzinfo=UTC),
+        datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=UTC),
+    )
+    min_signal_bars = 30 if intraday else _MIN_HISTORY
 
     versions = {
         s.spec().versioned_key: upsert_strategy_version(session, s.spec()) for s in strategies
@@ -195,22 +204,39 @@ def run_scan(
 
     for sym in universe:
         inst = session.scalar(select(Instrument).where(Instrument.symbol == sym))
-        series = PriceSeries.load(session, sym, start, end, source=source)
-        if inst is None or len(series) < _MIN_HISTORY:
+        daily = PriceSeries.load(session, sym, start, end, source=source)
+        if inst is None or len(daily) < _MIN_HISTORY:
             result._exclude(sym, Exclusion.MISSING_DATA)
             continue
         if not fresh.fresh:
             result._exclude(sym, Exclusion.STALE_DATA)
             continue
 
-        last = len(series) - 1
-        close = float(series.close[last])
-        addv = series.dollar_volume(20)
+        # Signal series: intraday bars for INTRADAY, the daily series otherwise.
+        signal_series = (
+            PriceSeries.load_intraday(
+                session, sym, *intraday_window, bar_size=cfg.intraday_bar_size, source=source
+            )
+            if intraday
+            else daily
+        )
+        if len(signal_series) < min_signal_bars:
+            result._exclude(sym, Exclusion.MISSING_DATA)
+            continue
+
+        # Liquidity / breadth always use the daily series.
+        d_last = len(daily) - 1
+        close = float(signal_series.close[len(signal_series) - 1])
+        addv = daily.dollar_volume(20)
         total_priced += 1
-        if sma(series, last, 50) == sma(series, last, 50) and close > sma(series, last, 50):
+        if sma(daily, d_last, 50) == sma(daily, d_last, 50) and float(daily.close[d_last]) > sma(
+            daily, d_last, 50
+        ):
             above_ma += 1
 
-        if close < cfg.liquidity.min_price or addv < cfg.liquidity.min_avg_dollar_volume:
+        if float(daily.close[d_last]) < cfg.liquidity.min_price or addv < (
+            cfg.liquidity.min_avg_dollar_volume
+        ):
             result._exclude(sym, Exclusion.LIQUIDITY)
             continue
 
@@ -220,7 +246,8 @@ def run_scan(
             continue
 
         result.scanned.append(sym)
-        atr_val = atr(series, last, 14)
+        last = len(signal_series) - 1
+        atr_val = atr(signal_series, last, 14)
         ctx = StrategyContext(
             regime=regime or _NEUTRAL_STATE(end),
             allow_short=cfg.allow_short_candidates,
@@ -229,7 +256,7 @@ def run_scan(
         triggered = False
         for strat in strategies:
             spec = strat.spec()
-            sig = strat.evaluate(series, last, ctx)
+            sig = strat.evaluate(signal_series, last, ctx)
             if sig is None:
                 continue
             triggered = True
