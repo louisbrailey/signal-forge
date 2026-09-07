@@ -153,3 +153,10 @@ def test_s10_probability_never_shown_without_calibration(session: Session) -> No
     assert probability_display(0.62, None) is None
     assert probability_display(None, "ref") is None
     assert probability_display(0.62, "reports/x.md") == "62%"
+
+    # With no calibration, the canonical NO-TRADE line is shown verbatim.
+    from signalforge.research.display import NO_TRADE_MESSAGE, confidence_note
+
+    assert NO_TRADE_MESSAGE == "NO TRADE — insufficient evidence or poor risk/reward."
+    assert NO_TRADE_MESSAGE in confidence_note(None)
+    assert NO_TRADE_MESSAGE not in confidence_note("reports/x.md")

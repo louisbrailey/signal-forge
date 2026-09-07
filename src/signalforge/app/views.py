@@ -29,7 +29,11 @@ from signalforge.domain import Horizon, QualityGate
 from signalforge.killswitch import get_kill_switch
 from signalforge.paper.journal import weekly_review
 from signalforge.paper.portfolio import portfolio_snapshot
-from signalforge.research.display import confidence_note, probability_display
+from signalforge.research.display import (
+    NO_TRADE_MESSAGE,
+    confidence_note,
+    probability_display,
+)
 from signalforge.research.persistence import latest_oos_metric
 from signalforge.research.strategies import default_strategies
 from signalforge.settings_store import effective_research_config, get_setting
@@ -266,6 +270,9 @@ def candidate_context(session: Session, candidate_id: int) -> dict[str, Any] | N
             cand.probability_calibrated, cand.calibration_ref
         ),
         "confidence_note": confidence_note(cand.calibration_ref),
+        "no_trade_message": (
+            NO_TRADE_MESSAGE if cand.quality_gate_status is not QualityGate.PASSED else None
+        ),
         "data_freshness": cand.data_freshness_json,
         "ranking": cand.ranking_json,
     }

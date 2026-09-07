@@ -13,6 +13,10 @@
 </div>
 <p class="mt-1 text-xs font-mono text-slate-500">Research signal only — no order was placed. Hypothetical research output, not financial advice.</p>
 
+{% if no_trade_message %}
+<p class="mt-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900">{{ no_trade_message }}</p>
+{% endif %}
+
 {% if request.query_params.get('accepted') %}
 <p class="mt-2 rounded border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
   Paper trade #{{ request.query_params.get('accepted') }} created (SIMULATED). No order was placed.</p>
@@ -82,7 +86,8 @@
     </dl>
     {% if oos_ci and oos_ci.get('expectancy_r') %}
     <p class="mt-2 text-xs text-slate-500">Expectancy 95% CI: {{ '%+.3f' | format(oos_ci['expectancy_r']['low']) }}
-      … {{ '%+.3f' | format(oos_ci['expectancy_r']['high']) }}R</p>
+      … {{ '%+.3f' | format(oos_ci['expectancy_r']['high']) }}R{% if oos_ci.get('win_rate') %} ·
+      Win rate 95% CI: {{ '%.0f' | format(oos_ci['win_rate']['low'] * 100) }}–{{ '%.0f' | format(oos_ci['win_rate']['high'] * 100) }}%{% endif %}</p>
     {% endif %}
     <p class="mt-1 text-xs text-slate-400">Full report: <code>{{ spec.get('walkforward_result_ref') }}</code></p>
     {% else %}

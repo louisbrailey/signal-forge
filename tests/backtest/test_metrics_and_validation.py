@@ -66,6 +66,9 @@ def test_bootstrap_ci_brackets_point_and_is_seed_stable() -> None:
     assert a == b
     exp = a["expectancy_r"]
     assert exp["low"] <= exp["point"] <= exp["high"]
+    wr = a["win_rate"]
+    assert 0.0 <= wr["low"] <= wr["point"] <= wr["high"] <= 1.0
+    assert wr["point"] == pytest.approx(0.5)  # 4 of 8 trades > 0
 
 
 def test_leakage_detector_flags_a_future_reading_feature() -> None:

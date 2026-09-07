@@ -65,6 +65,13 @@ def render_report_md(result: StrategyBacktestResult) -> str:
         f"- Expectancy (R): {result.oos_ci['expectancy_r']['low']:+.3f} … "
         f"{result.oos_ci['expectancy_r']['high']:+.3f} "
         f"(point {result.oos_ci['expectancy_r']['point']:+.3f})",
+        (
+            f"- Win rate: {result.oos_ci['win_rate']['low']:.1%} … "
+            f"{result.oos_ci['win_rate']['high']:.1%} "
+            f"(point {result.oos_ci['win_rate']['point']:.1%})"
+            if "win_rate" in result.oos_ci
+            else "- Win rate: n/a"
+        ),
         f"- Profit factor: {result.oos_ci['profit_factor']['low']:.2f} … "
         f"{result.oos_ci['profit_factor']['high']:.2f}",
         "",

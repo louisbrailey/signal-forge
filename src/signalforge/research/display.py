@@ -8,6 +8,11 @@ unearned number.
 
 from __future__ import annotations
 
+# The canonical line shown whenever a setup cannot be backed by a calibrated
+# out-of-sample probability *and* an acceptable risk/reward. Keep the wording
+# exact — the UI, CLI, and briefing all render this string verbatim.
+NO_TRADE_MESSAGE = "NO TRADE — insufficient evidence or poor risk/reward."
+
 
 def probability_display(
     probability_calibrated: float | None,
@@ -24,5 +29,5 @@ def confidence_note(calibration_ref: str | None) -> str:
         return f"Calibrated out-of-sample (ref: {calibration_ref})."
     return (
         "No calibrated probability — this system has no out-of-sample evidence of "
-        "predictive value for this setup. Treat the setup as unproven."
+        f"predictive value for this setup. {NO_TRADE_MESSAGE}"
     )
