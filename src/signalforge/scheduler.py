@@ -32,6 +32,11 @@ class JobSpec:
     fn: JobFn
     interval_minutes: int
     description: str
+    # When set, the job runs on this daily wall-clock time in ``cron_tz`` instead
+    # of a fixed interval (used for the single post-close end-of-day update).
+    cron_hour: int | None = None
+    cron_minute: int = 0
+    cron_tz: str = "America/New_York"
 
 
 def guarded(name: str, fn: JobFn) -> JobFn:
@@ -118,26 +123,41 @@ def job_strategy_health() -> None:
         run_health_monitor(session)
 
 
+def job_daily_eod_update() -> None:
+    """The single post-close update: fetch the day's completed bars, then rescan.
+
+    End-of-day only. Never runs intraday. ``job_ingest`` throttles to the
+    provider's rate limit; a stale/failed feed just leaves the last scan in place.
+    """
+    job_ingest()
+    job_scan_all()
+
+
 def default_job_specs() -> list[JobSpec]:
-    specs = [
-        JobSpec("ingest", job_ingest, 24 * 60, "Fetch daily bars for the universe"),
-        JobSpec("scan_all", job_scan_all, 6 * 60, "Scan every enabled horizon"),
+    return [
+        # One safe daily update, 17:30 America/New_York — ~90 min after the 16:00
+        # close so the provider has published completed bars.
+        JobSpec(
+            "daily_eod_update",
+            job_daily_eod_update,
+            24 * 60,
+            "Post-close: ingest completed daily bars + rescan every enabled horizon",
+            cron_hour=17,
+            cron_minute=30,
+        ),
         JobSpec("paper_mtm", job_paper_mtm, 12 * 60, "Mark paper positions to market"),
         JobSpec("feed_probe", job_feed_probe, 60, "Warn on stale data feeds"),
-    ]
-    specs.append(
-        JobSpec("daily_briefing", job_daily_briefing, 24 * 60, "Build the daily research briefing")
-    )
-    specs.append(JobSpec("alerts", job_alerts, 60, "Evaluate and dispatch alerts (policy-gated)"))
-    specs.append(
+        JobSpec("daily_briefing", job_daily_briefing, 24 * 60, "Build the daily research briefing"),
+        JobSpec(
+            "alerts", job_alerts, 60, "Evaluate and dispatch alerts (policy-gated, OFF by default)"
+        ),
         JobSpec(
             "strategy_health",
             job_strategy_health,
             12 * 60,
             "Compare live-paper vs OOS expectancy; downgrade/disable on shortfall",
-        )
-    )
-    return specs
+        ),
+    ]
 
 
 def job_alerts() -> None:
@@ -185,12 +205,20 @@ def build_scheduler(specs: list[JobSpec] | None = None) -> BackgroundScheduler:
         job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 3600},
     )
     for spec in specs or default_job_specs():
+        if spec.cron_hour is not None:
+            trigger_kwargs: dict[str, object] = {
+                "trigger": "cron",
+                "hour": spec.cron_hour,
+                "minute": spec.cron_minute,
+                "timezone": spec.cron_tz,
+            }
+        else:
+            trigger_kwargs = {"trigger": "interval", "minutes": spec.interval_minutes}
         scheduler.add_job(
             guarded(spec.name, spec.fn),
-            trigger="interval",
-            minutes=spec.interval_minutes,
             id=spec.name,
             name=spec.description,
             replace_existing=True,
+            **trigger_kwargs,
         )
     return scheduler

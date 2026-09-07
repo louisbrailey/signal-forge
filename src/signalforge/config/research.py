@@ -64,6 +64,11 @@ class QualityThresholds(BaseModel):
     min_oos_ci_low_r: float = -0.15  # bootstrap lower bound not deeply negative
     min_oos_trades: PositiveInt = 20  # enough OOS trades to trust the number
     require_backtest: bool = True  # no committed backtest => NO TRADE
+    # Genuine out-of-sample evidence must span more than one market regime: at
+    # least ``min_oos_regimes`` distinct (trend/vol) regimes, each with at least
+    # ``min_trades_per_regime`` OOS trades. A single-regime edge is not eligible.
+    min_oos_regimes: PositiveInt = 2
+    min_trades_per_regime: PositiveInt = 10
 
 
 class HealthMonitorConfig(BaseModel):

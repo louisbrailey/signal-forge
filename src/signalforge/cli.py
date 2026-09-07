@@ -417,6 +417,38 @@ def scan(
         )
 
 
+@paper_app.command("init")
+def paper_init(
+    cash: Annotated[float, typer.Option(help="Starting paper cash.")] = 10_000.0,
+    name: Annotated[str, typer.Option(help="Account name.")] = "default",
+) -> None:
+    """Create the paper account if it does not exist (no fixture data, no orders)."""
+    from decimal import Decimal
+
+    from sqlalchemy import select
+
+    from signalforge.db.models import PaperAccount
+    from signalforge.db.session import session_scope
+
+    with session_scope() as session:
+        acct = session.scalar(select(PaperAccount).where(PaperAccount.name == name))
+        if acct is not None:
+            typer.secho(
+                f"paper account {name!r} already exists: cash {float(acct.cash):,.2f}. "
+                "Research signal only — no order was placed.",
+                fg=typer.colors.YELLOW,
+            )
+            return
+        session.add(
+            PaperAccount(name=name, initial_cash=Decimal(str(cash)), cash=Decimal(str(cash)))
+        )
+    typer.secho(
+        f"created paper account {name!r} with ${cash:,.2f} (SIMULATED). "
+        "Research signal only — no order was placed.",
+        fg=typer.colors.GREEN,
+    )
+
+
 @paper_app.command("accept")
 def paper_accept(candidate_id: int) -> None:
     """Paper-accept a candidate (SIMULATED fill). Research signal only — no order was placed."""
@@ -560,9 +592,12 @@ def alerts() -> None:
 
 @app.command("run-scheduler")
 def run_scheduler() -> None:
-    """Run the in-process background scheduler (ingest / scan / MTM / feed probe).
+    """Run the in-process background scheduler.
 
-    Every job is a no-op while the kill switch is engaged.
+    Jobs: one post-close daily EOD update (ingest + rescan, cron 17:30 ET),
+    paper mark-to-market, feed-staleness probe, daily briefing, alert cycle
+    (policy-gated, OFF by default), strategy-health monitor. Every job is a
+    no-op while the kill switch is engaged.
     """
     import time
 
@@ -585,7 +620,7 @@ def run_job(
     name: Annotated[
         str,
         typer.Argument(
-            help="ingest | scan_all | paper_mtm | feed_probe | daily_briefing | alerts | "
+            help="daily_eod_update | paper_mtm | feed_probe | daily_briefing | alerts | "
             "strategy_health"
         ),
     ],

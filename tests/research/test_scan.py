@@ -23,7 +23,13 @@ UNIVERSE = ["SPY", "AAPL", "MSFT", "NVDA", "XOM"]
 AS_OF = date(2024, 6, 30)
 
 
-def _seed(session: Session, *, oos_expectancy_r: float, oos_trades: int = 200) -> None:
+def _seed(
+    session: Session,
+    *,
+    oos_expectancy_r: float,
+    oos_trades: int = 200,
+    regimes: tuple[str, ...] = ("bull/low", "bear/high"),
+) -> None:
     session.add(PaperAccount(name="default", initial_cash=10_000, cash=10_000))
     ingest_universe(
         session, FixtureMarketDataAdapter(), UNIVERSE, AS_OF - timedelta(days=365 * 5), AS_OF
@@ -52,6 +58,19 @@ def _seed(session: Session, *, oos_expectancy_r: float, oos_trades: int = 200) -
                 },
             )
         )
+        for label in regimes:
+            session.add(
+                BacktestMetric(
+                    run_id=run.id,
+                    segment=label[:16],
+                    phase="oos_by_regime",
+                    metrics_json={
+                        "regime_label": label,
+                        "expectancy_r": oos_expectancy_r,
+                        "n_trades": 40,
+                    },
+                )
+            )
     session.flush()
 
 
@@ -68,6 +87,47 @@ def test_scan_accounting_reconciles(session: Session) -> None:
     for c in result.candidates:
         assert c.quality_gate_status is QualityGate.NO_TRADE
         assert any("OOS expectancy" in g for g in c.failed_gates)
+
+
+def test_oos_regime_coverage_helper_counts_distinct_regimes(session: Session) -> None:
+    from signalforge.config.research import QualityThresholds
+    from signalforge.research.scan import _oos_regime_coverage
+
+    q = QualityThresholds()
+    assert q.min_oos_regimes >= 2 and q.min_trades_per_regime >= 1
+
+    ver = upsert_strategy_version(session, default_strategies()[0].spec())
+    run = BacktestRun(
+        strategy_version_id=ver.id,
+        params_json={},
+        date_start=AS_OF,
+        date_end=AS_OF,
+        config_hash="t",
+    )
+    session.add(run)
+    session.flush()
+    session.add_all(
+        [
+            BacktestMetric(
+                run_id=run.id,
+                segment="bull/low",
+                phase="oos_by_regime",
+                metrics_json={"regime_label": "bull/low", "n_trades": 40},
+            ),
+            BacktestMetric(
+                run_id=run.id,
+                segment="bear/high",
+                phase="oos_by_regime",
+                metrics_json={"regime_label": "bear/high", "n_trades": 5},  # below threshold
+            ),
+        ]
+    )
+    session.flush()
+
+    n, labels = _oos_regime_coverage(session, run.id, q.min_trades_per_regime)
+    assert n == 1 and labels == ["bull/low"]  # bear/high has too few trades
+    n2, labels2 = _oos_regime_coverage(session, run.id, 1)
+    assert n2 == 2 and labels2 == ["bear/high", "bull/low"]
 
 
 def test_intraday_scan_without_an_intraday_feed_is_stale(session: Session) -> None:

@@ -35,6 +35,10 @@ are counted below with their reasons.</p>
   <strong>NO TRADE {{ run.no_trade }}</strong>,
   <strong>{{ run.qualified }} qualified</strong>.
 </div>
+{% if run.qualified == 0 %}
+<p class="mt-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900">
+  NO TRADE — insufficient evidence or poor risk/reward.</p>
+{% endif %}
 {% else %}
 <p class="mt-4 text-sm text-slate-500">No scan for this horizon yet.</p>
 {% endif %}

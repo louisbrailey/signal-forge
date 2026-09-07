@@ -50,15 +50,17 @@ def test_every_default_job_is_wrapped_by_the_guard(
 
 def test_build_scheduler_registers_every_job(db_url: str) -> None:
     scheduler = build_scheduler()
-    ids = {j.id for j in scheduler.get_jobs()}
+    jobs = {j.id: j for j in scheduler.get_jobs()}
     assert {
-        "ingest",
-        "scan_all",
+        "daily_eod_update",
         "paper_mtm",
         "feed_probe",
         "daily_briefing",
         "strategy_health",
-    } <= ids
+    } <= set(jobs)
+    # the single post-close update runs on a daily cron, not a fixed interval
+    assert type(jobs["daily_eod_update"].trigger).__name__ == "CronTrigger"
+    assert type(jobs["paper_mtm"].trigger).__name__ == "IntervalTrigger"
 
 
 def test_catch_up_runs_when_no_scan_exists(db_url: str, monkeypatch: pytest.MonkeyPatch) -> None:

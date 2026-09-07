@@ -298,6 +298,23 @@ def run_scan(
     return result
 
 
+def _oos_regime_coverage(session: Session, run_id: int, min_trades: int) -> tuple[int, list[str]]:
+    """Distinct OOS market regimes with >= ``min_trades`` trades for this run."""
+    from signalforge.db.models import BacktestMetric
+
+    rows = session.scalars(
+        select(BacktestMetric).where(
+            BacktestMetric.run_id == run_id, BacktestMetric.phase == "oos_by_regime"
+        )
+    )
+    labels: list[str] = []
+    for r in rows:
+        mj = r.metrics_json
+        if float(mj.get("n_trades", 0)) >= min_trades:
+            labels.append(str(mj.get("regime_label", r.segment)))
+    return len(labels), sorted(labels)
+
+
 def _NEUTRAL_STATE(as_of: date) -> RegimeState:
     from signalforge.research.regime import Trend, Vol
 
@@ -356,6 +373,15 @@ def _build_draft(
         if ci and float(ci.get("low", -1.0)) < q.min_oos_ci_low_r:
             failed.append(
                 f"OOS expectancy CI low {float(ci.get('low', 0)):+.3f}R < {q.min_oos_ci_low_r}"
+            )
+        n_regimes, regime_labels = _oos_regime_coverage(
+            session, metric.run_id, q.min_trades_per_regime
+        )
+        if n_regimes < q.min_oos_regimes:
+            failed.append(
+                f"OOS regime coverage: {n_regimes} regime(s) with "
+                f">={q.min_trades_per_regime} trades ({', '.join(regime_labels) or 'none'}) "
+                f"< {q.min_oos_regimes} required — single-regime edge"
             )
 
     # gate: risk engine can size the position
