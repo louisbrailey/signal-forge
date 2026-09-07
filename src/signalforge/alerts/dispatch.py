@@ -37,7 +37,14 @@ from signalforge.db.models import (
     StrategyVersion,
 )
 from signalforge.db.types import utcnow
-from signalforge.domain import AlertChannel, AlertStatus, AlertType, QualityGate, StrategyStatus
+from signalforge.domain import (
+    AlertChannel,
+    AlertStatus,
+    AlertType,
+    Horizon,
+    QualityGate,
+    StrategyStatus,
+)
 from signalforge.killswitch import ensure_not_engaged
 from signalforge.observability import get_logger
 from signalforge.settings_store import effective_research_config, get_setting
@@ -129,6 +136,8 @@ def plan_alerts(session: Session, now: datetime) -> list[PlannedAlert]:
     # --- candidate alerts: paper_approved strategy + PASSED + latest scan ---
     cfg = effective_research_config(session)
     for h in cfg.enabled_horizons:
+        if h is Horizon.INTRADAY:
+            continue  # never alert on intraday signals (EOD-only operation)
         run = session.scalar(
             select(ScanRun).where(ScanRun.horizon == h).order_by(ScanRun.started_at.desc()).limit(1)
         )

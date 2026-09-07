@@ -35,7 +35,12 @@ def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
     monkeypatch.setenv("MARKET_DATA_API_KEY", "")
     monkeypatch.setenv("MARKET_DATA_PROVIDER_SECONDARY", "")
     monkeypatch.setenv("MARKET_DATA_API_KEY_SECONDARY", "")
+    monkeypatch.setenv("OPTIONS_PROVIDER", "")
+    monkeypatch.setenv("OPTIONS_API_KEY", "")
+    monkeypatch.setenv("NEWS_PROVIDER", "")
+    monkeypatch.setenv("NEWS_API_KEY", "")
     monkeypatch.setenv("NOTIFICATION_PROVIDER", "")
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "")
     monkeypatch.setenv("LLM_PROVIDER", "")
 
     import signalforge.killswitch as ks

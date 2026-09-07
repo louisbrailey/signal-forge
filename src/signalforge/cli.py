@@ -625,6 +625,45 @@ def alerts() -> None:
         typer.secho(f"  - suppressed: {s}", fg=typer.colors.YELLOW)
 
 
+notify_app = typer.Typer(help="Notification-channel checks (never creates a paper trade).")
+app.add_typer(notify_app, name="notify")
+
+
+@notify_app.command("test-discord")
+def notify_test_discord(
+    yes: Annotated[bool, typer.Option("--yes", help="Confirm sending the test message.")] = False,
+) -> None:
+    """Send ONE test message to the configured Discord webhook. Requires --yes.
+
+    Reads only DISCORD_WEBHOOK_URL. Does not evaluate the alert policy, does not
+    enable alerts, and never creates a paper trade.
+    """
+    from signalforge.alerts.channels.discord import DiscordChannel
+
+    ch = DiscordChannel.from_settings()
+    if ch is None:
+        typer.secho(
+            "No usable DISCORD_WEBHOOK_URL in the local environment (must be a "
+            "well-formed https://discord.com/api/webhooks/... URL).",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+    if not yes:
+        typer.secho(
+            "This will POST one message to your Discord channel. Re-run with --yes to confirm.",
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(code=1)
+    ok = ch.send_test()
+    record("notify.discord_test", actor="cli", entity="discord", ok=ok)
+    typer.secho(
+        f"test message {'delivered' if ok else 'FAILED'} — no alert policy evaluated, "
+        "no paper trade created. Research signal only — no order was placed.",
+        fg=typer.colors.GREEN if ok else typer.colors.RED,
+    )
+    raise typer.Exit(code=0 if ok else 1)
+
+
 @app.command("run-scheduler")
 def run_scheduler() -> None:
     """Run the in-process background scheduler.
