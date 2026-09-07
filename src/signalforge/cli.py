@@ -96,6 +96,137 @@ def providers_verify() -> None:
     )
 
 
+options_app = typer.Typer(help="Options data + education simulators (no execution path).")
+app.add_typer(options_app, name="options")
+news_app = typer.Typer(help="Licensed read-only news (never drives a recommendation).")
+app.add_typer(news_app, name="news")
+
+
+@options_app.command("ingest")
+def options_ingest_cmd(
+    underlyings: Annotated[
+        str, typer.Option(help="Comma-separated; default: configured set.")
+    ] = "",
+    exp_min_days: Annotated[int, typer.Option()] = 14,
+    exp_max_days: Annotated[int, typer.Option()] = 120,
+    strike_pct: Annotated[float, typer.Option(help="+/- band around the reference price.")] = 0.25,
+) -> None:
+    """Fetch contract metadata + a delayed chain snapshot for a small liquid set."""
+    ensure_not_engaged()
+    from sqlalchemy import select
+
+    from signalforge.config import get_settings
+    from signalforge.data.adapters.massive_options import MassiveOptionsAdapter
+    from signalforge.data.options_ingest import ingest_options_for_underlying
+    from signalforge.data.series import PriceSeries
+    from signalforge.db.models import Instrument
+    from signalforge.db.session import session_scope
+
+    s = get_settings()
+    us = [x.strip().upper() for x in underlyings.split(",") if x.strip()] or list(
+        s.research.options.underlyings
+    )
+    adapter = MassiveOptionsAdapter()
+    from datetime import date as _d
+
+    with session_scope() as session:
+        for u in us:
+            ref = None
+            inst = session.scalar(select(Instrument).where(Instrument.symbol == u))
+            if inst is not None:
+                series = PriceSeries.load(session, u, _d(2000, 1, 1), _d.today())
+                ref = float(series.close[-1]) if len(series) else None
+            cov = ingest_options_for_underlying(
+                session,
+                adapter,
+                u,
+                expiration_min_days=exp_min_days,
+                expiration_max_days=exp_max_days,
+                strike_pct=strike_pct,
+                reference_price=ref,
+            )
+            if cov.error:
+                typer.secho(f"  {u}: {cov.error}", fg=typer.colors.RED)
+                continue
+            typer.secho(
+                f"  {u}: {cov.contracts_written} new contracts ({cov.contracts_seen} seen), "
+                f"{cov.snapshots_written} delayed snapshots "
+                f"(greeks {cov.greeks_present}, iv {cov.iv_present}); "
+                f"exp {cov.expirations[:1]}..{cov.expirations[-1:]} "
+                f"strikes {cov.strike_min}-{cov.strike_max}",
+                fg=typer.colors.GREEN,
+            )
+    typer.echo(
+        "Delayed data (>=15 min). Education/simulation only. "
+        "Research signal only — no order was placed."
+    )
+
+
+@options_app.command("simulate")
+def options_simulate_cmd(
+    strategy: Annotated[
+        str, typer.Argument(help="long_call|long_put|covered_call|cash_secured_put")
+    ],
+    spot: Annotated[float, typer.Option()],
+    strike: Annotated[float, typer.Option()],
+    premium: Annotated[float, typer.Option()],
+) -> None:
+    """Hypothetical payoff / break-even / max-loss for a long or collateralised position."""
+    from signalforge.options import simulators as sim
+
+    fns = {
+        "long_call": sim.long_call,
+        "long_put": sim.long_put,
+        "covered_call": sim.covered_call,
+        "cash_secured_put": sim.cash_secured_put,
+    }
+    if strategy not in fns:
+        typer.secho(
+            f"unknown strategy {strategy!r}. Choose from {sorted(fns)}", fg=typer.colors.RED
+        )
+        raise typer.Exit(code=1)
+    res = fns[strategy](spot, strike, premium)
+    typer.echo(
+        f"{res.strategy}: entry_cost {res.entry_cost:+.2f}  max_loss {res.max_loss:.2f}  "
+        f"max_gain {res.max_gain}  break-even {res.break_evens}"
+    )
+    for n in res.notes:
+        typer.echo(f"  - {n}")
+    typer.echo(f"  {res.disclaimer}")
+
+
+@news_app.command("ingest")
+def news_ingest_cmd(
+    tickers: Annotated[
+        str, typer.Option(help="Comma-separated; default: configured universe.")
+    ] = "",
+    lookback_days: Annotated[int, typer.Option()] = 3,
+    limit: Annotated[int, typer.Option()] = 50,
+) -> None:
+    """Pull recent licensed headlines for the universe; dedupe + persist audit metadata."""
+    ensure_not_engaged()
+    from signalforge.config import get_settings
+    from signalforge.data.adapters.massive_news import MassiveNewsAdapter
+    from signalforge.data.news_ingest import ingest_news
+    from signalforge.db.session import session_scope
+
+    s = get_settings()
+    tk = [x.strip().upper() for x in tickers.split(",") if x.strip()] or list(s.research.universe)
+    with session_scope() as session:
+        rep = ingest_news(
+            session, MassiveNewsAdapter(), tk, lookback_days=lookback_days, limit=limit
+        )
+    if rep.error:
+        typer.secho(f"news: {rep.error}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    typer.secho(
+        f"news: fetched {rep.fetched}, written {rep.written}, duplicates {rep.duplicates} "
+        f"(publishers: {', '.join(rep.publishers or [])})",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo("News is for context and LLM summaries only — it never drives a recommendation.")
+
+
 @app.command()
 def seed(years: Annotated[int, typer.Option(help="Years of simulated history.")] = 3) -> None:
     """Load clearly-labelled SIMULATED demo data (fixture adapter only)."""

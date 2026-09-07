@@ -20,9 +20,12 @@ __all__ = [
     "HealthMonitorConfig",
     "Horizon",
     "LiquidityFilters",
+    "NewsConfig",
+    "OptionsConfig",
     "QualityThresholds",
     "ResearchConfig",
     "RiskLimits",
+    "UniverseFilters",
 ]
 
 
@@ -70,6 +73,46 @@ class QualityThresholds(BaseModel):
     # one trend — a bull-only edge is not eligible.
     min_oos_regimes: PositiveInt = 2
     min_trades_per_regime: PositiveInt = 10
+
+
+class UniverseFilters(BaseModel):
+    """Conservative liquid-U.S. universe screen. Applied on top of the watchlist +
+    ETF set; a symbol must clear every active filter to be scanned."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    min_price: PositiveFloat = 5.0
+    min_market_cap: PositiveFloat = 2_000_000_000.0
+    min_avg_dollar_volume: PositiveFloat = 20_000_000.0
+    max_avg_spread_bps: PositiveFloat = 20.0
+    min_history_days: PositiveInt = 400  # data-coverage floor
+    excluded_sectors: tuple[str, ...] = ()
+    exclude_within_days_of_earnings: PositiveInt = 3
+    max_universe_size: PositiveInt = 150
+
+
+class OptionsConfig(BaseModel):
+    """Options coverage (education / simulation only). Deliberately narrow —
+    a small liquid ETF + large-cap set, bounded expirations and strikes."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    underlyings: tuple[str, ...] = ("SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA")
+    expiration_min_days: PositiveInt = 14
+    expiration_max_days: PositiveInt = 120
+    strike_pct_band: PositiveFloat = 0.25  # +/- around the reference price
+    poll_enabled: bool = False  # OFF by default; snapshots are on-demand
+    risk_free_rate: NonNegativeFloat = 0.04  # simulator assumption, not vendor data
+
+
+class NewsConfig(BaseModel):
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    poll_enabled: bool = False  # OFF by default
+    poll_interval_minutes: PositiveInt = 30
+    lookback_days: PositiveInt = 3
+    per_ticker_limit: PositiveInt = 25
+    us_session_only: bool = True  # poll only around U.S. market sessions
 
 
 class HealthMonitorConfig(BaseModel):
@@ -160,6 +203,9 @@ class ResearchConfig(BaseModel):
     data_quality: DataQualityConfig = Field(default_factory=DataQualityConfig)
     quality_gates: QualityThresholds = Field(default_factory=QualityThresholds)
     health_monitor: HealthMonitorConfig = Field(default_factory=HealthMonitorConfig)
+    universe_filters: UniverseFilters = Field(default_factory=UniverseFilters)
+    options: OptionsConfig = Field(default_factory=OptionsConfig)
+    news: NewsConfig = Field(default_factory=NewsConfig)
 
     # Backtest cost assumptions (displayed on every candidate + report)
     commission_per_share: NonNegativeFloat = 0.0

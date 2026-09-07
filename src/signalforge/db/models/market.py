@@ -180,14 +180,72 @@ class EconomicEvent(Base, IntPK, CreatedAt):
 
 class NewsItem(Base, IntPK, CreatedAt):
     __tablename__ = "news_item"
+    __table_args__ = (UniqueConstraint("dedupe_key"),)
 
     headline: Mapped[str] = mapped_column(String(400))
     body_ref: Mapped[str] = mapped_column(String(400), default="")  # path into raw cache
     url: Mapped[str] = mapped_column(String(600), default="")
     published_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
-    source: Mapped[str] = mapped_column(String(60))
+    retrieved_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None, index=True)
+    source: Mapped[str] = mapped_column(String(60))  # publisher name, e.g. "Benzinga"
+    provider: Mapped[str] = mapped_column(String(40), default="")  # feed the item came through
+    provider_id: Mapped[str] = mapped_column(String(120), default="")  # vendor article id
+    dedupe_key: Mapped[str] = mapped_column(String(160), default="", index=True)
+    author: Mapped[str] = mapped_column(String(160), default="")
+    category: Mapped[str] = mapped_column(String(60), default="")
+    image_url: Mapped[str] = mapped_column(String(600), default="")
     instrument_symbols: Mapped[list[str]] = mapped_column(JSON, default=list)
     sentiment_label: Mapped[str | None] = mapped_column(String(16), default=None)  # LLM, optional
+
+
+class OptionContract(Base, IntPK, CreatedAt):
+    """Reference metadata for one option contract (education/simulation only)."""
+
+    __tablename__ = "option_contract"
+    __table_args__ = (
+        UniqueConstraint("option_ticker", "source"),
+        Index("ix_option_contract_underlying_exp", "underlying_symbol", "expiration_date"),
+    )
+
+    option_ticker: Mapped[str] = mapped_column(String(40), index=True)  # e.g. O:SPY260116C00500000
+    underlying_symbol: Mapped[str] = mapped_column(String(16), index=True)
+    contract_type: Mapped[str] = mapped_column(String(4))  # call | put
+    strike_price: Mapped[float] = mapped_column(Float)
+    expiration_date: Mapped[date] = mapped_column(index=True)
+    exercise_style: Mapped[str] = mapped_column(String(12), default="american")
+    shares_per_contract: Mapped[int] = mapped_column(Integer, default=100)
+    source: Mapped[str] = mapped_column(String(40), index=True)
+    ingested_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
+class OptionQuoteSnapshot(Base, IntPK, CreatedAt):
+    """A point-in-time chain snapshot row. Per-field latency is explicit:
+    ``day_*`` / ``last_trade_*`` are DELAYED (>=15 min); ``open_interest`` is
+    end-of-day; ``iv`` / ``greeks_json`` are the *vendor* values and are usually
+    absent on this entitlement (None). Never labelled live."""
+
+    __tablename__ = "option_quote_snapshot"
+    __table_args__ = (Index("ix_option_quote_ticker_asof", "option_ticker", "as_of"),)
+
+    option_ticker: Mapped[str] = mapped_column(String(40), index=True)
+    underlying_symbol: Mapped[str] = mapped_column(String(16), index=True)
+    as_of: Mapped[datetime] = mapped_column(UTCDateTime, index=True)  # our retrieval time (UTC)
+    source: Mapped[str] = mapped_column(String(40), index=True)
+    latency_category: Mapped[LatencyCategory] = mapped_column(SAEnum(LatencyCategory, **_ENUM_KW))
+
+    underlying_price: Mapped[float | None] = mapped_column(Float, default=None)
+    day_close: Mapped[float | None] = mapped_column(Float, default=None)
+    day_volume: Mapped[float | None] = mapped_column(Float, default=None)
+    day_vwap: Mapped[float | None] = mapped_column(Float, default=None)
+    day_last_updated: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
+    last_trade_price: Mapped[float | None] = mapped_column(Float, default=None)
+    last_trade_size: Mapped[float | None] = mapped_column(Float, default=None)
+    last_trade_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
+    open_interest: Mapped[int | None] = mapped_column(Integer, default=None)
+    break_even_price: Mapped[float | None] = mapped_column(Float, default=None)
+    vendor_iv: Mapped[float | None] = mapped_column(Float, default=None)  # None if not entitled
+    vendor_greeks_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    quality_flags: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
 class FundamentalsSnapshot(Base, IntPK, CreatedAt):
