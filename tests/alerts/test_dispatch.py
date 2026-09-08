@@ -61,7 +61,7 @@ def test_briefing_alert_is_sent_once_then_deduped(session: Session) -> None:
     assert r2.sent == 0  # deduped by key
 
 
-def test_stale_feed_yields_only_a_health_alert(session: Session) -> None:
+def test_stale_feed_yields_only_a_data_issue_alert(session: Session) -> None:
     _seed_feed_and_briefing(session)
     for row in session.scalars(select(DataFeedStatus)):
         row.last_success_at = utcnow() - timedelta(days=30)
@@ -69,8 +69,86 @@ def test_stale_feed_yields_only_a_health_alert(session: Session) -> None:
 
     planned = plan_alerts(session, NOON)
     kinds = {p.alert_type for p in planned}
-    assert kinds == {AlertType.SYSTEM_HEALTH}
+    assert kinds == {AlertType.DATA_ISSUE}
     assert all(p.overnight_ok for p in planned)
+
+
+def test_recent_ingestion_failure_yields_a_data_issue_alert(session: Session) -> None:
+    """A failed/partial ingestion run in the last 24h is a data issue, distinct
+    from (and detected independently of) a stale feed."""
+    from signalforge.db.models import IngestionRun
+    from signalforge.domain import FeedType
+
+    _seed_feed_and_briefing(session)
+    session.add(
+        IngestionRun(
+            provider="massive",
+            feed_type=FeedType.BAR_DAILY,
+            kind="incremental",
+            requested_start=date(2024, 6, 1),
+            requested_end=date(2024, 6, 30),
+            status="failed",
+            started_at=utcnow() - timedelta(hours=2),
+        )
+    )
+    session.flush()
+
+    planned = plan_alerts(session, NOON)
+    kinds = {p.alert_type for p in planned}
+    assert AlertType.DATA_ISSUE in kinds
+    data_issue = next(p for p in planned if p.alert_type is AlertType.DATA_ISSUE)
+    assert "massive" in data_issue.body and "failed" in data_issue.body
+    assert data_issue.overnight_ok is True
+    # briefing/candidate alerts are untouched (no stale feed, just an ingestion failure)
+    assert AlertType.DAILY_BRIEFING in kinds
+
+
+def test_recent_job_failure_yields_a_system_health_alert(session: Session) -> None:
+    from signalforge.db.models import AuditLog
+
+    _seed_feed_and_briefing(session)
+    session.add(
+        AuditLog(
+            ts=utcnow() - timedelta(hours=1),
+            actor="scheduler",
+            action="job.failed",
+            entity="daily_eod_update",
+            before_json={},
+            after_json={"error": "AdapterError: network request failed"},
+        )
+    )
+    session.flush()
+
+    planned = plan_alerts(session, NOON)
+    kinds = {p.alert_type for p in planned}
+    assert AlertType.SYSTEM_HEALTH in kinds
+    sys_health = next(p for p in planned if p.alert_type is AlertType.SYSTEM_HEALTH)
+    assert "daily_eod_update" in sys_health.body
+    assert sys_health.overnight_ok is True
+    assert AlertType.DAILY_BRIEFING in kinds  # a job failure alone doesn't block the briefing
+
+
+def test_every_alert_carries_the_research_only_notice(session: Session) -> None:
+    from signalforge.db.models import AuditLog
+
+    _seed_feed_and_briefing(session)
+    session.add(
+        AuditLog(
+            ts=utcnow() - timedelta(hours=1),
+            actor="scheduler",
+            action="job.failed",
+            entity="x",
+            before_json={},
+            after_json={"error": "boom"},
+        )
+    )
+    session.flush()
+    for row in session.scalars(select(DataFeedStatus)):
+        row.last_success_at = utcnow() - timedelta(days=30)
+    session.flush()
+
+    for p in plan_alerts(session, NOON):
+        assert RESEARCH_ONLY_NOTICE in p.body
 
 
 def test_quiet_hours_suppress_briefing_but_not_health(session: Session) -> None:

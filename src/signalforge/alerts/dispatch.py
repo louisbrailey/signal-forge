@@ -6,7 +6,11 @@ Default policy:
   ``paper_approved`` strategies on a fresh feed.
 * One daily research briefing.
 * Nothing when data is stale or a strategy is disabled.
-* Nothing during quiet hours **except** system-health failures.
+* Nothing during quiet hours **except** DATA_ISSUE (stale feed / ingestion
+  failure) and SYSTEM_HEALTH (a scheduled job or the DB itself failed).
+* Candidate alerts stay off until >= 1 strategy reaches PAPER_APPROVED through
+  ``research.promotion`` — enforced structurally by the join below, not a
+  separate toggle.
 * No option-trade alerts (there is no code path).
 * Every alert body carries "Research signal only — no order was placed." and a
   link to the local evidence page.
@@ -16,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from datetime import timedelta as _td
 from typing import Any
 
 from sqlalchemy import func, select
@@ -25,12 +30,15 @@ from signalforge.alerts.channels import available_channels
 from signalforge.alerts.render import (
     render_briefing_alert,
     render_candidate_alert,
-    render_health_alert,
+    render_data_issue_alert,
+    render_system_health_alert,
 )
 from signalforge.data.feeds import feed_status_report
 from signalforge.db.models import (
     AlertLog,
+    AuditLog,
     Candidate,
+    IngestionRun,
     Instrument,
     ScanRun,
     Strategy,
@@ -97,20 +105,65 @@ def _already_logged(session: Session, dedupe_key: str) -> bool:
     return session.scalar(select(AlertLog.id).where(AlertLog.dedupe_key == dedupe_key)) is not None
 
 
+def _recent_ingestion_failures(session: Session, now: datetime, *, hours: int = 24) -> list[str]:
+    """Ingestion runs that failed or only partially completed in the last
+    ``hours`` — a data issue distinct from (but as urgent as) a stale feed."""
+    since = now.astimezone(UTC) - _td(hours=hours)
+    rows = session.execute(
+        select(IngestionRun.provider, IngestionRun.kind, IngestionRun.status, IngestionRun.notes)
+        .where(IngestionRun.status.in_(("failed", "partial")), IngestionRun.started_at >= since)
+        .order_by(IngestionRun.started_at.desc())
+        .limit(10)
+    ).all()
+    return [f"{provider}/{kind} {status}" for provider, kind, status, _notes in rows]
+
+
+def _recent_job_failures(session: Session, now: datetime, *, hours: int = 6) -> list[str]:
+    """Scheduled-job exceptions recorded by ``scheduler.guarded`` — a system
+    failure distinct from a data-freshness problem."""
+    since = now.astimezone(UTC) - _td(hours=hours)
+    rows = session.execute(
+        select(AuditLog.entity, AuditLog.after_json)
+        .where(AuditLog.action == "job.failed", AuditLog.ts >= since)
+        .order_by(AuditLog.ts.desc())
+        .limit(10)
+    ).all()
+    return [
+        f"job {entity} failed: {(after or {}).get('error', 'see logs')[:120]}"
+        for entity, after in rows
+    ]
+
+
 def plan_alerts(session: Session, now: datetime) -> list[PlannedAlert]:
     planned: list[PlannedAlert] = []
     feeds = feed_status_report(session)
     stale_reasons = [
         f"{f['provider']}/{f['feed_type']} stale" for f in feeds["feeds"] if f["is_stale"]
     ]
+    ingestion_reasons = _recent_ingestion_failures(session, now)
+    data_reasons = stale_reasons + ingestion_reasons
+    job_reasons = _recent_job_failures(session, now)
 
-    # --- system health (allowed overnight) ---
-    if stale_reasons:
-        subj, body = render_health_alert(stale_reasons)
+    # --- data issue: stale feed or a recent ingestion failure (overnight ok) ---
+    if data_reasons:
+        subj, body = render_data_issue_alert(data_reasons)
+        planned.append(
+            PlannedAlert(
+                AlertType.DATA_ISSUE,
+                dedupe_key=f"data_issue:{now.date()}:{hash(tuple(data_reasons)) & 0xffff}",
+                subject=subj,
+                body=body,
+                overnight_ok=True,
+            )
+        )
+
+    # --- system health: a scheduled job or the DB itself failed (overnight ok) ---
+    if job_reasons:
+        subj, body = render_system_health_alert(job_reasons)
         planned.append(
             PlannedAlert(
                 AlertType.SYSTEM_HEALTH,
-                dedupe_key=f"health:{now.date()}:{hash(tuple(stale_reasons)) & 0xffff}",
+                dedupe_key=f"sys_health:{now.date()}:{hash(tuple(job_reasons)) & 0xffff}",
                 subject=subj,
                 body=body,
                 overnight_ok=True,
@@ -118,7 +171,7 @@ def plan_alerts(session: Session, now: datetime) -> list[PlannedAlert]:
         )
 
     if stale_reasons:
-        return planned  # stale feed => no candidate/briefing alerts
+        return planned  # a stale feed specifically => no candidate/briefing alerts
 
     # --- daily briefing ---
     briefing = get_setting(session, "last_briefing", None)

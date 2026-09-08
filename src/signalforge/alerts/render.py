@@ -61,10 +61,24 @@ def render_briefing_alert(payload: dict[str, Any]) -> tuple[str, str]:
     return subject, body
 
 
-def render_health_alert(reasons: list[str]) -> tuple[str, str]:
-    subject = "[Signal Forge] System health — data feed problem"
+def render_data_issue_alert(reasons: list[str]) -> tuple[str, str]:
+    """Stale feed or a recent ingestion run that failed/partially completed."""
+    subject = "[Signal Forge] Data issue — stale feed or ingestion failure"
     body = (
-        "A data feed is stale or unavailable. Live alerts are disabled until it recovers.\n\n"
+        "A data feed is stale, or a recent ingestion run failed/partially completed. "
+        "Live candidate alerts are disabled until it recovers.\n\n"
+        + "\n".join(f"- {r}" for r in reasons)
+        + f"\n\n{RESEARCH_ONLY_NOTICE}"
+    )
+    return subject, body
+
+
+def render_system_health_alert(reasons: list[str]) -> tuple[str, str]:
+    """Something in the system itself failed — DB unreachable, a scheduled job
+    raised — as distinct from a data-freshness problem."""
+    subject = "[Signal Forge] System health — a scheduled job or the database failed"
+    body = (
+        "Signal Forge detected a system failure (not a data-staleness issue).\n\n"
         + "\n".join(f"- {r}" for r in reasons)
         + f"\n\n{RESEARCH_ONLY_NOTICE}"
     )

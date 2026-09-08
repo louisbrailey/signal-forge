@@ -2,7 +2,10 @@
 
 A strategy may only run in a scan when its :class:`StrategySpec` is complete and
 its status is ``EXPERIMENTAL`` (paper only, no alerts) or ``PAPER_APPROVED``
-(alerts allowed). Promotion is a manual, audited action.
+(alerts allowed). Promotion is earned automatically by clearing every gate in
+``signalforge.research.promotion`` on genuine licensed data — never a manual
+action. A human may only move a strategy *down* (to ``experimental`` or
+``disabled``); the dashboard and CLI both enforce this.
 
 Phase 0: the data structures and completeness validation. Phase 1 wires the
 baseline strategies and their committed backtest reports.

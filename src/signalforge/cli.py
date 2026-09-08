@@ -1262,6 +1262,86 @@ def strategy_health() -> None:
     typer.echo("Research signal only — no order was placed.")
 
 
+@app.command("evaluate-promotion")
+def evaluate_promotion_cmd(
+    strategy: Annotated[
+        str, typer.Option(help="Strategy key filter, e.g. 'relative_strength'; default: all.")
+    ] = "",
+    symbols: Annotated[
+        str, typer.Option(help="Comma-separated; default: configured universe.")
+    ] = "",
+    since: Annotated[
+        str, typer.Option(help="YYYY-MM-DD; default: earliest ingested history.")
+    ] = "",
+    until: Annotated[str, typer.Option(help="YYYY-MM-DD; default: today.")] = "",
+) -> None:
+    """Run the formal 10-gate promotion pipeline for every default strategy.
+
+    The only command that can move a strategy to paper_approved — and only when
+    every gate passes on genuine licensed data. Prints a gate-by-gate table per
+    strategy and, if nothing clears the bar, the canonical NO-TRADE line.
+    """
+    ensure_not_engaged()
+    from datetime import date as _date
+
+    from signalforge.config import get_settings
+    from signalforge.db.session import session_scope
+    from signalforge.research.promotion import evaluate_promotion
+    from signalforge.research.strategies import default_strategies
+    from signalforge.settings_store import effective_research_config
+
+    strategies = default_strategies()
+    if strategy:
+        strategies = [s for s in strategies if s.key.startswith(strategy)]
+        if not strategies:
+            typer.secho(f"no strategy key starts with {strategy!r}", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+
+    end = _date.fromisoformat(until) if until else _date.today()
+    syms = None
+    with session_scope() as session:
+        cfg = effective_research_config(session)
+        syms = [x.strip().upper() for x in symbols.split(",") if x.strip()] or list(cfg.universe)
+        start = _date.fromisoformat(since) if since else end - timedelta(days=365 * 10)
+
+        any_passed = False
+        for strat in strategies:
+            result = evaluate_promotion(
+                session,
+                strat,
+                symbols=syms,
+                start=start,
+                end=end,
+                source=get_settings().market_data_provider,
+                config=cfg,
+            )
+            any_passed = any_passed or result.passed
+            colour = typer.colors.GREEN if result.passed else typer.colors.YELLOW
+            typer.secho(
+                f"\n{result.strategy_key} v{result.version}  ->  {result.verdict}",
+                fg=colour,
+                bold=True,
+            )
+            typer.echo(
+                f"  window {result.window_start}..{result.window_end}  "
+                f"universe {len(result.universe)} symbols  config_hash {result.config_hash[:12]}  "
+                f"git_sha {result.git_sha}"
+            )
+            for g in result.gates:
+                mark = "PASS" if g.passed else "FAIL"
+                mark_colour = typer.colors.GREEN if g.passed else typer.colors.RED
+                typer.secho(f"  [{mark}] {g.number}. {g.name}: {g.detail}", fg=mark_colour)
+
+        if not any_passed:
+            typer.echo()
+            typer.secho(
+                "NO TRADE — insufficient evidence or poor risk/reward",
+                fg=typer.colors.YELLOW,
+                bold=True,
+            )
+    typer.echo("Research signal only — no order was placed.")
+
+
 @app.command()
 def alerts() -> None:
     """Evaluate the alert policy and dispatch anything due (nothing until enabled in Settings)."""

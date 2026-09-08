@@ -101,7 +101,17 @@ def _first_candidate_id(client: TestClient) -> int:
         return s.scalars(select(Candidate).order_by(Candidate.id).limit(1)).one().id
 
 
-PAGES = ["/", "/scanner", "/portfolio", "/strategies", "/journal", "/options", "/news", "/settings"]
+PAGES = [
+    "/",
+    "/scanner",
+    "/portfolio",
+    "/strategies",
+    "/strategies/promotion",
+    "/journal",
+    "/options",
+    "/news",
+    "/settings",
+]
 
 
 @pytest.mark.parametrize("path", PAGES)

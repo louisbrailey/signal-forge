@@ -6,8 +6,9 @@ Phase 1 ships:
 plus a ``regime_filter`` gating input (``signalforge.research.regime``) that is
 consumed by both — it is not itself a trade generator.
 
-All ship as ``EXPERIMENTAL`` (paper only, no alerts) until a walk-forward report
-clears the thresholds and the user promotes them.
+All ship as ``EXPERIMENTAL`` (paper only, no alerts) until
+``signalforge.research.promotion`` clears every gate on genuine licensed
+data — promotion is automatic and evidence-based, never a manual action.
 """
 
 from __future__ import annotations

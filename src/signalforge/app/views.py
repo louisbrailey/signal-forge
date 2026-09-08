@@ -611,6 +611,60 @@ def strategies_context(session: Session) -> dict[str, Any]:
     }
 
 
+def strategy_promotion_context(session: Session) -> dict[str, Any]:
+    """Every gate, its evidence, the verdict, and the exact data/version used —
+    for the latest promotion-pipeline evaluation of every default strategy.
+    Read-only: this page can *trigger* an evaluation (a POST action) but never
+    sets status itself — only ``research.promotion`` does that."""
+    from signalforge.db.models import StrategyVersion
+    from signalforge.research.promotion import VERDICT_NO_TRADE, latest_evaluations
+
+    latest = latest_evaluations(session)
+    rows: list[dict[str, Any]] = []
+    any_approved = False
+    for strat in default_strategies():
+        spec = strat.spec()
+        db_strat = session.scalar(select(Strategy).where(Strategy.name == spec.name))
+        current_status = db_strat.status.value if db_strat else spec.status.value
+        any_approved = any_approved or current_status == "paper_approved"
+
+        ver = session.scalar(
+            select(StrategyVersion).where(
+                StrategyVersion.strategy_id == (db_strat.id if db_strat else -1),
+                StrategyVersion.version == spec.version,
+            )
+        )
+        ev = latest.get(ver.id) if ver else None
+        rows.append(
+            {
+                "key": spec.name,
+                "version": spec.version,
+                "horizon": spec.horizon.value,
+                "current_status": current_status,
+                "has_evaluation": ev is not None,
+                "evaluated_at": ev.evaluated_at.isoformat() if ev else None,
+                "config_hash": ev.config_hash if ev else None,
+                "git_sha": ev.git_sha if ev else None,
+                "universe": ev.universe_json if ev else [],
+                "window": (
+                    f"{ev.window_start.isoformat()}..{ev.window_end.isoformat()}" if ev else None
+                ),
+                "data_provenance": ev.data_provenance_json if ev else {},
+                "passed": ev.passed if ev else None,
+                "verdict": ev.verdict if ev else VERDICT_NO_TRADE,
+                "gates": ev.gates_json if ev else [],
+                "n_gates_passed": sum(1 for g in (ev.gates_json if ev else []) if g["passed"]),
+            }
+        )
+    return {
+        "strategies": rows,
+        "any_approved": any_approved,
+        "operational_result": (
+            "at least one strategy is PAPER_APPROVED" if any_approved else VERDICT_NO_TRADE
+        ),
+    }
+
+
 def settings_context(session: Session) -> dict[str, Any]:
     from signalforge.config import get_settings
 

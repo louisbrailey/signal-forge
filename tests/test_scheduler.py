@@ -65,6 +65,30 @@ def test_build_scheduler_registers_every_job(db_url: str) -> None:
     assert type(jobs["paper_mtm"].trigger).__name__ == "IntervalTrigger"
 
 
+def test_guarded_records_a_job_failure_for_the_alert_policy(db_url: str) -> None:
+    """A raising job must still raise (callers/APScheduler need to see it), but
+    also leaves an audit_log 'job.failed' row so plan_alerts can surface it."""
+    from sqlalchemy import select
+
+    from signalforge.db.models import AuditLog
+    from signalforge.db.session import session_scope
+
+    def _boom() -> None:
+        raise ValueError("simulated ingest failure")
+
+    with pytest.raises(ValueError):
+        guarded("demo_failing_job", _boom)()
+
+    with session_scope() as session:
+        row = session.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "job.failed", AuditLog.entity == "demo_failing_job"
+            )
+        )
+        assert row is not None
+        assert "simulated ingest failure" in row.after_json["error"]
+
+
 def test_catch_up_runs_when_no_scan_exists(db_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(sched, "job_ingest", lambda: calls.append("ingest"))

@@ -39,6 +39,28 @@ class JobSpec:
     cron_tz: str = "America/New_York"
 
 
+def _record_job_failure(name: str, error: str) -> None:
+    """Persist a job failure so the alert policy (DATA_ISSUE/SYSTEM_HEALTH) can
+    see it. Best-effort: a DB problem here must never mask the original error."""
+    try:
+        from signalforge.db.models import AuditLog
+        from signalforge.db.session import session_scope
+
+        with session_scope() as session:
+            session.add(
+                AuditLog(
+                    ts=datetime.now(UTC),
+                    actor="scheduler",
+                    action="job.failed",
+                    entity=name,
+                    before_json={},
+                    after_json={"error": error[:300]},
+                )
+            )
+    except Exception:
+        _log.exception("job.failure_record_failed", job=name)
+
+
 def guarded(name: str, fn: JobFn) -> JobFn:
     """Wrap a job so an engaged kill switch makes it a logged no-op."""
 
@@ -52,8 +74,9 @@ def guarded(name: str, fn: JobFn) -> JobFn:
         try:
             fn()
             _log.info("job.done", job=name)
-        except Exception:
+        except Exception as exc:
             _log.exception("job.failed", job=name)
+            _record_job_failure(name, repr(exc))
             raise
 
     return _run

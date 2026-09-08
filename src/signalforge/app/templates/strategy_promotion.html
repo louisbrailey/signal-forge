@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Strategy Promotion — Signal Forge{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold text-slate-900">Strategy Promotion</h1>
+<p class="mt-1 text-sm text-slate-500">
+  A strategy version becomes <code>paper_approved</code> only by clearing all ten gates below on
+  genuine licensed data — never by manual action. Every evaluation, pass or fail, is kept
+  (append-only); the sealed final test (gate 9) is computed once per version and locked forever.
+</p>
+
+{% if any_approved %}
+<div class="mt-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-900">
+  <strong>Operational result:</strong> at least one strategy is <code>paper_approved</code> —
+  candidate alerts are now structurally eligible (still gated by Settings and the health monitor).
+</div>
+{% else %}
+<div class="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+  Operational result: NO TRADE — insufficient evidence or poor risk/reward.
+  No strategy has cleared every gate. Candidate alerts stay disabled.
+</div>
+{% endif %}
+
+<form method="post" action="/strategies/promotion/run" class="mt-4">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+  <button class="rounded bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800">
+    Run promotion evaluation for every strategy
+  </button>
+  <span class="ml-2 text-xs text-slate-400">re-runs every gate on the full ingested history — can take a while</span>
+</form>
+
+<div class="mt-6 space-y-6">
+{% for s in strategies %}
+  <section class="rounded-lg border {{ 'border-emerald-300' if s.current_status == 'paper_approved' else 'border-slate-200' }} bg-white p-4">
+    <div class="flex flex-wrap items-baseline justify-between gap-2">
+      <h2 class="text-lg font-semibold text-slate-900">{{ s.key }} <span class="text-sm font-normal text-slate-500">v{{ s.version }} · {{ s.horizon }}</span></h2>
+      <span class="rounded px-2 py-1 text-xs font-medium
+        {{ 'bg-emerald-100 text-emerald-800' if s.current_status == 'paper_approved' else ('bg-slate-100 text-slate-600' if s.current_status == 'experimental' else 'bg-red-100 text-red-700') }}">
+        {{ s.current_status }}
+      </span>
+    </div>
+
+    {% if not s.has_evaluation %}
+    <p class="mt-2 text-sm text-slate-500">Not yet evaluated — run the pipeline above.</p>
+    {% else %}
+    <p class="mt-2 text-sm">
+      <span class="font-semibold {{ 'text-emerald-700' if s.passed else 'text-amber-700' }}">{{ s.verdict }}</span>
+      <span class="text-slate-400">— {{ s.n_gates_passed }}/{{ s.gates | length }} gates passed</span>
+    </p>
+    <dl class="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-slate-600 sm:grid-cols-4">
+      <div><dt class="text-slate-400">Evaluated</dt><dd>{{ s.evaluated_at[:16] }}</dd></div>
+      <div><dt class="text-slate-400">Window</dt><dd>{{ s.window }}</dd></div>
+      <div><dt class="text-slate-400">Universe</dt><dd>{{ s.universe | length }} symbols</dd></div>
+      <div><dt class="text-slate-400">config_hash / git_sha</dt><dd class="font-mono">{{ s.config_hash[:10] }} / {{ s.git_sha }}</dd></div>
+    </dl>
+    <details class="mt-1 text-xs"><summary class="cursor-pointer text-slate-400">exact symbols + data provenance</summary>
+      <p class="mt-1 text-slate-600">{{ s.universe | join(', ') }}</p>
+      <pre class="mt-1 overflow-x-auto rounded bg-slate-50 p-2">{{ s.data_provenance | tojson(indent=2) }}</pre>
+    </details>
+
+    <div class="mt-3 overflow-x-auto">
+      <table class="min-w-full text-xs">
+        <thead class="text-left text-slate-500"><tr>
+          <th class="py-1 pr-3">#</th><th class="pr-3">Gate</th><th class="pr-3">Result</th><th class="pr-3">Evidence</th></tr></thead>
+        <tbody>
+        {% for g in s.gates %}
+          <tr class="border-t border-slate-100 align-top">
+            <td class="py-1 pr-3">{{ g.number }}</td>
+            <td class="pr-3 font-medium">{{ g.name }}</td>
+            <td class="pr-3">
+              <span class="rounded px-1.5 py-0.5 {{ 'bg-emerald-100 text-emerald-800' if g.passed else 'bg-red-100 text-red-700' }}">
+                {{ 'PASS' if g.passed else 'FAIL' }}
+              </span>
+            </td>
+            <td class="pr-3 text-slate-600">
+              {{ g.detail }}
+              {% if g.evidence %}
+              <details class="mt-1"><summary class="cursor-pointer text-slate-400">raw evidence</summary>
+                <pre class="mt-1 overflow-x-auto rounded bg-slate-50 p-2">{{ g.evidence | tojson(indent=2) }}</pre>
+              </details>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </section>
+{% endfor %}
+</div>
+{% endblock %}

@@ -10,11 +10,11 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from starlette.status import HTTP_303_SEE_OTHER
+from starlette.status import HTTP_303_SEE_OTHER, HTTP_400_BAD_REQUEST
 
 from signalforge.app.deps import require_not_killed
 from signalforge.app.templating import templates
@@ -25,11 +25,12 @@ from signalforge.app.views import (
     scanner_context,
     settings_context,
     strategies_context,
+    strategy_promotion_context,
 )
 from signalforge.audit import record
 from signalforge.auth import csrf
 from signalforge.auth.deps import csrf_protect, require_user_page
-from signalforge.db.models import Strategy, User
+from signalforge.db.models import Strategy, StrategyVersion, User
 from signalforge.db.session import get_db
 from signalforge.domain import PaperDecision, StrategyStatus
 from signalforge.killswitch import get_kill_switch
@@ -108,6 +109,23 @@ def portfolio_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
 @router.get("/strategies", response_class=HTMLResponse)
 def strategies_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
     return _page(request, user, "strategies.html", strategies_context(db))
+
+
+@router.get("/strategies/promotion", response_class=HTMLResponse)
+def strategy_promotion_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
+    return _page(request, user, "strategy_promotion.html", strategy_promotion_context(db))
+
+
+@router.post("/strategies/promotion/run", dependencies=Guard)
+def act_run_promotion(db: DbDep) -> RedirectResponse:
+    """Runs the 10-gate pipeline for every default strategy. This is the *only*
+    action that can move a strategy to paper_approved, and only when every gate
+    passes — this handler does not decide anything itself."""
+    from signalforge.research.promotion import evaluate_all_default_strategies
+
+    evaluate_all_default_strategies(db)
+    record("promotion.run", entity="all_strategies", actor="local-user")
+    return RedirectResponse("/strategies/promotion", HTTP_303_SEE_OTHER)
 
 
 @router.get("/journal", response_class=HTMLResponse)
@@ -225,11 +243,27 @@ async def act_import(db: DbDep, file: UploadFile) -> RedirectResponse:
 
 @router.post("/strategies/{name}/status", dependencies=Guard)
 def act_strategy_status(name: str, db: DbDep, status: Annotated[str, Form()]) -> RedirectResponse:
+    """Manual status changes are downgrade-only. A human may move a strategy to
+    ``experimental`` or ``disabled`` directly, but never to ``paper_approved`` —
+    that status is earned exclusively by clearing every gate in
+    ``research.promotion``. This is enforced here, not just by convention."""
     new_status = StrategyStatus(status.lower())
+    if new_status is StrategyStatus.PAPER_APPROVED:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=(
+                "paper_approved cannot be set manually — a strategy is promoted only by "
+                "clearing every gate on the Strategy Promotion page (research.promotion)."
+            ),
+        )
     strat = db.scalar(select(Strategy).where(Strategy.name == name))
     if strat is not None:
         before = strat.status.value
         strat.status = new_status
+        for ver in db.scalars(
+            select(StrategyVersion).where(StrategyVersion.strategy_id == strat.id)
+        ):
+            ver.status = new_status
         db.flush()
         record(
             "strategy.status_change",
