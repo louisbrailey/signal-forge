@@ -61,9 +61,20 @@ no request is made.
 
 ## Test suite
 
-`279 passed` (`pytest -o addopts=""`). Clean: ruff, black, mypy (`129` files),
+`289 passed` (`pytest -o addopts=""`). Clean: ruff, black, mypy (`129` files),
 import-linter (**6/6** contracts incl. S11 options-not-on-decision-path, S12
 news-not-on-decision-path), detect-secrets. Migrations round-trip.
+
+An 11-agent adversarial review (5 dimensions × verify pass) of the backfill and
+the Benzinga freshness check confirmed 12 real findings, all fixed with
+regression tests: a per-contract failure or a budget-starved underlying was
+being marked permanently done (resume could never retry it); the total-bar
+ceiling was a pre-fetch estimate, not a runtime-enforced hard stop; selection-cap
+drops weren't recorded; a single out-of-range stored row could freeze a
+contract's future coverage; `ohlcv_sanity` didn't check low/high/close > 0; the
+`chronological_order` check was a structural no-op; the Benzinga freshness gate
+truncated via `timedelta.days`, letting a 10-day-22-hour-old article pass a
+"≤10 day" test.
 
 ## One-line summary
 
