@@ -49,6 +49,8 @@ from signalforge.db.models.research import (
     ScanRun,
     Strategy,
     StrategyHealth,
+    StrategyPromotionEvaluation,
+    StrategySealedTest,
     StrategyVersion,
     WalkforwardWindow,
 )
@@ -102,6 +104,8 @@ __all__ = [
     "BacktestMetric",
     "WalkforwardWindow",
     "StrategyHealth",
+    "StrategySealedTest",
+    "StrategyPromotionEvaluation",
     # paper
     "PaperAccount",
     "PaperOrder",

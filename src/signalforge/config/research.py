@@ -22,6 +22,7 @@ __all__ = [
     "LiquidityFilters",
     "NewsConfig",
     "OptionsConfig",
+    "PromotionThresholds",
     "QualityThresholds",
     "ResearchConfig",
     "RiskLimits",
@@ -73,6 +74,53 @@ class QualityThresholds(BaseModel):
     # one trend — a bull-only edge is not eligible.
     min_oos_regimes: PositiveInt = 2
     min_trades_per_regime: PositiveInt = 10
+
+
+class PromotionThresholds(BaseModel):
+    """Gates a strategy *version* must clear, on genuine licensed data, to move
+    ``experimental`` -> ``paper_approved`` (ARCHITECTURE.md §6.5). Fixed here —
+    version-controlled and hashed into ``config_hash`` — *before* any evaluation
+    runs, so gate 2's trade-count bar is "documented before testing" by
+    construction, not chosen after seeing a result.
+
+    These thresholds are read-only inputs to ``research.promotion``, the only
+    code path allowed to set ``StrategyStatus.PAPER_APPROVED``. A human may
+    disable or downgrade a strategy directly; only this pipeline may approve one.
+    """
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    # Gate 1 — rolling walk-forward folds over the pre-sealed span.
+    min_walkforward_folds: PositiveInt = 4
+    # Gate 2 — OOS trades required before the number is trusted at all.
+    min_oos_trades: PositiveInt = 30
+    # Gate 3 — net expectancy after the project's conservative cost model
+    # (commission + slippage_bps + half-spread) must clear this.
+    min_net_expectancy_r: float = 0.0
+    # Gate 4 — bootstrap lower bound must be *materially* above zero, not just
+    # non-negative (0.02R, not 0.00R).
+    min_bootstrap_ci_low_r: float = 0.02
+    # Gate 5 — parameter-sensitivity grid (delegates to research.sensitivity).
+    sensitivity_positive_fraction_min: float = 0.6
+    sensitivity_neighbour_fraction_min: float = 0.75
+    sensitivity_min_grid_trades: PositiveInt = 15
+    # Gate 6 — evidence across bull / bear / range-bound, each with a minimum
+    # trade count (all three required, not "at least two of three").
+    min_regimes_covered: PositiveInt = 3
+    min_trades_per_regime: PositiveInt = 10
+    # Gate 7 — promoted only on a risk-adjusted benchmark comparison (OOS
+    # Sharpe vs SPY buy-and-hold Sharpe over the same span) — cumulative return
+    # alone never decides this.
+    require_beat_benchmark_sharpe: bool = True
+    # Gate 8 — no unresolved data-quality/leakage finding may support the result.
+    require_data_validation_pass: bool = True
+    require_leakage_check_pass: bool = True
+    # Gate 9 — sealed final out-of-sample window, evaluated once and locked to
+    # the strategy *version* forever (a new evaluation on the same version
+    # reuses the first result; only a new version can be re-sealed).
+    sealed_window_days: PositiveInt = 365
+    sealed_min_trades: PositiveInt = 10
+    sealed_min_expectancy_r: float = 0.0
 
 
 class UniverseFilters(BaseModel):
@@ -213,6 +261,7 @@ class ResearchConfig(BaseModel):
     events: EventFilters = Field(default_factory=EventFilters)
     data_quality: DataQualityConfig = Field(default_factory=DataQualityConfig)
     quality_gates: QualityThresholds = Field(default_factory=QualityThresholds)
+    promotion: PromotionThresholds = Field(default_factory=PromotionThresholds)
     health_monitor: HealthMonitorConfig = Field(default_factory=HealthMonitorConfig)
     universe_filters: UniverseFilters = Field(default_factory=UniverseFilters)
     options: OptionsConfig = Field(default_factory=OptionsConfig)

@@ -209,3 +209,57 @@ class StrategyHealth(Base, IntPK, CreatedAt):
     action: Mapped[str] = mapped_column(String(12), default="none")  # none | downgrade | disable
     note: Mapped[str] = mapped_column(Text, default="")
     evaluated_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
+class StrategySealedTest(Base, IntPK, CreatedAt):
+    """The one-time, immutable sealed final out-of-sample evaluation for a
+    strategy *version* (promotion gate 9). At most one row per
+    ``strategy_version_id`` — enforced by the unique constraint *and* by
+    ``research.promotion``, which reads an existing row rather than ever
+    recomputing or overwriting one. A different result requires cutting a new,
+    genuinely different strategy version — never re-sealing this one."""
+
+    __tablename__ = "strategy_sealed_test"
+    __table_args__ = (UniqueConstraint("strategy_version_id"),)
+
+    strategy_version_id: Mapped[int] = mapped_column(
+        ForeignKey("strategy_version.id", ondelete="CASCADE")
+    )
+    window_start: Mapped[date] = mapped_column()
+    window_end: Mapped[date] = mapped_column()
+    universe_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    data_provenance_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    benchmark_metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    passed: Mapped[bool] = mapped_column(default=False)
+    detail: Mapped[str] = mapped_column(Text, default="")
+    evaluated_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
+class StrategyPromotionEvaluation(Base, IntPK, CreatedAt):
+    """One append-only record of a promotion-pipeline run for a strategy
+    *version* — every gate, its evidence, and the verdict. Never updated after
+    creation; a re-evaluation always inserts a new row (the version's whole
+    history of attempts stays visible on the Strategy Promotion page). Only a
+    row with ``passed=True`` may flip ``Strategy.status`` /
+    ``StrategyVersion.status`` to ``PAPER_APPROVED`` — and only
+    ``research.promotion`` does that, never a manual action."""
+
+    __tablename__ = "strategy_promotion_evaluation"
+
+    strategy_version_id: Mapped[int] = mapped_column(
+        ForeignKey("strategy_version.id", ondelete="CASCADE"), index=True
+    )
+    evaluated_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    config_hash: Mapped[str] = mapped_column(String(64))
+    git_sha: Mapped[str] = mapped_column(String(40), default="")
+    universe_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    window_start: Mapped[date] = mapped_column()
+    window_end: Mapped[date] = mapped_column()
+    data_provenance_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    gates_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    passed: Mapped[bool] = mapped_column(default=False)
+    verdict: Mapped[str] = mapped_column(String(80), default="")
+    sealed_test_id: Mapped[int | None] = mapped_column(
+        ForeignKey("strategy_sealed_test.id", ondelete="SET NULL"), default=None
+    )

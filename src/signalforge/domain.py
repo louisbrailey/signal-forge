@@ -87,7 +87,8 @@ class PositionSide(StrEnum):
 class AlertType(StrEnum):
     CANDIDATE = "candidate"
     DAILY_BRIEFING = "daily_briefing"
-    SYSTEM_HEALTH = "system_health"
+    SYSTEM_HEALTH = "system_health"  # DB unreachable, a scheduled job raised
+    DATA_ISSUE = "data_issue"  # stale feed, or a recent ingestion run failed/partial
 
 
 class AlertChannel(StrEnum):
