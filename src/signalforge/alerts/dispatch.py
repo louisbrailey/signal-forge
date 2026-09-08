@@ -18,6 +18,7 @@ Default policy:
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from datetime import timedelta as _td
@@ -55,7 +56,7 @@ from signalforge.domain import (
 )
 from signalforge.killswitch import ensure_not_engaged
 from signalforge.observability import get_logger
-from signalforge.settings_store import effective_research_config, get_setting
+from signalforge.settings_store import effective_research_config, get_setting, set_setting
 
 _log = get_logger("alerts.dispatch")
 
@@ -101,14 +102,48 @@ def _sent_today(session: Session, alert_type: AlertType, now: datetime) -> int:
     )
 
 
+def _reasons_digest(reasons: list[str]) -> str:
+    """Full-width, order-independent digest for a dedupe key — a 16-bit
+    ``hash() & 0xffff`` truncation lets two genuinely different reason sets
+    collide into the same key on the same day, silently dropping a real new
+    alert as "already logged". Sorted so equivalent sets in a different query
+    order can't spuriously produce a different key."""
+    return hashlib.sha256("|".join(sorted(reasons)).encode()).hexdigest()[:32]
+
+
 def _already_logged(session: Session, dedupe_key: str) -> bool:
     return session.scalar(select(AlertLog.id).where(AlertLog.dedupe_key == dedupe_key)) is not None
 
 
+_LAST_INGESTION_CHECK_KEY = "last_ingestion_failure_check_ts"
+_LAST_JOB_CHECK_KEY = "last_job_failure_check_ts"
+
+
+def _lookback_since(
+    session: Session, now: datetime, watermark_key: str, *, default_hours: int
+) -> datetime:
+    """The rolling lookback start, widened backward to the last time this
+    failure category was actually checked, if that check was longer ago than
+    the default window. Without this, a failure whose only record is a rolling
+    N-hour window can permanently vanish from every future alert cycle the
+    moment it turns N hours old — including while the scheduler itself was
+    down (a laptop asleep, per this module's own docstring) for longer than
+    the window, which is exactly when a missed alert matters most."""
+    default_since = now.astimezone(UTC) - _td(hours=default_hours)
+    watermark = get_setting(session, watermark_key, None)
+    if watermark:
+        try:
+            return min(default_since, datetime.fromisoformat(watermark))
+        except (TypeError, ValueError):
+            pass
+    return default_since
+
+
 def _recent_ingestion_failures(session: Session, now: datetime, *, hours: int = 24) -> list[str]:
-    """Ingestion runs that failed or only partially completed in the last
-    ``hours`` — a data issue distinct from (but as urgent as) a stale feed."""
-    since = now.astimezone(UTC) - _td(hours=hours)
+    """Ingestion runs that failed or only partially completed since the later
+    of ``hours`` ago or the last time this check ran — a data issue distinct
+    from (but as urgent as) a stale feed."""
+    since = _lookback_since(session, now, _LAST_INGESTION_CHECK_KEY, default_hours=hours)
     rows = session.execute(
         select(IngestionRun.provider, IngestionRun.kind, IngestionRun.status, IngestionRun.notes)
         .where(IngestionRun.status.in_(("failed", "partial")), IngestionRun.started_at >= since)
@@ -119,9 +154,10 @@ def _recent_ingestion_failures(session: Session, now: datetime, *, hours: int = 
 
 
 def _recent_job_failures(session: Session, now: datetime, *, hours: int = 6) -> list[str]:
-    """Scheduled-job exceptions recorded by ``scheduler.guarded`` — a system
-    failure distinct from a data-freshness problem."""
-    since = now.astimezone(UTC) - _td(hours=hours)
+    """Scheduled-job exceptions recorded by ``scheduler.guarded`` since the
+    later of ``hours`` ago or the last time this check ran — a system failure
+    distinct from a data-freshness problem."""
+    since = _lookback_since(session, now, _LAST_JOB_CHECK_KEY, default_hours=hours)
     rows = session.execute(
         select(AuditLog.entity, AuditLog.after_json)
         .where(AuditLog.action == "job.failed", AuditLog.ts >= since)
@@ -150,7 +186,7 @@ def plan_alerts(session: Session, now: datetime) -> list[PlannedAlert]:
         planned.append(
             PlannedAlert(
                 AlertType.DATA_ISSUE,
-                dedupe_key=f"data_issue:{now.date()}:{hash(tuple(data_reasons)) & 0xffff}",
+                dedupe_key=f"data_issue:{now.date()}:{_reasons_digest(data_reasons)}",
                 subject=subj,
                 body=body,
                 overnight_ok=True,
@@ -163,7 +199,7 @@ def plan_alerts(session: Session, now: datetime) -> list[PlannedAlert]:
         planned.append(
             PlannedAlert(
                 AlertType.SYSTEM_HEALTH,
-                dedupe_key=f"sys_health:{now.date()}:{hash(tuple(job_reasons)) & 0xffff}",
+                dedupe_key=f"sys_health:{now.date()}:{_reasons_digest(job_reasons)}",
                 subject=subj,
                 body=body,
                 overnight_ok=True,
@@ -251,6 +287,11 @@ def run_alert_cycle(session: Session, now: datetime | None = None) -> AlertCycle
     result = AlertCycleResult(enabled=enabled)
     planned = plan_alerts(session, now)
     result.planned = len(planned)
+    # Advance the failure-lookback watermarks now that this cycle has checked
+    # for them — independent of `enabled`/dispatch, so a failure is never
+    # missed just because it was checked while alerts happened to be off.
+    set_setting(session, _LAST_INGESTION_CHECK_KEY, now.astimezone(UTC).isoformat())
+    set_setting(session, _LAST_JOB_CHECK_KEY, now.astimezone(UTC).isoformat())
     if not enabled:
         result.suppressed = ["alerts_enabled is off (complete setup in Settings)"] * len(planned)
         return result

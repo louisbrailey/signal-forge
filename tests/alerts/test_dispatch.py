@@ -170,6 +170,88 @@ def test_kill_switch_blocks_the_alert_cycle(session: Session, isolated_data_dir)
         run_alert_cycle(session, now=NOON)
 
 
+def test_reasons_digest_does_not_collide_on_a_16_bit_truncation() -> None:
+    """review finding (alert-policy-gating, high): the old dedupe key used
+    ``hash(tuple(reasons)) & 0xffff`` (16 bits => ~65k buckets), so two
+    genuinely different reason sets could collide and a real new alert would
+    be silently dropped as "already logged". The new sha256-based digest must
+    distinguish them, and must be order-independent (same set, different
+    query order -> same key, so genuinely-unchanged alerts still dedupe)."""
+    from signalforge.alerts.dispatch import _reasons_digest
+
+    a = ["massive/bar_daily failed"]
+    b = ["stooq/bar_daily failed"]
+    assert _reasons_digest(a) != _reasons_digest(b)
+    assert _reasons_digest(["x", "y"]) == _reasons_digest(["y", "x"])  # order-independent
+    assert len(_reasons_digest(a)) == 32
+
+
+def test_ingestion_lookback_widens_to_a_stale_watermark(session: Session) -> None:
+    """review finding (alert-policy-gating, medium): a failure older than the
+    fixed 24h default window used to vanish from every future cycle forever.
+    If the last check happened 40h ago (scheduler was down), a failure at the
+    30h mark — inside the 40h gap but outside the 24h default — must still be
+    surfaced, not silently skipped."""
+    from signalforge.db.models import IngestionRun
+    from signalforge.domain import FeedType
+
+    _seed_feed_and_briefing(session)
+    session.add(
+        IngestionRun(
+            provider="massive",
+            feed_type=FeedType.BAR_DAILY,
+            kind="incremental",
+            requested_start=date(2024, 6, 1),
+            requested_end=date(2024, 6, 30),
+            status="failed",
+            started_at=NOON - timedelta(hours=30),
+        )
+    )
+    set_setting(
+        session, "last_ingestion_failure_check_ts", (NOON - timedelta(hours=40)).isoformat()
+    )
+    session.flush()
+
+    planned = plan_alerts(session, NOON)
+    assert AlertType.DATA_ISSUE in {p.alert_type for p in planned}
+
+
+def test_job_failure_lookback_widens_to_a_stale_watermark(session: Session) -> None:
+    """Same widening behaviour, for the SYSTEM_HEALTH / job-failure lookback
+    (default window 6h)."""
+    from signalforge.db.models import AuditLog
+
+    _seed_feed_and_briefing(session)
+    session.add(
+        AuditLog(
+            ts=NOON - timedelta(hours=10),
+            actor="scheduler",
+            action="job.failed",
+            entity="daily_eod_update",
+            before_json={},
+            after_json={"error": "boom"},
+        )
+    )
+    set_setting(session, "last_job_failure_check_ts", (NOON - timedelta(hours=20)).isoformat())
+    session.flush()
+
+    planned = plan_alerts(session, NOON)
+    assert AlertType.SYSTEM_HEALTH in {p.alert_type for p in planned}
+
+
+def test_run_alert_cycle_advances_both_watermarks_every_call(session: Session) -> None:
+    """The watermarks must advance unconditionally (even while alerts_enabled
+    is off), so a failure is never missed just because it was checked while
+    disabled."""
+    from signalforge.settings_store import get_setting
+
+    _seed_feed_and_briefing(session)
+    assert get_setting(session, "last_ingestion_failure_check_ts", None) is None
+    run_alert_cycle(session, now=NOON)
+    assert get_setting(session, "last_ingestion_failure_check_ts", None) is not None
+    assert get_setting(session, "last_job_failure_check_ts", None) is not None
+
+
 def test_candidate_alert_body_has_every_mandatory_field() -> None:
     c = {
         "id": 7,

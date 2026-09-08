@@ -53,12 +53,13 @@ from typing import Any
 
 import numpy as np
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from signalforge import audit
 from signalforge.backtest.costs import CostModel
 from signalforge.backtest.leakage import LookaheadDetected, assert_no_lookahead
-from signalforge.backtest.regime import label_regimes
+from signalforge.backtest.regime import TREND_LOOKBACK, label_regimes
 from signalforge.config.research import PromotionThresholds, ResearchConfig
 from signalforge.data.series import PriceSeries
 from signalforge.data.validate import validate_daily
@@ -83,6 +84,12 @@ _log = get_logger("research.promotion")
 
 VERDICT_APPROVED = "PAPER_APPROVED"
 VERDICT_NO_TRADE = "NO TRADE — insufficient evidence or poor risk/reward"
+
+# The pre-sealed span must clear regime.py's TREND_LOOKBACK warmup (every
+# session before it is labelled 'warmup' and excluded from gate 6's bull/bear/
+# range buckets) with enough real trading sessions left over to actually
+# measure regime coverage — not just the bare minimum to exit warmup.
+MIN_PRESEALED_DAYS = math.ceil(TREND_LOOKBACK * 365.25 / 252) + 60
 
 # matches signalforge.research.sensitivity.StrategyFactory
 StrategyFactory = Callable[[Mapping[str, Any]], BaselineStrategy]
@@ -318,8 +325,21 @@ def _get_or_create_sealed_test(
         detail=detail,
         evaluated_at=utcnow(),
     )
-    session.add(row)
-    session.flush()
+    try:
+        with session.begin_nested():  # SAVEPOINT: a failure here rolls back only this insert
+            session.add(row)
+            session.flush()
+    except IntegrityError:
+        # a concurrent evaluate_promotion() for the same version won the race
+        # and committed its own sealed test first — discard this compute and
+        # reuse the winner, rather than raising or (worse) ending up with two
+        # sealed tests for one version.
+        winner = session.scalar(
+            select(StrategySealedTest).where(StrategySealedTest.strategy_version_id == version.id)
+        )
+        if winner is not None:
+            return winner, True
+        raise
     _log.info(
         "promotion.sealed_test_sealed",
         strategy=strategy.key,
@@ -379,15 +399,36 @@ def evaluate_promotion(
         )
         return _finalize(session, strategy, version, config, symbols, start, end, gates, None, {})
 
-    sealed_start = end - timedelta(days=th.sealed_window_days)
-    if sealed_start <= start or (sealed_start - start).days < 180:
+    # Pin the sealed window to any already-locked sealed test for this exact
+    # strategy version. Without this, re-evaluating the same version after
+    # more data has been ingested (a later "today") would recompute
+    # sealed_start fresh from the new `end`, sliding it forward — and the
+    # gates-1-8 pre-sealed span would then silently grow to overlap calendar
+    # days that are already part of the FIRST, locked sealed test. Pinning
+    # keeps the two windows permanently disjoint after the first evaluation.
+    existing_sealed = session.scalar(
+        select(StrategySealedTest).where(StrategySealedTest.strategy_version_id == version.id)
+    )
+    sealed_start = (
+        existing_sealed.window_start
+        if existing_sealed is not None
+        else end - timedelta(days=th.sealed_window_days)
+    )
+    sealed_end = existing_sealed.window_end if existing_sealed is not None else end
+    # Gates 1-8 use the pre-sealed span [start, pre_sealed_end] — strictly
+    # BEFORE sealed_start, never touching the sealed window's own first day.
+    pre_sealed_end = sealed_start - timedelta(days=1)
+
+    if sealed_start <= start or (pre_sealed_end - start).days < MIN_PRESEALED_DAYS:
         gates.append(
             Gate(
                 0,
                 "data_availability",
                 False,
-                f"window [{start}..{end}] is too short to hold out a "
-                f"{th.sealed_window_days}-day sealed test plus a meaningful pre-sealed span",
+                f"window [{start}..{end}] is too short: the pre-sealed span needs >= "
+                f"{MIN_PRESEALED_DAYS} calendar days (enough to clear regime.py's "
+                f"{TREND_LOOKBACK}-session warmup with real sessions left to measure) before "
+                f"the {th.sealed_window_days}-day sealed test begins",
             )
         )
         return _finalize(session, strategy, version, config, symbols, start, end, gates, None, {})
@@ -398,7 +439,7 @@ def evaluate_promotion(
         strategy,
         symbols,
         start,
-        sealed_start,
+        pre_sealed_end,
         proxy_symbol=proxy_symbol,
         source=source,
         cost_model=cost_model,
@@ -412,8 +453,11 @@ def evaluate_promotion(
         "costs": full.costs_label,
     }
 
-    # Gate 1: rolling walk-forward folds over the pre-sealed span.
-    span_days = (sealed_start - start).days
+    # Gate 1: rolling walk-forward folds over the pre-sealed span. A fold only
+    # counts as evidence of an edge if it clears its own trade-count floor
+    # AND has positive expectancy — a fold with one lucky trade, or a
+    # net-losing fold, must not count toward "the edge holds up over time".
+    span_days = (pre_sealed_end - start).days
     n_folds = th.min_walkforward_folds
     fold_rows: list[dict[str, Any]] = []
     for k in range(n_folds):
@@ -432,15 +476,24 @@ def evaluate_promotion(
             }
         )
     folds_with_trades = sum(1 for f in fold_rows if f["n_trades"] > 0)
-    gate1_pass = bool(len(fold_rows) >= n_folds and folds_with_trades >= max(1, n_folds // 2))
+    folds_with_edge = sum(
+        1
+        for f in fold_rows
+        if f["n_trades"] >= th.sensitivity_min_grid_trades
+        and f["expectancy_r"] > th.min_net_expectancy_r
+    )
+    gate1_pass = bool(len(fold_rows) >= n_folds and folds_with_edge >= max(1, n_folds // 2))
     gates.append(
         Gate(
             1,
             "rolling_walkforward",
             gate1_pass,
             f"{len(fold_rows)} rolling folds over the pre-sealed span, {folds_with_trades} with "
-            f"trades; strategy params are its frozen spec defaults — the sealed slice below is "
-            f"not loaded until gate 9, so nothing here can be selected against it",
+            f"any trades, {folds_with_edge} clearing both a per-fold trade floor "
+            f"(>={th.sensitivity_min_grid_trades}) and positive expectancy (need >="
+            f"{max(1, n_folds // 2)} of {n_folds}); strategy params are its frozen spec "
+            f"defaults — the sealed slice below is not loaded until gate 9, so nothing here "
+            f"can be selected against it",
             {"folds": fold_rows},
         )
     )
@@ -511,7 +564,7 @@ def evaluate_promotion(
             grid=grid,
             symbols=symbols,
             start=start,
-            end=sealed_start,
+            end=pre_sealed_end,
             source=source,
             cost_model=cost_model,
             min_trades=th.sensitivity_min_grid_trades,
@@ -534,7 +587,7 @@ def evaluate_promotion(
         )
 
     # Gate 6: bull / bear / range-bound coverage.
-    proxy_full = PriceSeries.load(session, proxy_symbol, start, sealed_start, source=source)
+    proxy_full = PriceSeries.load(session, proxy_symbol, start, pre_sealed_end, source=source)
     regimes = label_regimes(proxy_full) if len(proxy_full) else {}
     bucket_counts = {"bull": 0, "bear": 0, "range": 0}
     for t in full.trades:
@@ -559,9 +612,18 @@ def evaluate_promotion(
         )
     )
 
-    # Gate 7: risk-adjusted benchmark comparison.
-    pm_strategy = compute_portfolio_metrics(full.trades, span_start=start, span_end=sealed_start)
-    bench = _benchmark_metrics(proxy_full, start, sealed_start)
+    # Gate 7: risk-adjusted benchmark comparison. Annualise both sides over the
+    # SAME actually-available span: if the proxy's real ingested history starts
+    # later than `start` (a shorter data-provider entitlement than requested),
+    # compute_portfolio_metrics would silently annualise the strategy's trades
+    # over the full nominal window while _benchmark_metrics self-corrects to
+    # its real date range — biasing the comparison. Use the proxy's actual
+    # matched dates for both.
+    proxy_span_dates = [d for d in proxy_full.dates if start <= d <= pre_sealed_end]
+    eff_start = proxy_span_dates[0] if proxy_span_dates else start
+    eff_end = proxy_span_dates[-1] if proxy_span_dates else pre_sealed_end
+    pm_strategy = compute_portfolio_metrics(full.trades, span_start=eff_start, span_end=eff_end)
+    bench = _benchmark_metrics(proxy_full, eff_start, eff_end)
     gate7_pass = bool(
         (not th.require_beat_benchmark_sharpe) or pm_strategy.sharpe > bench["sharpe"]
     )
@@ -585,7 +647,7 @@ def evaluate_promotion(
     # Gate 8: data-quality + leakage.
     provider = source or "unknown"
     validation = validate_daily(session, symbols, source=provider, persist=True)
-    leak_err = _leakage_self_check(session, proxy_symbol, start, sealed_start, source)
+    leak_err = _leakage_self_check(session, proxy_symbol, start, pre_sealed_end, source)
     gate8_pass = bool(
         (validation.passed or not th.require_data_validation_pass)
         and (leak_err is None or not th.require_leakage_check_pass)
@@ -620,7 +682,7 @@ def evaluate_promotion(
         version,
         symbols=symbols,
         sealed_start=sealed_start,
-        end=end,
+        end=sealed_end,
         proxy_symbol=proxy_symbol,
         source=source,
         cost_model=cost_model,

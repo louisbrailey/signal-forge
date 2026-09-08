@@ -214,6 +214,38 @@ def test_sealed_test_is_computed_once_and_never_recomputed(session: Session) -> 
     assert n_eval == 2
 
 
+def test_sealed_test_unique_constraint_is_enforced_at_the_db_level(session: Session) -> None:
+    """review finding (sealed-test-integrity, medium): a concurrent
+    ``evaluate_promotion`` race is survived by catching the IntegrityError a
+    UniqueConstraint(strategy_version_id) throws on a second concurrent
+    insert. Confirm that constraint is actually present and enforced — the
+    safety net this depends on."""
+    from sqlalchemy.exc import IntegrityError
+
+    _seed(session)
+    cfg = _permissive_config(session)
+    result = evaluate_promotion(
+        session, RelativeStrength(), symbols=UNIVERSE, start=START, end=END, config=cfg
+    )
+    sealed = session.get(StrategySealedTest, result.sealed_test_id)
+
+    dupe = StrategySealedTest(
+        strategy_version_id=sealed.strategy_version_id,
+        window_start=sealed.window_start,
+        window_end=sealed.window_end,
+        universe_json=sealed.universe_json,
+        data_provenance_json=sealed.data_provenance_json,
+        metrics_json=sealed.metrics_json,
+        benchmark_metrics_json=sealed.benchmark_metrics_json,
+        passed=sealed.passed,
+        detail=sealed.detail,
+        evaluated_at=sealed.evaluated_at,
+    )
+    with pytest.raises(IntegrityError), session.begin_nested():
+        session.add(dupe)
+        session.flush()
+
+
 def test_intraday_strategy_short_circuits_without_fabricating_a_result(session: Session) -> None:
     _seed(session)
     cfg = _permissive_config(session)
@@ -273,3 +305,93 @@ def test_sensitivity_plan_is_none_for_an_unknown_strategy() -> None:
         key = "totally_new_strategy.v1"
 
     assert _sensitivity_plan(_Unknown()) is None  # type: ignore[arg-type]
+
+
+# ---- regression tests for the adversarial-review findings -----------------
+def test_gate1_requires_actual_edge_not_just_any_trade_in_the_fold(session: Session) -> None:
+    """review finding (gate-correctness, high): gate 1 used to pass as soon as
+    half the folds had ANY trade, even a net-losing one. With an impossibly
+    high per-fold expectancy bar, every fold has trades but none clears it —
+    gate 1 must now fail, where the old logic would have passed it."""
+    _seed(session)
+    cfg = _permissive_config(session)
+    strict_gate1 = cfg.model_copy(
+        update={"promotion": cfg.promotion.model_copy(update={"min_net_expectancy_r": 999.0})}
+    )
+    result = evaluate_promotion(
+        session, MeanReversion(), symbols=UNIVERSE, start=START, end=END, config=strict_gate1
+    )
+    gate1 = next(g for g in result.gates if g.number == 1)
+    assert gate1.passed is False
+    assert "folds_with_edge" not in gate1.detail or "clearing both" in gate1.detail
+    assert gate1.evidence["folds"]  # still has real fold data to inspect
+    assert any(f["n_trades"] > 0 for f in gate1.evidence["folds"])  # trades exist...
+    # ...but none clear the (impossible) expectancy bar, so folds_with_edge must be 0
+
+
+def test_min_presealed_span_is_tied_to_regime_warmup(session: Session) -> None:
+    """review finding (stats-gate-soundness, low): the old fixed 180-day floor
+    was below regime.py's 200-session TREND_LOOKBACK, so a span just above it
+    would guarantee gate 6 fails with zero regime coverage regardless of
+    strategy quality. Gate 0 must now reject such a span up front."""
+    from signalforge.research.promotion import MIN_PRESEALED_DAYS
+
+    assert MIN_PRESEALED_DAYS > 300  # meaningfully above the old 180-day floor
+    short_end = START + timedelta(days=200)  # well under MIN_PRESEALED_DAYS + sealed window
+    ingest_universe(session, FixtureMarketDataAdapter(), UNIVERSE, START, short_end)
+    session.flush()
+    cfg = _permissive_config(session)
+    result = evaluate_promotion(
+        session, MeanReversion(), symbols=UNIVERSE, start=START, end=short_end, config=cfg
+    )
+    assert result.passed is False
+    assert len(result.gates) == 1
+    assert result.gates[0].name == "data_availability"
+    assert "regime" in result.gates[0].detail.lower()
+
+
+def test_pre_sealed_and_sealed_windows_never_share_a_calendar_day(session: Session) -> None:
+    """review finding (gate-correctness / sealed-test-integrity, low): the
+    single calendar day at the pre-sealed/sealed boundary used to be loaded
+    into BOTH windows (inclusive/inclusive on both sides of the same cutoff).
+    The sealed window must now start strictly after every date gate 1's folds
+    could have used."""
+    _seed(session)
+    cfg = _permissive_config(session)
+    result = evaluate_promotion(
+        session, TrendContinuation(), symbols=UNIVERSE, start=START, end=END, config=cfg
+    )
+    sealed_row = session.get(StrategySealedTest, result.sealed_test_id)
+    gate1 = next(g for g in result.gates if g.number == 1)
+    last_fold_end = date.fromisoformat(gate1.evidence["folds"][-1]["end"])
+    assert last_fold_end < sealed_row.window_start
+
+
+def test_sealed_window_is_pinned_across_a_later_reevaluation(session: Session) -> None:
+    """review finding (sealed-test-integrity, high): re-evaluating the same
+    strategy version after more data has been ingested must NOT let the
+    pre-sealed span creep forward into what is already the locked sealed
+    window from the first evaluation."""
+    _seed(session)  # ingests [START, END]
+    cfg = _permissive_config(session)
+    strat = VolatilityBreakout()
+
+    r1 = evaluate_promotion(session, strat, symbols=UNIVERSE, start=START, end=END, config=cfg)
+    sealed1 = session.get(StrategySealedTest, r1.sealed_test_id)
+
+    # more data arrives; a later "today" is used for the second evaluation
+    later_end = END + timedelta(days=60)
+    ingest_universe(session, FixtureMarketDataAdapter(), UNIVERSE, END, later_end)
+    session.flush()
+    r2 = evaluate_promotion(
+        session, strat, symbols=UNIVERSE, start=START, end=later_end, config=cfg
+    )
+
+    assert r2.sealed_test_id == r1.sealed_test_id  # reused, not re-sealed
+    sealed2 = session.get(StrategySealedTest, r2.sealed_test_id)
+    assert sealed2.window_start == sealed1.window_start
+    assert sealed2.window_end == sealed1.window_end
+
+    gate1_r2 = next(g for g in r2.gates if g.number == 1)
+    last_fold_end_r2 = date.fromisoformat(gate1_r2.evidence["folds"][-1]["end"])
+    assert last_fold_end_r2 < sealed1.window_start  # gates 1-8 never crept into the locked window

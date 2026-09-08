@@ -86,19 +86,49 @@ def guarded(name: str, fn: JobFn) -> JobFn:
 # Job bodies
 # --------------------------------------------------------------------------- #
 def job_ingest() -> None:
+    """The routine daily incremental top-up. Also records a lightweight
+    ``IngestionRun`` summary (status ok/partial/failed) so the alert policy's
+    ``DATA_ISSUE`` check can see a real failure on the *scheduled* path — before
+    this, only the CLI's separate deep-history command wrote that row, so a
+    scheduled ingest with per-symbol errors was invisible to plan_alerts."""
     from datetime import date
 
     from signalforge.config import get_settings
     from signalforge.data.adapters.registry import get_primary_adapter
     from signalforge.data.ingest import ingest_universe
+    from signalforge.db.models import IngestionRun
     from signalforge.db.session import session_scope
+    from signalforge.db.types import utcnow
+    from signalforge.domain import FeedType
 
     settings = get_settings()
     symbols = list(settings.research.universe)
     end = date.today()
     start = end - timedelta(days=400)
     with session_scope() as session:
-        ingest_universe(session, get_primary_adapter(settings), symbols, start, end)
+        adapter = get_primary_adapter(settings)
+        started = utcnow()
+        report = ingest_universe(session, adapter, symbols, start, end)
+        ok_symbols = [r.symbol for r in report.results if not r.error]
+        failed = {r.symbol: r.error for r in report.results if r.error}
+        status = "ok" if not failed else ("partial" if ok_symbols else "failed")
+        session.add(
+            IngestionRun(
+                provider=adapter.provider_name,
+                feed_type=FeedType.BAR_DAILY,
+                kind="incremental",
+                requested_start=start,
+                requested_end=end,
+                symbols_requested=list(symbols),
+                symbols_ok=ok_symbols,
+                symbols_failed=failed,
+                bars_written=report.bars_written,
+                status=status,
+                started_at=started,
+                finished_at=utcnow(),
+                notes="scheduled daily incremental top-up (job_ingest)",
+            )
+        )
 
 
 def job_scan_all() -> None:

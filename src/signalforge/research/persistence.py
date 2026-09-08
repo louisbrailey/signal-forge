@@ -20,16 +20,20 @@ from signalforge.research.registry import StrategySpec
 def upsert_strategy_version(session: Session, spec: StrategySpec) -> StrategyVersion:
     """Register (or refresh the spec of) a strategy version.
 
-    ``status`` is set only when a row is first CREATED (from ``spec.status``,
-    which every strategy class hardcodes to ``EXPERIMENTAL``). It is
-    deliberately never touched on an existing row: this function runs on every
-    scan and every backtest report — if it also overwrote status, it would
-    silently reset a version ``research.promotion`` had just approved (or the
-    health monitor had just downgraded) back to ``spec.status`` the next time
-    a scan happened to run, desynchronising ``StrategyVersion.status`` from
-    ``Strategy.status``. Status transitions are the exclusive responsibility of
-    ``research.promotion`` (promote), ``research.health_monitor``
-    (downgrade/disable), and the dashboard's downgrade-only manual action.
+    ``status`` is **never** taken from ``spec.status`` — new rows get the ORM
+    model's own default (``EXPERIMENTAL``), and an existing row's status is
+    never touched here at all. Two reasons: (1) this function runs on every
+    scan and every backtest report, and if it also overwrote status on an
+    existing row it would silently reset a version ``research.promotion`` had
+    just approved (or the health monitor had just downgraded) the next time a
+    scan happened to run, desynchronising ``StrategyVersion.status`` from
+    ``Strategy.status``; (2) ``spec`` is produced by a strategy class's own
+    ``.spec()`` method — trusting its ``status`` field even on first creation
+    would let a strategy author (or a copy-pasted spec) set
+    ``PAPER_APPROVED`` directly, bypassing the pipeline entirely. Status
+    transitions are the exclusive responsibility of ``research.promotion``
+    (promote), ``research.health_monitor`` (downgrade/disable), and the
+    dashboard's downgrade-only manual action.
     """
     strat = session.scalar(select(Strategy).where(Strategy.name == spec.name))
     if strat is None:
@@ -38,7 +42,6 @@ def upsert_strategy_version(session: Session, spec: StrategySpec) -> StrategyVer
             horizon=spec.horizon,
             permits_long=spec.permits_long,
             permits_short=spec.permits_short,
-            status=spec.status,
         )
         session.add(strat)
         session.flush()
@@ -55,7 +58,6 @@ def upsert_strategy_version(session: Session, spec: StrategySpec) -> StrategyVer
             version=spec.version,
             git_sha=spec.git_sha,
             spec_json=spec_json,
-            status=spec.status,
         )
         session.add(ver)
         session.flush()

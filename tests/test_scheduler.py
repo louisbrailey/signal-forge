@@ -95,3 +95,24 @@ def test_catch_up_runs_when_no_scan_exists(db_url: str, monkeypatch: pytest.Monk
     monkeypatch.setattr(sched, "job_scan_all", lambda: calls.append("scan"))
     sched.run_catch_up()
     assert calls == ["ingest", "scan"]
+
+
+def test_job_ingest_writes_an_ingestion_run_row(db_url: str) -> None:
+    """review finding (data-issue visibility, medium): the scheduled
+    job_ingest -> ingest_universe path used to write no IngestionRun row at
+    all, so a real production ingestion failure on the actual scheduled path
+    was invisible to plan_alerts' DATA_ISSUE check (only the separate CLI
+    deep-history command wrote that row)."""
+    from sqlalchemy import select
+
+    from signalforge.db.models import IngestionRun
+    from signalforge.db.session import session_scope
+
+    sched.job_ingest()
+
+    with session_scope() as session:
+        row = session.scalar(select(IngestionRun).order_by(IngestionRun.started_at.desc()).limit(1))
+        assert row is not None
+        assert row.status in ("ok", "partial", "failed")
+        assert row.notes == "scheduled daily incremental top-up (job_ingest)"
+        assert row.finished_at is not None and row.finished_at >= row.started_at
