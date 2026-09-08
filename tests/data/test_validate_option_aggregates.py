@@ -135,3 +135,27 @@ def test_flags_per_underlying_cap_breach(session: Session) -> None:
 
     res = validate_option_aggregates(session, ["SPY"], caps=_Caps(), persist=False)
     assert "caps_respected" in {c.name for c in res.checks if not c.passed}
+
+
+# ---- regression tests for the adversarial-review findings -----------------
+def test_flags_zero_or_negative_low_or_close_not_just_open(session: Session) -> None:
+    """review finding: validation-coverage #7 — ohlcv_sanity previously only
+    required open > 0; a zero/negative low or close slipped through."""
+    _contract(session, "O:SPY_C4")
+    trading = next(iter(_sessions(_TODAY - timedelta(days=5), _TODAY)))
+    # ordering is valid (low <= open,close <= high) but low/close are non-positive
+    _bar(session, "O:SPY_C4", trading, o=1.0, h=1.5, low=0.0, c=0.0)
+    res = validate_option_aggregates(session, ["SPY"], persist=False)
+    assert "ohlcv_sanity" in {c.name for c in res.checks if not c.passed}
+
+
+def test_chronological_order_catches_bars_inserted_out_of_date_order(session: Session) -> None:
+    """review finding: validation-coverage #11 — the check used to fetch rows
+    pre-sorted by session_date, which made an out-of-order INSERT undetectable."""
+    _contract(session, "O:SPY_C5")
+    days = list(_sessions(_TODAY - timedelta(days=10), _TODAY))
+    # insert a LATER date first, then an EARLIER one — valid dates, bad arrival order
+    _bar(session, "O:SPY_C5", days[-1])
+    _bar(session, "O:SPY_C5", days[0])
+    res = validate_option_aggregates(session, ["SPY"], persist=False)
+    assert "chronological_order" in {c.name for c in res.checks if not c.passed}

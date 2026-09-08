@@ -18,7 +18,11 @@ Properties, mirroring the equities pipeline:
   re-inserting an existing ``(option_ticker, session_date, source)`` is a no-op.
 * **resumable**    — ``resume_run_id`` re-enters a ``running`` row and skips the
   underlyings already in ``symbols_ok``; per-contract idempotency handles a
-  partially-done underlying.
+  partially-done underlying. An underlying is marked ``symbols_ok`` only if
+  every contract it attempted actually succeeded — a transient per-contract
+  fetch failure leaves it retryable on the next ``--resume``, never silently
+  marked complete. (A cap-trimmed underlying with no fetch errors *is* marked
+  done: caps are a deliberate policy choice, not a failure to retry.)
 * **labelled**     — every row is ``latency_category = HISTORICAL`` and carries
   the provider name. These are settled bars, never live or delayed.
 
@@ -84,6 +88,14 @@ def _reference_price(session: Session, underlying: str) -> float | None:
     return float(row[0]) if row else None
 
 
+@dataclass(frozen=True, slots=True)
+class _Selection:
+    carriers: list[OptionContract]
+    expirations: list[str]
+    expirations_dropped: int  # expirations discarded by expirations_per_underlying
+    contracts_dropped: int  # ATM-ranked tail discarded by contracts_per_underlying
+
+
 def _select_contracts(
     adapter: MassiveOptionsAdapter,
     underlying: str,
@@ -92,13 +104,14 @@ def _select_contracts(
     end: date,
     caps: BackfillCaps,
     ref_price: float | None,
-) -> tuple[list[OptionContract], list[str]]:
-    """Bounded contract set for one underlying + the expirations kept.
+) -> _Selection:
+    """Bounded contract set for one underlying + how much the selection caps dropped.
 
     Contracts whose expiration falls in ``[start, end + 150d]`` (so they had
     tradeable history inside the window), the nearest ``expirations_per_underlying``
     expiries, strikes within ``strike_pct_band`` of ``ref_price`` (if known),
-    then ATM-ranked and truncated to ``contracts_per_underlying``.
+    then ATM-ranked and truncated to ``contracts_per_underlying``. Both cap-driven
+    truncations are counted so the caller can record what was dropped.
     """
     lo = start
     hi = end + timedelta(days=150)
@@ -113,8 +126,9 @@ def _select_contracts(
         limit=1000,
     )
     if not rows:
-        return [], []
-    keep_exps = sorted({r.expiration_date for r in rows})[: caps.expirations_per_underlying]
+        return _Selection([], [], 0, 0)
+    all_exps = sorted({r.expiration_date for r in rows})
+    keep_exps = all_exps[: caps.expirations_per_underlying]
     exp_set = set(keep_exps)
     pool = [r for r in rows if r.expiration_date in exp_set]
     if ref_price is not None:
@@ -123,6 +137,7 @@ def _select_contracts(
         )
     else:
         pool.sort(key=lambda r: (r.expiration_date, r.strike_price))
+    pool_before = len(pool)
     pool = pool[: caps.contracts_per_underlying]
     # hand back lightweight OptionContract-shaped carriers (not persisted here)
     carriers = [
@@ -139,7 +154,12 @@ def _select_contracts(
         )
         for r in pool
     ]
-    return carriers, [d.isoformat() for d in sorted(exp_set)]
+    return _Selection(
+        carriers,
+        [d.isoformat() for d in sorted(exp_set)],
+        expirations_dropped=len(all_exps) - len(keep_exps),
+        contracts_dropped=pool_before - len(pool),
+    )
 
 
 def _existing_dates(session: Session, option_ticker: str, source: str) -> set[date]:
@@ -222,9 +242,16 @@ def backfill_option_aggregates(
     for u in syms:
         if u in ok:
             continue
+        # a prior partial/failed pass may have left stale per-contract failure
+        # keys for this underlying; drop them so a clean retry clears status,
+        # and so this pass's own failures (if any) are what's recorded.
+        if failed:
+            for k in [k for k in failed if k == u or k.startswith(f"{u}:")]:
+                failed.pop(k, None)
+
         try:
             ref = _reference_price(session, u)
-            carriers, kept_exps = _select_contracts(
+            sel = _select_contracts(
                 adapter, u, start=win_start, end=win_end, caps=caps, ref_price=ref
             )
         except AdapterError as exc:
@@ -233,46 +260,81 @@ def backfill_option_aggregates(
             session.flush()
             continue
 
+        carriers, kept_exps = sel.carriers, sel.expirations
+        selection_dropped = sel.contracts_dropped  # already trimmed by expirations/contracts caps
+        if selection_dropped:
+            _log.warning(
+                "options.backfill.selection_cap_hit",
+                underlying=u,
+                dropped_contracts=selection_dropped,
+                dropped_expirations=sel.expirations_dropped,
+            )
+
         if not carriers:
-            detail[u] = {"contracts": 0, "bars": 0, "dropped_by_cap": 0, "expirations": []}
+            detail[u] = {
+                "contracts": 0,
+                "bars": 0,
+                "dropped_by_cap": selection_dropped,
+                "dropped_expirations": sel.expirations_dropped,
+                "bars_clamped": 0,
+                "expirations": kept_exps,
+            }
             ok.append(u)
             run.symbols_ok = list(ok)
             run.gaps_json = detail
             session.flush()
             continue
 
-        # ---- global total-bar cap, enforced BEFORE any per-contract fetch ----
+        # ---- global total-bar cap: a pre-fetch estimate trims the attempt list
+        # (avoids wasted requests); the per-bar check below is the AUTHORITATIVE
+        # ceiling — it holds even if a contract returns more bars than estimated.
         budget_left = max(0, caps.max_total_bars - written)
-        room_for = budget_left // expected_per_contract
-        dropped = 0
+        room_for = budget_left // expected_per_contract if expected_per_contract else 0
+        est_dropped = 0
         if len(carriers) > room_for:
-            dropped = len(carriers) - room_for
+            est_dropped = len(carriers) - room_for
             carriers = carriers[:room_for]
             _log.warning(
                 "options.backfill.cap_hit",
                 underlying=u,
-                dropped_contracts=dropped,
+                dropped_contracts=est_dropped,
                 total_bar_ceiling=caps.max_total_bars,
                 bars_so_far=written,
             )
 
         u_bars = 0
         u_contracts = 0
+        u_contract_failures = 0
+        clamped_bars = 0
+        processed = 0
+        cap_stop = False
         for carrier in carriers:
+            if written >= caps.max_total_bars:
+                cap_stop = True
+                break
+            processed += 1
             _upsert_contract_meta(session, carrier)
-            have = _existing_dates(session, carrier.option_ticker, adapter.provider_name)
             hard_end = min(win_end, carrier.expiration_date)
-            if have and max(have) >= hard_end - timedelta(days=4):
+            have = _existing_dates(session, carrier.option_ticker, adapter.provider_name)
+            # bound the "already covered" check to in-window dates so a single
+            # out-of-range row (a vendor glitch) can never permanently freeze
+            # this contract's future coverage.
+            covered = {d for d in have if win_start <= d <= hard_end}
+            if covered and max(covered) >= hard_end - timedelta(days=4):
                 continue  # already covered to the window end for this contract
-            fetch_from = max(win_start, (max(have) + timedelta(days=1)) if have else win_start)
+            fetch_from = max(
+                win_start, (max(covered) + timedelta(days=1)) if covered else win_start
+            )
             try:
                 bars = adapter.fetch_option_aggregates(
                     carrier.option_ticker, start=fetch_from, end=hard_end, adjusted=True
                 )
             except AdapterError as exc:
                 failed[f"{u}:{carrier.option_ticker}"] = str(exc)[:160]
+                u_contract_failures += 1
                 continue
             if len(bars) > _MAX_BARS_PER_CONTRACT:  # defensive: a vendor bug can't flood the table
+                clamped_bars += len(bars) - _MAX_BARS_PER_CONTRACT
                 _log.warning(
                     "options.backfill.contract_bar_clamp",
                     option_ticker=carrier.option_ticker,
@@ -282,11 +344,16 @@ def backfill_option_aggregates(
                 bars = bars[:_MAX_BARS_PER_CONTRACT]
             u_contracts += 1
             for b in bars:
+                if written >= caps.max_total_bars:
+                    cap_stop = True
+                    break
+                # reject anything outside [window start, min(window end, expiry)]
+                # in one guard — covers post-expiry, pre-window, and future rows.
+                if b.session_date > hard_end or b.session_date < win_start:
+                    continue
                 if b.session_date in have:
                     skipped += 1
                     continue
-                if b.session_date > carrier.expiration_date:
-                    continue  # never store a bar past expiry
                 session.add(
                     OptionAggregateDaily(
                         option_ticker=b.option_ticker,
@@ -317,16 +384,47 @@ def backfill_option_aggregates(
             run.coverage_last = cov_last
             run.symbols_failed = failed
             session.flush()
+            if cap_stop:
+                break
+
+        not_attempted = len(carriers) - processed if cap_stop else 0
+        total_dropped = selection_dropped + est_dropped + not_attempted
+        notes_add = []
+        if cap_stop:
+            notes_add.append(f"total-bar ceiling ({caps.max_total_bars:,}) hit mid-fetch for {u}")
+        if clamped_bars:
+            notes_add.append(
+                f"per-contract bar clamp dropped {clamped_bars} bar(s) for {u} "
+                f"(vendor returned > {_MAX_BARS_PER_CONTRACT}/contract)"
+            )
+        if notes_add:
+            run.notes = (run.notes + "; " if run.notes else "") + "; ".join(notes_add)
 
         detail[u] = {
             "contracts": u_contracts,
             "bars": u_bars,
-            "dropped_by_cap": dropped,
+            "dropped_by_cap": total_dropped,
+            "dropped_expirations": sel.expirations_dropped,
+            "bars_clamped": clamped_bars,
             "expirations": kept_exps,
         }
-        ok.append(u)
-        run.symbols_ok = list(ok)
         run.gaps_json = detail
+        run.symbols_failed = failed
+        # Only mark the underlying done when nothing that a later --resume
+        # could actually fix was left undone:
+        #  - a per-contract failure (e.g. a transient 5xx) must stay retryable;
+        #  - budget-driven trimming (est_dropped / cap_stop) must ALSO stay
+        #    retryable — a resume with a higher --max-total-bars is exactly how
+        #    an operator recovers that coverage, and marking it done here would
+        #    make that recovery permanently impossible (`if u in ok: continue`).
+        # A trim from the selection caps (expirations_per_underlying /
+        # contracts_per_underlying) is a deterministic policy choice, not a
+        # budget shortfall — retrying without changing those caps would just
+        # reselect the same contracts, so it's fine to mark done.
+        budget_limited = est_dropped > 0 or cap_stop
+        if u_contract_failures == 0 and not budget_limited:
+            ok.append(u)
+            run.symbols_ok = list(ok)
         session.flush()
 
     run.status = "ok" if not failed else ("partial" if ok else "failed")

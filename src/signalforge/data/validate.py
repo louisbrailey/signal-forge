@@ -280,12 +280,14 @@ def validate_option_aggregates(
                 OptionAggregateDaily.close,
                 OptionAggregateDaily.volume,
                 OptionAggregateDaily.latency_category,
-            )
-            .where(
+            ).where(
                 OptionAggregateDaily.source == source,
                 OptionAggregateDaily.underlying_symbol.in_(syms),
             )
-            .order_by(OptionAggregateDaily.option_ticker, OptionAggregateDaily.session_date)
+            # order by id (insertion order), NOT session_date — the whole point
+            # of the chronological_order check below is to catch dates arriving
+            # out of order, which a session_date ORDER BY would silently mask.
+            .order_by(OptionAggregateDaily.option_ticker, OptionAggregateDaily.id)
         )
     )
     res.coverage = {
@@ -302,16 +304,20 @@ def validate_option_aggregates(
             session.flush()
         return res
 
-    # 1. chronological + no in-series duplicate dates, per contract
+    # 1. chronological continuity, per contract, in the order bars actually
+    # arrived (insertion order — see the ORDER BY note above). A literal
+    # duplicate (ticker, date) pair cannot occur here: it's excluded by the
+    # UNIQUE(option_ticker, session_date, source) constraint and re-verified
+    # independently by no_duplicate_bars below.
     by_ticker: dict[str, list[date]] = defaultdict(list)
     for r in rows:
         by_ticker[r[0]].append(r[2])
-    disordered = [t for t, ds in by_ticker.items() if any(a >= b for a, b in pairwise(ds))]
+    disordered = [t for t, ds in by_ticker.items() if ds != sorted(ds)]
     res.checks.append(
         Check(
             "chronological_order",
             not disordered,
-            f"contracts out-of-order/dup: {disordered[:5] or 'none'}",
+            f"contracts with bars inserted out of date order: {disordered[:5] or 'none'}",
         )
     )
 
@@ -337,12 +343,12 @@ def validate_option_aggregates(
         )
     )
 
-    # 3. OHLC sanity
+    # 3. OHLC sanity — all four prices must be positive, not just open
     bad_ohlc = [
         f"{r[0]}@{r[2]}"
         for r in rows
         if not (r[5] <= r[3] <= r[4] and r[5] <= r[6] <= r[4] and r[5] <= r[4])
-        or r[3] <= 0
+        or min(r[3], r[4], r[5], r[6]) <= 0
         or r[7] < 0
     ]
     res.checks.append(

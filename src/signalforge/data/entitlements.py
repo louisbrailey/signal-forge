@@ -529,8 +529,12 @@ def _benzinga_news_check(client: httpx.Client, key: str, provider: str) -> Endpo
 
     bz_date = newest_bz.date().isoformat() if newest_bz else "never"
     any_date = newest_any.date().isoformat() if newest_any else "?"
+    # age_days (via timedelta.days, which TRUNCATES) is for the human-readable
+    # detail string only — a 10d22h-old article would show "10d old" and, if
+    # gated on the same truncated value, wrongly pass a "<=10 day" freshness
+    # test. Gate `available` on the actual instant instead.
     age_days = (now_dt - newest_bz).days if newest_bz else None
-    available = age_days is not None and age_days <= _BENZINGA_FRESH_DAYS
+    available = newest_bz is not None and newest_bz >= now_dt - timedelta(days=_BENZINGA_FRESH_DAYS)
     seen = ", ".join(sorted(publishers)[:6]) or "none"
     if available:
         detail = (

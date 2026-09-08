@@ -40,7 +40,7 @@ def test_scrub_removes_key_and_querystring_secrets() -> None:
     assert "[REDACTED]" in clean
 
 
-def _news_page(benzinga_age_days: int | None) -> dict[str, object]:
+def _news_page(benzinga_age_days: float | None) -> dict[str, object]:
     """~40 current Motley-Fool items + (optionally) 6 Benzinga items aged
     ``benzinga_age_days``. One page, no ``next_url``."""
     now = datetime.now(UTC)
@@ -77,7 +77,7 @@ def _news_page(benzinga_age_days: int | None) -> dict[str, object]:
     return {"status": "OK", "count": len(results), "results": results}
 
 
-def _make_handler(benzinga_age_days: int | None):
+def _make_handler(benzinga_age_days: float | None):
     def handler(request: httpx.Request) -> httpx.Response:
         # the key must only ever be in the Authorization header
         assert request.headers["authorization"] == f"Bearer {_SECRET}"
@@ -124,7 +124,7 @@ def _make_handler(benzinga_age_days: int | None):
     return handler
 
 
-def _mock(monkeypatch: pytest.MonkeyPatch, *, benzinga_age_days: int | None) -> None:
+def _mock(monkeypatch: pytest.MonkeyPatch, *, benzinga_age_days: float | None) -> None:
     handler = _make_handler(benzinga_age_days)
 
     def factory(**kw: object) -> httpx.Client:
@@ -201,6 +201,25 @@ def test_benzinga_news_available_only_when_feed_is_currently_delivering_it(
     bz = next(c for c in report.checks if c.feed == "benzinga_news")
     assert bz.available is False
     assert "no Benzinga-published articles" in bz.detail
+
+
+def test_benzinga_freshness_gate_is_not_fooled_by_days_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """review finding: benzinga-freshness #10 — timedelta.days truncates, so an
+    article 10 days 22 hours old must NOT pass a "<=10 day" freshness gate even
+    though (now - article).days == 10."""
+    _mock(monkeypatch, benzinga_age_days=10 + 22 / 24)  # ~10d22h old
+    report = verify_entitlements(_settings(monkeypatch))
+    bz = next(c for c in report.checks if c.feed == "benzinga_news")
+    assert bz.available is False
+    assert "STALE" in bz.detail
+
+    # just inside the window (a few hours old) must still pass
+    _mock(monkeypatch, benzinga_age_days=9.5)
+    report = verify_entitlements(_settings(monkeypatch))
+    bz = next(c for c in report.checks if c.feed == "benzinga_news")
+    assert bz.available is True
 
 
 def test_verify_entitlements_never_leaks_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
