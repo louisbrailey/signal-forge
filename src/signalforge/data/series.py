@@ -15,7 +15,7 @@ from numpy.typing import NDArray
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from signalforge.data.repository import get_daily_bars
+from signalforge.data.repository import SourceFilter, get_daily_bars
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +81,7 @@ class PriceSeries:
         start: date,
         end: date,
         *,
-        source: str | None = None,
+        source: SourceFilter = None,
         adjusted: bool = True,
     ) -> PriceSeries:
         bars = get_daily_bars(session, symbol, start, end, source=source)
@@ -110,7 +110,7 @@ class PriceSeries:
         end: datetime,
         *,
         bar_size: str = "5m",
-        source: str | None = None,
+        source: SourceFilter = None,
     ) -> PriceSeries:
         """Intraday bars as a ``PriceSeries`` whose ``dates`` are aware datetimes."""
         from signalforge.db.models import Instrument, OHLCVIntraday
@@ -127,7 +127,11 @@ class PriceSeries:
             .order_by(OHLCVIntraday.bar_start)
         )
         if source is not None:
-            stmt = stmt.where(OHLCVIntraday.source == source)
+            stmt = stmt.where(
+                OHLCVIntraday.source == source
+                if isinstance(source, str)
+                else OHLCVIntraday.source.in_(list(source))
+            )
         bars = list(session.scalars(stmt))
         rows = [(b.bar_start, b.open, b.high, b.low, b.close, b.volume) for b in bars]
         return cls.from_bars(symbol, rows)  # type: ignore[arg-type]

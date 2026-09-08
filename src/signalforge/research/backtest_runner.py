@@ -18,6 +18,7 @@ from signalforge.backtest.costs import CostModel
 from signalforge.backtest.engine import BacktestOutcome, SimTrade, run_backtest
 from signalforge.backtest.metrics import Metrics, compute_metrics
 from signalforge.backtest.montecarlo import bootstrap_ci
+from signalforge.data.repository import SourceFilter
 from signalforge.data.series import PriceSeries
 from signalforge.db.models import Instrument, OHLCVDaily, OHLCVIntraday
 from signalforge.research.regime import RegimeState, regime_lookup
@@ -48,15 +49,31 @@ class DataProvenance:
 
 
 def _data_provenance(
-    session: Session, symbols: list[str], start: date, end: date, *, intraday: bool
+    session: Session,
+    symbols: list[str],
+    start: date,
+    end: date,
+    *,
+    intraday: bool,
+    source: SourceFilter = None,
 ) -> DataProvenance:
+    """Reports what data actually backed the run — so this MUST apply the same
+    ``source`` filter the backtest itself used (``PriceSeries.load``), or the
+    persisted record can claim a source (e.g. a symbol-continuity bridge tag)
+    contributed bars that were never actually loaded into any trade."""
     tbl: Any = OHLCVIntraday if intraday else OHLCVDaily
     date_col = tbl.bar_start if intraday else tbl.session_date
     lo: object = datetime(start.year, start.month, start.day, tzinfo=UTC) if intraday else start
     hi: object = datetime(end.year, end.month, end.day, tzinfo=UTC) if intraday else end
     id_col, sim_col, src_col, inst_col = tbl.id, tbl.is_simulated, tbl.source, tbl.instrument_id
 
-    bars, first, last, sim = session.execute(
+    def _src_clause() -> Any:
+        if source is None:
+            return None
+        return src_col == source if isinstance(source, str) else src_col.in_(list(source))
+
+    clause = _src_clause()
+    bars_stmt = (
         select(
             func.count(id_col),
             func.min(date_col),
@@ -65,18 +82,20 @@ def _data_provenance(
         )
         .join(Instrument, inst_col == Instrument.id)
         .where(Instrument.symbol.in_(symbols), date_col >= lo, date_col <= hi)
-    ).one()
-    sources = tuple(
-        sorted(
-            row[0]
-            for row in session.execute(
-                select(src_col)
-                .join(Instrument, inst_col == Instrument.id)
-                .where(Instrument.symbol.in_(symbols))
-                .distinct()
-            )
-        )
     )
+    if clause is not None:
+        bars_stmt = bars_stmt.where(clause)
+    bars, first, last, sim = session.execute(bars_stmt).one()
+
+    sources_stmt = (
+        select(src_col)
+        .join(Instrument, inst_col == Instrument.id)
+        .where(Instrument.symbol.in_(symbols))
+    )
+    if clause is not None:
+        sources_stmt = sources_stmt.where(clause)
+    sources = tuple(sorted(row[0] for row in session.execute(sources_stmt.distinct())))
+
     first_d = first.date() if hasattr(first, "date") else first
     last_d = last.date() if hasattr(last, "date") else last
     return DataProvenance(sources, bool(sim), int(bars or 0), first_d, last_d)
@@ -153,7 +172,7 @@ def run_strategy_over_universe(
     end: date,
     *,
     proxy_symbol: str = DEFAULT_PROXY,
-    source: str | None = None,
+    source: SourceFilter = None,
     allow_short: bool = False,
     cost_model: CostModel | None = None,
     config_hash: str = "",
@@ -211,7 +230,7 @@ def run_strategy_over_universe(
         per_symbol_trades=per_symbol,
         trades=all_trades,
         config_hash=config_hash,
-        data=_data_provenance(session, list(symbols), start, end, intraday=intraday),
+        data=_data_provenance(session, list(symbols), start, end, intraday=intraday, source=source),
         costs={
             "commission_per_share": (cost_model or CostModel()).commission_per_share,
             "commission_min_per_order": (cost_model or CostModel()).commission_min_per_order,

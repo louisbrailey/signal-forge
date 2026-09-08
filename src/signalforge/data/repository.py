@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
 
 from sqlalchemy import select
@@ -9,6 +10,21 @@ from sqlalchemy.orm import Session
 
 from signalforge.data.adapters.base import FeedType
 from signalforge.db.models import DataFeedStatus, Instrument, OHLCVDaily
+
+SourceFilter = str | Sequence[str] | None
+
+
+def _source_clause(source: SourceFilter):  # type: ignore[no-untyped-def]
+    """A single source string filters by equality; a sequence (e.g. the real
+    provider name plus a specific symbol-continuity bridge tag) filters by
+    membership — used when a dataset snapshot deliberately mixes one symbol's
+    derived/bridged bars with every other symbol's raw provider bars. ``None``
+    applies no filter at all."""
+    if source is None:
+        return None
+    if isinstance(source, str):
+        return OHLCVDaily.source == source
+    return OHLCVDaily.source.in_(list(source))
 
 
 def get_or_create_instrument(
@@ -34,7 +50,7 @@ def get_daily_bars(
     start: date,
     end: date,
     *,
-    source: str | None = None,
+    source: SourceFilter = None,
 ) -> list[OHLCVDaily]:
     stmt = (
         select(OHLCVDaily)
@@ -46,12 +62,13 @@ def get_daily_bars(
         )
         .order_by(OHLCVDaily.session_date)
     )
-    if source is not None:
-        stmt = stmt.where(OHLCVDaily.source == source)
+    clause = _source_clause(source)
+    if clause is not None:
+        stmt = stmt.where(clause)
     return list(session.scalars(stmt))
 
 
-def latest_bar_date(session: Session, symbol: str, *, source: str | None = None) -> date | None:
+def latest_bar_date(session: Session, symbol: str, *, source: SourceFilter = None) -> date | None:
     stmt = (
         select(OHLCVDaily.session_date)
         .join(Instrument)
@@ -59,8 +76,9 @@ def latest_bar_date(session: Session, symbol: str, *, source: str | None = None)
         .order_by(OHLCVDaily.session_date.desc())
         .limit(1)
     )
-    if source is not None:
-        stmt = stmt.where(OHLCVDaily.source == source)
+    clause = _source_clause(source)
+    if clause is not None:
+        stmt = stmt.where(clause)
     return session.scalar(stmt)
 
 

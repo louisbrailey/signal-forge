@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from signalforge.backtest.costs import CostModel
+from signalforge.data.repository import SourceFilter
 from signalforge.research.backtest_runner import run_strategy_over_universe
 from signalforge.research.strategies.base import BaselineStrategy
 
@@ -122,7 +123,7 @@ def run_parameter_sensitivity(
     symbols: list[str],
     start: date,
     end: date,
-    source: str | None = None,
+    source: SourceFilter = None,
     cost_model: CostModel | None = None,
     intraday: bool = False,
     bar_size: str = "15m",

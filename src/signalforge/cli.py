@@ -1274,6 +1274,18 @@ def evaluate_promotion_cmd(
         str, typer.Option(help="YYYY-MM-DD; default: earliest ingested history.")
     ] = "",
     until: Annotated[str, typer.Option(help="YYYY-MM-DD; default: today.")] = "",
+    dataset: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "Named dataset snapshot variant: 'baseline' (default, unmodified universe), "
+                "'ex_meta' (META excluded), or 'meta_continuity_corrected' (META replaced by a "
+                "verified continuity-bridged series — requires a prior "
+                "'symbol-continuity-backfill' run). Ignored if --symbols is also given. "
+                "See DataSnapshot."
+            )
+        ),
+    ] = "baseline",
 ) -> None:
     """Run the formal 10-gate promotion pipeline for every default strategy.
 
@@ -1301,8 +1313,46 @@ def evaluate_promotion_cmd(
     syms = None
     with session_scope() as session:
         cfg = effective_research_config(session)
-        syms = [x.strip().upper() for x in symbols.split(",") if x.strip()] or list(cfg.universe)
+        explicit_symbols = [x.strip().upper() for x in symbols.split(",") if x.strip()]
         start = _date.fromisoformat(since) if since else end - timedelta(days=365 * 10)
+
+        from signalforge.data.repository import SourceFilter
+
+        snap = None
+        eval_source: SourceFilter = get_settings().market_data_provider
+        if explicit_symbols:
+            syms = explicit_symbols
+            if dataset != "baseline":
+                typer.secho(
+                    f"--dataset {dataset!r} is ignored because --symbols was also given "
+                    "(the explicit symbol list wins; no named dataset snapshot is resolved)",
+                    fg=typer.colors.YELLOW,
+                )
+        else:
+            from signalforge.data.symbol_continuity import latest_mapping
+            from signalforge.research.fb_meta_universe_comparison import (
+                resolve_variant,
+                source_for_variant,
+            )
+
+            derived_symbol = mapping_id = None
+            if dataset == "meta_continuity_corrected":
+                mapping = latest_mapping(session, "FB", "META")
+                if mapping is None or mapping.validation_status != "verified":
+                    typer.secho(
+                        "no verified FB->META continuity mapping exists yet — run "
+                        "'signalforge symbol-continuity-backfill --old-symbol FB "
+                        "--new-symbol META' first",
+                        fg=typer.colors.RED,
+                    )
+                    raise typer.Exit(code=1)
+                derived_symbol, mapping_id = mapping.derived_symbol, mapping.id
+            syms, snap = resolve_variant(
+                session, variant=dataset, derived_symbol=derived_symbol, mapping_id=mapping_id
+            )
+            eval_source = source_for_variant(
+                dataset, get_settings().market_data_provider, mapping_id
+            )
 
         any_passed = False
         for strat in strategies:
@@ -1312,8 +1362,9 @@ def evaluate_promotion_cmd(
                 symbols=syms,
                 start=start,
                 end=end,
-                source=get_settings().market_data_provider,
+                source=eval_source,
                 config=cfg,
+                dataset_snapshot=snap,
             )
             any_passed = any_passed or result.passed
             colour = typer.colors.GREEN if result.passed else typer.colors.YELLOW
@@ -1325,7 +1376,7 @@ def evaluate_promotion_cmd(
             typer.echo(
                 f"  window {result.window_start}..{result.window_end}  "
                 f"universe {len(result.universe)} symbols  config_hash {result.config_hash[:12]}  "
-                f"git_sha {result.git_sha}"
+                f"git_sha {result.git_sha}  dataset_snapshot_id {result.dataset_snapshot_id}"
             )
             for g in result.gates:
                 mark = "PASS" if g.passed else "FAIL"
@@ -1340,6 +1391,160 @@ def evaluate_promotion_cmd(
                 bold=True,
             )
     typer.echo("Research signal only — no order was placed.")
+
+
+@app.command("symbol-continuity-backfill")
+def symbol_continuity_backfill_cmd(
+    old_symbol: Annotated[str, typer.Option(help="Predecessor symbol, e.g. FB.")],
+    new_symbol: Annotated[str, typer.Option(help="Successor symbol, already ingested, e.g. META.")],
+    since: Annotated[str, typer.Option(help="YYYY-MM-DD; predecessor backfill start.")] = "",
+    until: Annotated[
+        str,
+        typer.Option(
+            help="YYYY-MM-DD; outer bound for the predecessor backfill "
+            "(its actual last session is detected empirically, not assumed)."
+        ),
+    ] = "",
+) -> None:
+    """Investigate and (only if verified) bridge a symbol rename / ticker change.
+
+    1. Ingests ``old_symbol``'s own history via the configured licensed
+       provider — into its own instrument; never touches ``new_symbol``'s data.
+    2. Builds a new, versioned ``SymbolContinuityMapping`` from the two
+       symbols' already-ingested bars and validates continuity around the
+       seam: session gaps, price continuity, volume, split-adjustment status,
+       date ordering, duplicate prevention, and source provenance.
+    3. Only if every check passes, materializes a derived, separately-labelled
+       continuous series (old_symbol before the seam + new_symbol after it).
+       ``old_symbol``/``new_symbol``'s own instruments are never modified.
+
+    Prints the full evidence either way, including any pre-transition data
+    found under ``new_symbol`` (evidence of an unrelated prior ticker holder)
+    — disclosed, never silently dropped. Research data only: this command
+    creates no paper position, alert, brokerage interaction, or trade
+    recommendation.
+    """
+    ensure_not_engaged()
+    from signalforge.config import get_settings
+    from signalforge.data.adapters.registry import get_primary_adapter
+    from signalforge.data.symbol_continuity import (
+        backfill_predecessor_symbol,
+        build_and_validate_mapping,
+        materialize_continuous_series,
+    )
+    from signalforge.db.session import session_scope
+
+    settings = get_settings()
+    end = date.fromisoformat(until) if until else date.today()
+    start = date.fromisoformat(since) if since else end - timedelta(days=365 * 10)
+
+    with session_scope() as session:
+        adapter = get_primary_adapter(settings)
+        typer.echo(
+            f"Backfilling {old_symbol.upper()} [{start}..{end}] via {adapter.provider_name}..."
+        )
+        result = backfill_predecessor_symbol(session, adapter, old_symbol, start, end)
+        if result.error:
+            typer.secho(f"backfill error: {result.error}", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+        typer.echo(f"  {result.bars_written} bars written, {result.bars_skipped} skipped")
+
+        mapping = build_and_validate_mapping(
+            session, old_symbol=old_symbol, new_symbol=new_symbol, source=adapter.provider_name
+        )
+        colour = typer.colors.GREEN if mapping.validation_status == "verified" else typer.colors.RED
+        typer.secho(
+            f"\n{old_symbol.upper()} -> {new_symbol.upper()} mapping v{mapping.version}: "
+            f"{mapping.validation_status.upper()}",
+            fg=colour,
+            bold=True,
+        )
+        typer.echo(
+            f"  effective_date={mapping.effective_date}  "
+            f"last_old_session={mapping.last_old_session}"
+        )
+        for c in mapping.validation_evidence_json.get("checks", []):
+            mark = "PASS" if c["passed"] else "FAIL"
+            mcolour = typer.colors.GREEN if c["passed"] else typer.colors.RED
+            typer.secho(f"  [{mark}] {c['name']}: {c['detail']}", fg=mcolour)
+        contam = mapping.validation_evidence_json.get("diagnostics", {}).get(
+            "pre_transition_contamination", {}
+        )
+        if contam.get("found"):
+            typer.secho(f"  [DISCLOSED] {contam['note']}", fg=typer.colors.YELLOW)
+
+        if mapping.validation_status == "verified":
+            inst, written = materialize_continuous_series(session, mapping)
+            typer.echo(
+                f"\nMaterialized {inst.symbol}: {written} bars written (0 = already materialized)"
+            )
+        else:
+            typer.secho(
+                f"\nNo bridge materialized. {new_symbol.upper()} must be EXCLUDED from any "
+                "backtest/promotion evaluation needing continuous history through this "
+                "corporate action, rather than silently blended.",
+                fg=typer.colors.YELLOW,
+            )
+    typer.echo(
+        "Research data only — no paper position, alert, brokerage interaction, or trade "
+        "recommendation was created."
+    )
+
+
+@app.command("promotion-dataset-comparison")
+def promotion_dataset_comparison_cmd(
+    since: Annotated[str, typer.Option(help="YYYY-MM-DD; default: 10 years back.")] = "",
+    until: Annotated[str, typer.Option(help="YYYY-MM-DD; default: today.")] = "",
+) -> None:
+    """Run every default strategy through the promotion pipeline once per FB/META
+    dataset variant (baseline, ex_meta, and — if a verified continuity mapping
+    exists — meta_continuity_corrected) and print a side-by-side summary.
+
+    Each variant's sealed test is independently locked (see DataSnapshot) —
+    running this never recomputes or overwrites another variant's result.
+    """
+    ensure_not_engaged()
+    from signalforge.config import get_settings
+    from signalforge.data.symbol_continuity import latest_mapping
+    from signalforge.db.session import session_scope
+    from signalforge.research.fb_meta_universe_comparison import run_comparison
+
+    end = date.fromisoformat(until) if until else date.today()
+    start = date.fromisoformat(since) if since else end - timedelta(days=365 * 10)
+
+    with session_scope() as session:
+        mapping = latest_mapping(session, "FB", "META")
+        derived_symbol = (
+            mapping.derived_symbol if mapping and mapping.validation_status == "verified" else None
+        )
+        mapping_id = mapping.id if mapping and derived_symbol else None
+        if derived_symbol is None:
+            typer.secho(
+                "no verified FB->META continuity mapping found — running baseline and ex_meta "
+                "only (skipping meta_continuity_corrected)",
+                fg=typer.colors.YELLOW,
+            )
+
+        results = run_comparison(
+            session,
+            derived_symbol=derived_symbol,
+            mapping_id=mapping_id,
+            start=start,
+            end=end,
+            provider=get_settings().market_data_provider,
+        )
+
+        for variant, rows in results.items():
+            typer.secho(f"\n=== {variant} ===", bold=True)
+            for r in rows:
+                colour = typer.colors.GREEN if r.passed else typer.colors.YELLOW
+                n_pass = sum(1 for g in r.gates if g.passed)
+                typer.secho(
+                    f"  {r.strategy_key} v{r.version}: {n_pass}/{len(r.gates)} gates  ->  "
+                    f"{r.verdict}",
+                    fg=colour,
+                )
+    typer.echo("\nResearch signal only — no order was placed.")
 
 
 @app.command()

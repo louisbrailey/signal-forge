@@ -28,6 +28,7 @@ from signalforge.db.models.market import (
     RawPayloadCache,
     ReconciliationCheck,
     ShortInterest,
+    SymbolContinuityMapping,
     UniverseConfigSnapshot,
     Watchlist,
     WatchlistMember,
@@ -46,6 +47,7 @@ from signalforge.db.models.research import (
     BacktestRun,
     BacktestTrade,
     Candidate,
+    DataSnapshot,
     ScanRun,
     Strategy,
     StrategyHealth,
@@ -94,6 +96,7 @@ __all__ = [
     "DataFeedStatus",
     "DataQualityFlagRow",
     "ReconciliationCheck",
+    "SymbolContinuityMapping",
     # research
     "Strategy",
     "StrategyVersion",
@@ -104,6 +107,7 @@ __all__ = [
     "BacktestMetric",
     "WalkforwardWindow",
     "StrategyHealth",
+    "DataSnapshot",
     "StrategySealedTest",
     "StrategyPromotionEvaluation",
     # paper

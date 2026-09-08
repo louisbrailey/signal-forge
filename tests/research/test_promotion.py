@@ -16,6 +16,7 @@ from signalforge.data.ingest import ingest_universe
 from signalforge.data.series import PriceSeries
 from signalforge.db.models import (
     AuditLog,
+    DataSnapshot,
     Strategy,
     StrategyPromotionEvaluation,
     StrategySealedTest,
@@ -28,6 +29,7 @@ from signalforge.research.promotion import (
     _benchmark_metrics,
     _sensitivity_plan,
     evaluate_promotion,
+    get_or_create_dataset_snapshot,
 )
 from signalforge.research.strategies import (
     IntradayORB,
@@ -395,3 +397,114 @@ def test_sealed_window_is_pinned_across_a_later_reevaluation(session: Session) -
     gate1_r2 = next(g for g in r2.gates if g.number == 1)
     last_fold_end_r2 = date.fromisoformat(gate1_r2.evidence["folds"][-1]["end"])
     assert last_fold_end_r2 < sealed1.window_start  # gates 1-8 never crept into the locked window
+
+
+# ---- dataset snapshots: a changed universe is new data, never a silent overwrite --------
+def test_get_or_create_dataset_snapshot_reuses_by_exact_key(session: Session) -> None:
+    a = get_or_create_dataset_snapshot(session, key="my_variant", symbols=UNIVERSE)
+    b = get_or_create_dataset_snapshot(session, key="my_variant", symbols=UNIVERSE)
+    assert a.id == b.id
+    assert b.symbols_json == UNIVERSE
+
+
+def test_get_or_create_dataset_snapshot_refuses_a_key_reused_with_different_symbols(
+    session: Session,
+) -> None:
+    """Regression test: a keyed snapshot's contents are immutable — silently
+    reusing an existing key for a genuinely different symbol set would
+    misrepresent every future evaluation's provenance."""
+    get_or_create_dataset_snapshot(session, key="my_variant", symbols=UNIVERSE)
+    with pytest.raises(ValueError, match="different data"):
+        get_or_create_dataset_snapshot(session, key="my_variant", symbols=["SPY"])
+
+
+def test_get_or_create_dataset_snapshot_unkeyed_fallback_ignores_non_reusable_rows(
+    session: Session,
+) -> None:
+    """Regression test: an audit-history snapshot marked
+    reusable_by_new_evaluations=False (e.g. a migration-backfilled legacy
+    row) must never be silently re-attached to by a new, unkeyed evaluation
+    that happens to share its symbol set."""
+    legacy = DataSnapshot(
+        key="some_legacy_row",
+        symbols_json=UNIVERSE,
+        description="never reused by new evaluations",
+        reusable_by_new_evaluations=False,
+    )
+    session.add(legacy)
+    session.flush()
+
+    resolved = get_or_create_dataset_snapshot(session, symbols=UNIVERSE)
+    assert resolved.id != legacy.id  # a NEW snapshot was created, not the legacy one reused
+
+
+def test_get_or_create_dataset_snapshot_reuses_by_matching_symbol_set(session: Session) -> None:
+    a = get_or_create_dataset_snapshot(session, symbols=["AAPL", "SPY"])
+    b = get_or_create_dataset_snapshot(
+        session, symbols=["SPY", "AAPL"]
+    )  # same set, different order
+    assert a.id == b.id
+
+
+def test_get_or_create_dataset_snapshot_creates_a_new_row_for_a_different_universe(
+    session: Session,
+) -> None:
+    n0 = session.scalar(select(func.count()).select_from(DataSnapshot))
+    a = get_or_create_dataset_snapshot(session, symbols=["AAPL", "SPY"])
+    b = get_or_create_dataset_snapshot(session, symbols=["AAPL", "SPY", "MSFT"])
+    assert a.id != b.id
+    n = session.scalar(select(func.count()).select_from(DataSnapshot))
+    assert n == n0 + 2
+
+
+def test_two_dataset_snapshots_get_independent_sealed_tests(session: Session) -> None:
+    """The core dataset-snapshot guarantee: evaluating the SAME strategy
+    version against two DIFFERENT dataset snapshots must never reuse — or be
+    blocked by — the other snapshot's locked sealed test."""
+    _seed(session)
+    cfg = _permissive_config(session)
+    strat = MeanReversion()
+
+    snap_a = get_or_create_dataset_snapshot(session, key="variant_a", symbols=UNIVERSE)
+    snap_b = get_or_create_dataset_snapshot(
+        session, key="variant_b", symbols=list(reversed(UNIVERSE))
+    )
+
+    r_a = evaluate_promotion(
+        session, strat, symbols=UNIVERSE, start=START, end=END, config=cfg, dataset_snapshot=snap_a
+    )
+    r_b = evaluate_promotion(
+        session, strat, symbols=UNIVERSE, start=START, end=END, config=cfg, dataset_snapshot=snap_b
+    )
+
+    assert r_a.dataset_snapshot_id == snap_a.id
+    assert r_b.dataset_snapshot_id == snap_b.id
+    assert r_a.sealed_test_id != r_b.sealed_test_id  # independently sealed, not shared/reused
+
+    n_sealed = session.scalar(
+        select(func.count())
+        .select_from(StrategySealedTest)
+        .where(StrategySealedTest.strategy_version_id == r_a.strategy_version_id)
+    )
+    assert n_sealed == 2  # one per dataset snapshot, neither overwrote the other
+
+    # re-evaluating variant_a again must reuse ITS OWN sealed test, not variant_b's
+    r_a2 = evaluate_promotion(
+        session, strat, symbols=UNIVERSE, start=START, end=END, config=cfg, dataset_snapshot=snap_a
+    )
+    assert r_a2.sealed_test_id == r_a.sealed_test_id
+
+
+def test_evaluate_promotion_without_a_dataset_snapshot_resolves_one_automatically(
+    session: Session,
+) -> None:
+    """The common case: omitting dataset_snapshot must not error, and must
+    transparently resolve/reuse a snapshot matching the given symbols."""
+    _seed(session)
+    cfg = _permissive_config(session)
+    result = evaluate_promotion(
+        session, MeanReversion(), symbols=UNIVERSE, start=START, end=END, config=cfg
+    )
+    assert result.dataset_snapshot_id is not None
+    snap = session.get(DataSnapshot, result.dataset_snapshot_id)
+    assert sorted(snap.symbols_json) == sorted(UNIVERSE)

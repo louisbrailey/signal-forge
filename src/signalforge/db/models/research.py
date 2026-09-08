@@ -211,19 +211,52 @@ class StrategyHealth(Base, IntPK, CreatedAt):
     evaluated_at: Mapped[datetime] = mapped_column(UTCDateTime)
 
 
+class DataSnapshot(Base, IntPK, CreatedAt):
+    """An immutable, named definition of exactly which symbols — and, for a
+    corrected/replaced symbol, which underlying derived instrument — a
+    promotion evaluation used. Changing the universe (excluding a symbol,
+    substituting a corrected continuous series) is a NEW data snapshot, never
+    an edit to an existing one: ``StrategySealedTest`` is unique per
+    ``(strategy_version_id, dataset_snapshot_id)``, not per strategy version
+    alone, so switching snapshots can never reuse — or silently overwrite —
+    another snapshot's sealed final test."""
+
+    __tablename__ = "data_snapshot"
+    __table_args__ = (UniqueConstraint("key"),)
+
+    key: Mapped[str] = mapped_column(String(64))  # e.g. "universe_25_baseline"
+    symbols_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    description: Mapped[str] = mapped_column(Text, default="")
+    source_note: Mapped[str] = mapped_column(Text, default="")
+    continuity_mapping_id: Mapped[int | None] = mapped_column(
+        ForeignKey("symbol_continuity_mapping.id", ondelete="SET NULL"), default=None
+    )
+    # False only for audit-history rows a migration backfills to label data
+    # that predates dataset snapshots (e.g. "universe_25_baseline_legacy") —
+    # excluded from get_or_create_dataset_snapshot's unkeyed symbol-match
+    # fallback so a new evaluation can never silently re-attach to a row
+    # whose own description promises it will never be reused.
+    reusable_by_new_evaluations: Mapped[bool] = mapped_column(default=True)
+
+
 class StrategySealedTest(Base, IntPK, CreatedAt):
     """The one-time, immutable sealed final out-of-sample evaluation for a
-    strategy *version* (promotion gate 9). At most one row per
-    ``strategy_version_id`` — enforced by the unique constraint *and* by
-    ``research.promotion``, which reads an existing row rather than ever
-    recomputing or overwriting one. A different result requires cutting a new,
-    genuinely different strategy version — never re-sealing this one."""
+    strategy *version* on one *dataset snapshot* (promotion gate 9). At most
+    one row per ``(strategy_version_id, dataset_snapshot_id)`` — enforced by
+    the unique constraint *and* by ``research.promotion``, which reads an
+    existing row rather than ever recomputing or overwriting one. A different
+    result requires either a genuinely different strategy version or a
+    genuinely different, separately-identified dataset snapshot — never
+    re-sealing this exact (version, dataset) pair."""
 
     __tablename__ = "strategy_sealed_test"
-    __table_args__ = (UniqueConstraint("strategy_version_id"),)
+    __table_args__ = (UniqueConstraint("strategy_version_id", "dataset_snapshot_id"),)
 
     strategy_version_id: Mapped[int] = mapped_column(
         ForeignKey("strategy_version.id", ondelete="CASCADE")
+    )
+    dataset_snapshot_id: Mapped[int] = mapped_column(
+        ForeignKey("data_snapshot.id", ondelete="CASCADE")
     )
     window_start: Mapped[date] = mapped_column()
     window_end: Mapped[date] = mapped_column()
@@ -249,6 +282,9 @@ class StrategyPromotionEvaluation(Base, IntPK, CreatedAt):
 
     strategy_version_id: Mapped[int] = mapped_column(
         ForeignKey("strategy_version.id", ondelete="CASCADE"), index=True
+    )
+    dataset_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("data_snapshot.id", ondelete="SET NULL"), default=None, index=True
     )
     evaluated_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
     config_hash: Mapped[str] = mapped_column(String(64))

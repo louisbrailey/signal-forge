@@ -61,10 +61,12 @@ from signalforge.backtest.costs import CostModel
 from signalforge.backtest.leakage import LookaheadDetected, assert_no_lookahead
 from signalforge.backtest.regime import TREND_LOOKBACK, label_regimes
 from signalforge.config.research import PromotionThresholds, ResearchConfig
+from signalforge.data.repository import SourceFilter
 from signalforge.data.series import PriceSeries
 from signalforge.data.validate import validate_daily
 from signalforge.db.models import (
     AuditLog,
+    DataSnapshot,
     Strategy,
     StrategyPromotionEvaluation,
     StrategySealedTest,
@@ -130,6 +132,7 @@ class PromotionResult:
     passed: bool
     verdict: str
     sealed_test_id: int | None
+    dataset_snapshot_id: int | None = None
     already_approved_via_pipeline: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -148,6 +151,7 @@ class PromotionResult:
             "passed": self.passed,
             "verdict": self.verdict,
             "sealed_test_id": self.sealed_test_id,
+            "dataset_snapshot_id": self.dataset_snapshot_id,
         }
 
 
@@ -243,7 +247,7 @@ def _benchmark_metrics(proxy: PriceSeries, lo: date, hi: date) -> dict[str, floa
 
 
 def _leakage_self_check(
-    session: Session, symbol: str, start: date, end: date, source: str | None
+    session: Session, symbol: str, start: date, end: date, source: SourceFilter
 ) -> str | None:
     """Re-verify the shared daily feature functions are look-ahead-free against
     real data for this window. Returns an error string, or ``None`` if clean."""
@@ -265,6 +269,86 @@ def _leakage_self_check(
 
 
 # --------------------------------------------------------------------------- #
+# dataset snapshots — a changed universe is new data, not an edit
+# --------------------------------------------------------------------------- #
+def _symbols_fingerprint(symbols: list[str]) -> str:
+    import hashlib
+
+    return hashlib.sha256(",".join(sorted(s.upper() for s in symbols)).encode()).hexdigest()[:10]
+
+
+def get_or_create_dataset_snapshot(
+    session: Session,
+    *,
+    key: str | None = None,
+    symbols: list[str],
+    description: str = "",
+    source_note: str = "",
+    continuity_mapping_id: int | None = None,
+) -> DataSnapshot:
+    """Resolve the dataset snapshot a promotion evaluation is about to use.
+
+    Looked up by exact ``key`` when given (the CLI/report layer names its
+    three FB/META comparison variants explicitly this way); otherwise by an
+    exact match on the symbol set among snapshots marked
+    ``reusable_by_new_evaluations`` — so a caller that doesn't care about
+    dataset versioning (existing tests, the plain CLI default) transparently
+    reuses whatever snapshot already covers that exact universe, while never
+    silently re-attaching to an audit-history row like
+    ``universe_25_baseline_legacy`` (a migration backfill, marked
+    non-reusable) whose own description promises it will never be reused.
+
+    A ``key`` hit whose stored ``symbols_json`` (or ``continuity_mapping_id``,
+    when given) no longer matches what was just requested raises
+    ``ValueError`` rather than silently reusing stale data — a
+    ``DataSnapshot`` is immutable once created (per its own contract), so a
+    genuinely changed universe or superseding continuity mapping needs a new,
+    distinct key, not a quiet reinterpretation of an existing one.
+
+    Creates a new, immutable snapshot only when neither lookup finds one.
+    """
+    if key is not None:
+        existing = session.scalar(select(DataSnapshot).where(DataSnapshot.key == key))
+        if existing is not None:
+            wanted = sorted(s.upper() for s in symbols)
+            have = sorted(x.upper() for x in existing.symbols_json)
+            mapping_mismatch = (
+                continuity_mapping_id is not None
+                and existing.continuity_mapping_id is not None
+                and existing.continuity_mapping_id != continuity_mapping_id
+            )
+            if wanted != have or mapping_mismatch:
+                raise ValueError(
+                    f"dataset snapshot key {key!r} already exists (id={existing.id}) with "
+                    f"different data than just requested — existing symbols={have}, requested="
+                    f"{wanted}; existing continuity_mapping_id={existing.continuity_mapping_id}, "
+                    f"requested={continuity_mapping_id}. A DataSnapshot's contents are immutable "
+                    "once created — reusing this key for genuinely different data would "
+                    "silently misrepresent every future evaluation's provenance. Use a new, "
+                    "distinct key for the changed data."
+                )
+            return existing
+    else:
+        wanted = sorted(s.upper() for s in symbols)
+        for row in session.scalars(
+            select(DataSnapshot).where(DataSnapshot.reusable_by_new_evaluations.is_(True))
+        ):
+            if sorted(x.upper() for x in row.symbols_json) == wanted:
+                return row
+    snap = DataSnapshot(
+        key=key or f"universe_auto_{len(symbols)}sym_{_symbols_fingerprint(symbols)}",
+        symbols_json=list(symbols),
+        description=description,
+        source_note=source_note,
+        continuity_mapping_id=continuity_mapping_id,
+    )
+    session.add(snap)
+    session.flush()
+    _log.info("promotion.dataset_snapshot_created", key=snap.key, n_symbols=len(symbols))
+    return snap
+
+
+# --------------------------------------------------------------------------- #
 # gate 9 — sealed test, computed once, reused forever
 # --------------------------------------------------------------------------- #
 def _get_or_create_sealed_test(
@@ -276,14 +360,25 @@ def _get_or_create_sealed_test(
     sealed_start: date,
     end: date,
     proxy_symbol: str,
-    source: str | None,
+    source: SourceFilter,
     cost_model: CostModel,
     th: PromotionThresholds,
+    dataset_snapshot_id: int,
 ) -> tuple[StrategySealedTest, bool]:
     """Returns ``(row, reused)`` — ``reused=True`` means an existing locked row
-    was returned as-is; nothing was recomputed."""
+    was returned as-is; nothing was recomputed.
+
+    Keyed on ``(strategy_version_id, dataset_snapshot_id)``, not on the
+    strategy version alone: evaluating the identical version against a
+    DIFFERENT dataset snapshot (a corrected symbol series, a narrowed
+    universe) is guaranteed a fresh sealed test rather than silently reusing
+    — or being blocked by — a prior snapshot's locked result.
+    """
     existing = session.scalar(
-        select(StrategySealedTest).where(StrategySealedTest.strategy_version_id == version.id)
+        select(StrategySealedTest).where(
+            StrategySealedTest.strategy_version_id == version.id,
+            StrategySealedTest.dataset_snapshot_id == dataset_snapshot_id,
+        )
     )
     if existing is not None:
         return existing, True  # locked — never recomputed, never overwritten
@@ -311,6 +406,7 @@ def _get_or_create_sealed_test(
     )
     row = StrategySealedTest(
         strategy_version_id=version.id,
+        dataset_snapshot_id=dataset_snapshot_id,
         window_start=sealed_start,
         window_end=end,
         universe_json=list(symbols),
@@ -330,12 +426,15 @@ def _get_or_create_sealed_test(
             session.add(row)
             session.flush()
     except IntegrityError:
-        # a concurrent evaluate_promotion() for the same version won the race
-        # and committed its own sealed test first — discard this compute and
-        # reuse the winner, rather than raising or (worse) ending up with two
-        # sealed tests for one version.
+        # a concurrent evaluate_promotion() for the same (version, dataset)
+        # won the race and committed its own sealed test first — discard this
+        # compute and reuse the winner, rather than raising or (worse) ending
+        # up with two sealed tests for one (version, dataset) pair.
         winner = session.scalar(
-            select(StrategySealedTest).where(StrategySealedTest.strategy_version_id == version.id)
+            select(StrategySealedTest).where(
+                StrategySealedTest.strategy_version_id == version.id,
+                StrategySealedTest.dataset_snapshot_id == dataset_snapshot_id,
+            )
         )
         if winner is not None:
             return winner, True
@@ -361,14 +460,35 @@ def evaluate_promotion(
     start: date,
     end: date,
     proxy_symbol: str = "SPY",
-    source: str | None = None,
+    source: SourceFilter = None,
     config: ResearchConfig | None = None,
+    dataset_snapshot: DataSnapshot | None = None,
 ) -> PromotionResult:
     """Run every gate for one strategy version and record the result.
 
     Flips ``Strategy``/``StrategyVersion`` status to ``PAPER_APPROVED`` only
     when every gate passes. Never downgrades — that stays the health monitor's
     and a human's job. Every call persists a new, immutable evaluation row.
+
+    ``source`` filters which ``OHLCVDaily`` rows count as this run's data — a
+    plain string (the usual case) for a single provider, or a sequence of
+    strings when a dataset legitimately mixes sources for different symbols
+    (e.g. one symbol's bars come from a verified symbol-continuity bridge
+    tagged distinctly from the rest of the universe's raw provider tag).
+    Gate 8's ``validate_daily`` check always evaluates against only the
+    FIRST entry (the real provider) regardless — a bridge tag is deliberately
+    never treated as equivalent to raw single-provider data for that specific
+    check, even though gates 1-7/9 do see and trade its bars.
+
+    ``dataset_snapshot`` identifies exactly which data this call used (see
+    ``DataSnapshot``). Omit it for the common case (an existing, unversioned
+    universe) — it is resolved automatically from ``symbols``, transparently
+    reusing whatever snapshot already covers that exact symbol set. Pass one
+    explicitly to run a deliberate, separately-identified comparison (e.g. a
+    24-symbol universe excluding a symbol with an unresolved data-quality
+    finding, or a corrected continuous series after a verified symbol-
+    continuity mapping) — gate 9's sealed test is then keyed to THIS snapshot
+    and can never reuse, or be blocked by, a different snapshot's result.
     """
     if config is None:
         from signalforge.settings_store import effective_research_config
@@ -381,6 +501,8 @@ def evaluate_promotion(
         slippage_bps=config.slippage_bps,
         half_spread_fill_penalty=config.half_spread_fill_penalty,
     )
+    if dataset_snapshot is None:
+        dataset_snapshot = get_or_create_dataset_snapshot(session, symbols=symbols)
 
     spec = strategy.spec()
     version = upsert_strategy_version(session, spec)
@@ -397,7 +519,19 @@ def evaluate_promotion(
                 "(not a fabricated pass on absent data)",
             )
         )
-        return _finalize(session, strategy, version, config, symbols, start, end, gates, None, {})
+        return _finalize(
+            session,
+            strategy,
+            version,
+            config,
+            symbols,
+            start,
+            end,
+            gates,
+            None,
+            {},
+            dataset_snapshot.id,
+        )
 
     # Pin the sealed window to any already-locked sealed test for this exact
     # strategy version. Without this, re-evaluating the same version after
@@ -407,7 +541,10 @@ def evaluate_promotion(
     # days that are already part of the FIRST, locked sealed test. Pinning
     # keeps the two windows permanently disjoint after the first evaluation.
     existing_sealed = session.scalar(
-        select(StrategySealedTest).where(StrategySealedTest.strategy_version_id == version.id)
+        select(StrategySealedTest).where(
+            StrategySealedTest.strategy_version_id == version.id,
+            StrategySealedTest.dataset_snapshot_id == dataset_snapshot.id,
+        )
     )
     sealed_start = (
         existing_sealed.window_start
@@ -431,7 +568,19 @@ def evaluate_promotion(
                 f"the {th.sealed_window_days}-day sealed test begins",
             )
         )
-        return _finalize(session, strategy, version, config, symbols, start, end, gates, None, {})
+        return _finalize(
+            session,
+            strategy,
+            version,
+            config,
+            symbols,
+            start,
+            end,
+            gates,
+            None,
+            {},
+            dataset_snapshot.id,
+        )
 
     # ---- shared evidence over the PRE-SEALED span (gates 1-8) -------------
     full = run_strategy_over_universe(
@@ -451,6 +600,7 @@ def evaluate_promotion(
         "bars": full.data.bars,
         "coverage": f"{full.data.first}..{full.data.last}",
         "costs": full.costs_label,
+        "dataset_snapshot": {"id": dataset_snapshot.id, "key": dataset_snapshot.key},
     }
 
     # Gate 1: rolling walk-forward folds over the pre-sealed span. A fold only
@@ -644,8 +794,17 @@ def evaluate_promotion(
         )
     )
 
-    # Gate 8: data-quality + leakage.
-    provider = source or "unknown"
+    # Gate 8: data-quality + leakage. Deliberately checks ONLY the real
+    # provider tag (the first entry when `source` is a sequence) — a
+    # symbol-continuity bridge tag is never treated as equivalent to raw
+    # single-provider data for this specific check, even though gates 1-7/9
+    # do load and trade its bars via the full `source` filter above.
+    if isinstance(source, str):
+        provider = source
+    elif source:
+        provider = source[0]
+    else:
+        provider = "unknown"
     validation = validate_daily(session, symbols, source=provider, persist=True)
     leak_err = _leakage_self_check(session, proxy_symbol, start, pre_sealed_end, source)
     gate8_pass = bool(
@@ -687,6 +846,7 @@ def evaluate_promotion(
         source=source,
         cost_model=cost_model,
         th=th,
+        dataset_snapshot_id=dataset_snapshot.id,
     )
     seal_note = "reused, locked on a prior evaluation" if sealed_reused else "evaluated now, locked"
     gates.append(
@@ -701,6 +861,7 @@ def evaluate_promotion(
                 "window": f"{sealed_row.window_start}..{sealed_row.window_end}",
                 "metrics": sealed_row.metrics_json,
                 "benchmark": sealed_row.benchmark_metrics_json,
+                "dataset_snapshot": {"id": dataset_snapshot.id, "key": dataset_snapshot.key},
             },
         )
     )
@@ -740,6 +901,7 @@ def evaluate_promotion(
         gates,
         sealed_row.id,
         data_provenance,
+        dataset_snapshot.id,
     )
 
 
@@ -754,6 +916,7 @@ def _finalize(
     gates: list[Gate],
     sealed_test_id: int | None,
     data_provenance: dict[str, Any],
+    dataset_snapshot_id: int | None = None,
 ) -> PromotionResult:
     spec = strategy.spec()
     passed = bool(gates) and all(g.passed for g in gates)
@@ -762,6 +925,7 @@ def _finalize(
 
     row = StrategyPromotionEvaluation(
         strategy_version_id=version.id,
+        dataset_snapshot_id=dataset_snapshot_id,
         evaluated_at=now,
         config_hash=config.config_hash,
         git_sha=spec.git_sha,
@@ -835,6 +999,7 @@ def _finalize(
         passed=passed,
         verdict=verdict,
         sealed_test_id=sealed_test_id,
+        dataset_snapshot_id=dataset_snapshot_id,
     )
 
 
@@ -844,11 +1009,16 @@ def evaluate_all_default_strategies(
     symbols: list[str] | None = None,
     start: date | None = None,
     end: date | None = None,
-    source: str | None = None,
+    source: SourceFilter = None,
     config: ResearchConfig | None = None,
+    dataset_snapshot: DataSnapshot | None = None,
 ) -> list[PromotionResult]:
     """Evaluate every default strategy. Convenience wrapper for the CLI and the
-    Strategy Promotion dashboard page's "run now" action."""
+    Strategy Promotion dashboard page's "run now" action.
+
+    ``dataset_snapshot``, when given, is used for every strategy — the
+    mechanism the FB/META dataset-comparison report uses to run the full
+    default set once per named universe variant."""
     from datetime import date as _date
 
     from signalforge.research.strategies import default_strategies
@@ -863,7 +1033,14 @@ def evaluate_all_default_strategies(
     for strat in default_strategies():
         results.append(
             evaluate_promotion(
-                session, strat, symbols=syms, start=start, end=end, source=source, config=cfg
+                session,
+                strat,
+                symbols=syms,
+                start=start,
+                end=end,
+                source=source,
+                config=cfg,
+                dataset_snapshot=dataset_snapshot,
             )
         )
     return results

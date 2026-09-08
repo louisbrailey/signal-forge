@@ -156,6 +156,45 @@ class CorporateAction(Base, IntPK, CreatedAt):
     source: Mapped[str] = mapped_column(String(40))
 
 
+class SymbolContinuityMapping(Base, IntPK, CreatedAt):
+    """An explicit, versioned, auditable bridge from one symbol's price
+    history to a successor symbol across a corporate action (ticker and/or
+    name change) — e.g. FB -> META on 2022-06-09.
+
+    Immutable once created: correcting or re-running validation NEVER edits
+    an existing row — it inserts a new ``version`` for the same
+    ``(old_symbol, new_symbol)`` pair, so every past evaluation stays
+    traceable to the exact mapping (and its exact evidence) it used.
+
+    A mapping by itself is *not* permission to blend two symbols' data. It
+    only records what was found; ``data.symbol_continuity`` will materialize
+    a derived, separately-labelled instrument (``derived_symbol``) from it
+    *only* when ``validation_status == 'verified'``. The raw ``old_symbol``/
+    ``new_symbol`` instruments and their already-ingested bars are never
+    mutated by this mechanism."""
+
+    __tablename__ = "symbol_continuity_mapping"
+    __table_args__ = (UniqueConstraint("old_symbol", "new_symbol", "version"),)
+
+    old_symbol: Mapped[str] = mapped_column(String(16), index=True)
+    new_symbol: Mapped[str] = mapped_column(String(16), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    corporate_action_type: Mapped[str] = mapped_column(String(32))  # e.g. "ticker_and_name_change"
+    effective_date: Mapped[date] = mapped_column()  # first session new_symbol is authoritative
+    last_old_session: Mapped[date] = mapped_column()  # last verified session old_symbol traded
+    ratio: Mapped[float] = mapped_column(Float, default=1.0)  # split/reverse-split ratio, if any
+    source: Mapped[str] = mapped_column(String(40))  # data provider both legs were fetched from
+    adjustment_status: Mapped[str] = mapped_column(String(80))  # human-readable treatment summary
+    # verified | failed | unverified — only "verified" may ever be materialized
+    validation_status: Mapped[str] = mapped_column(String(16), default="unverified")
+    validation_evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    derived_symbol: Mapped[str] = mapped_column(
+        String(16), default=""
+    )  # materialized bridge, if any
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String(40), default="")
+
+
 class EarningsEvent(Base, IntPK, CreatedAt):
     __tablename__ = "earnings_event"
     __table_args__ = (UniqueConstraint("instrument_id", "scheduled_for", "source"),)
