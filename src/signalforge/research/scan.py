@@ -88,6 +88,8 @@ class ScanResult:
     finished_at: str
     config_hash: str
     universe: list[str]
+    source: str = ""
+    dataset_snapshot_id: int | None = None
     scanned: list[str] = field(default_factory=list)
     excluded: dict[str, list[str]] = field(default_factory=dict)
     no_trade: list[dict[str, str]] = field(default_factory=list)
@@ -152,12 +154,22 @@ def run_scan(
         cfg = effective_research_config(session)
     universe = list(symbols) if symbols is not None else list(cfg.universe)
     started = utcnow()
+    # Record the EXACT scope this scan used -- resolving/reusing a DataSnapshot
+    # (the same mechanism research.promotion uses) is what lets a candidate's
+    # provenance later be compared against a strategy's approved scope
+    # (research.approval_scope), not just its status.
+    from signalforge.research.promotion import get_or_create_dataset_snapshot
+
+    resolved_source = source or ""
+    snapshot = get_or_create_dataset_snapshot(session, symbols=universe) if universe else None
     result = ScanResult(
         horizon=horizon,
         started_at=started.isoformat(),
         finished_at=started.isoformat(),
         config_hash=cfg.config_hash,
         universe=universe,
+        source=resolved_source,
+        dataset_snapshot_id=snapshot.id if snapshot is not None else None,
     )
 
     strategies = _strategies_for(horizon)

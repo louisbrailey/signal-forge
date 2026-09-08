@@ -69,6 +69,12 @@ class PlannedAlert:
     body: str
     overnight_ok: bool = False
     payload: dict[str, Any] = field(default_factory=dict)
+    # Set only for a candidate whose originating scan does not match the
+    # strategy's approved dataset scope (research.approval_scope). Checked
+    # BEFORE quiet-hours/cap suppression in run_alert_cycle so the exact,
+    # required reason is what gets logged -- this is a hard block, never a
+    # scheduling deferral like the other suppression reasons.
+    force_suppress_reason: str | None = None
 
 
 @dataclass
@@ -222,7 +228,12 @@ def plan_alerts(session: Session, now: datetime) -> list[PlannedAlert]:
             )
         )
 
-    # --- candidate alerts: paper_approved strategy + PASSED + latest scan ---
+    # --- candidate alerts: paper_approved strategy + PASSED + latest scan,
+    # gated further by an explicit paper_probation_enabled flag and by an
+    # exact dataset-scope match (research.approval_scope) -- Strategy.status
+    # alone says a strategy passed promotion on SOME dataset; it says nothing
+    # about whether THIS scan used that exact dataset.
+    probation_enabled = bool(get_setting(session, "paper_probation_enabled", False))
     cfg = effective_research_config(session)
     for h in cfg.enabled_horizons:
         if h is Horizon.INTRADAY:
@@ -245,6 +256,29 @@ def plan_alerts(session: Session, now: datetime) -> list[PlannedAlert]:
             .order_by(Candidate.rank_in_horizon)
         )
         for cand, inst, strat_name, _status, version in session.execute(stmt):
+            scope_reason: str | None = None
+            if not probation_enabled:
+                scope_reason = (
+                    "paper_probation_enabled is off — see approval_scope for how to enable it"
+                )
+            else:
+                from signalforge.research.approval_scope import (
+                    NO_TRADE_SCOPE_MISMATCH,
+                    approved_scopes,
+                    current_spec_json_hash,
+                    scan_scope_matches,
+                )
+
+                live_hash = current_spec_json_hash(session, cand.strategy_version_id)
+                in_scope = live_hash is not None and scan_scope_matches(
+                    approved_scopes(session, cand.strategy_version_id),
+                    dataset_snapshot_id=run.dataset_snapshot_id,
+                    config_hash=run.config_hash,
+                    spec_json_hash=live_hash,
+                    source=run.source,
+                )
+                if not in_scope:
+                    scope_reason = NO_TRADE_SCOPE_MISMATCH
             c = {
                 "id": cand.id,
                 "symbol": inst.symbol,
@@ -274,6 +308,7 @@ def plan_alerts(session: Session, now: datetime) -> list[PlannedAlert]:
                     dedupe_key=f"cand:{cand.id}:{run.started_at.date()}",
                     subject=subj,
                     body=body,
+                    force_suppress_reason=scope_reason,
                     payload={"candidate_id": cand.id},
                 )
             )
@@ -307,7 +342,9 @@ def run_alert_cycle(session: Session, now: datetime | None = None) -> AlertCycle
         if _already_logged(session, pa.dedupe_key):
             continue
         reason: str | None = None
-        if quiet and not pa.overnight_ok:
+        if pa.force_suppress_reason:
+            reason = pa.force_suppress_reason
+        elif quiet and not pa.overnight_ok:
             reason = "quiet hours"
         elif (
             pa.alert_type is AlertType.CANDIDATE

@@ -107,6 +107,7 @@ PAGES = [
     "/portfolio",
     "/strategies",
     "/strategies/promotion",
+    "/paper-probation",
     "/journal",
     "/options",
     "/news",

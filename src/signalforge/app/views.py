@@ -510,6 +510,12 @@ def news_context(session: Session, *, symbol: str | None = None, limit: int = 40
         select(_EC).where(_EC.feed == "benzinga_news").order_by(_EC.checked_at.desc()).limit(1)
     )
     benz_ok = bool(benz and benz.available)
+    # The verifier distinguishes "not authenticated/entitled" from "authenticated
+    # but the feed has stopped delivering fresh Benzinga content" — the latter
+    # writes a detail string starting with "STALE" (signalforge.data.entitlements
+    # ._benzinga_news_check). Surface that as its own state: the API key IS
+    # subscribed, the provider just isn't delivering current Benzinga articles.
+    benz_stale = bool(benz and not benz.available and (benz.detail or "").startswith("STALE"))
     if benz is None:
         benz_limitation = "not yet verified — run `signalforge providers verify`"
     elif benz.available:
@@ -521,18 +527,32 @@ def news_context(session: Session, *, symbol: str | None = None, limit: int = 40
         benz_limitation = benz.detail or (
             f"{_http}{benz.error_category} on {benz.endpoint} — Benzinga not entitled on this key"
         )
+
+    all_items = _news_items(session, symbol, limit)
+    # Keep Benzinga-labelled articles visually and structurally separate from
+    # every other licensed publisher — never blend a stale, un-refreshed feed
+    # into "current" generic news.
+    benzinga_items = [n for n in all_items if (n["publisher"] or "").strip().lower() == "benzinga"]
+    generic_items = [n for n in all_items if (n["publisher"] or "").strip().lower() != "benzinga"]
+
+    if benz_ok:
+        source_label = "Benzinga News (licensed primary) + other licensed publishers"
+    elif benz_stale:
+        source_label = "Licensed multi-publisher feed (Benzinga content is STALE on this key)"
+    else:
+        source_label = "Licensed multi-publisher feed (Benzinga not currently entitled on this key)"
+
     return {
-        "news_items": _news_items(session, symbol, limit),
+        "news_items": all_items,
+        "benzinga_items": benzinga_items,
+        "generic_items": generic_items,
         "news_symbol": symbol,
         "benzinga_available": benz_ok,
+        "benzinga_stale": benz_stale,
         "benzinga_limitation": benz_limitation,
         "benzinga_note": (benz.detail if benz else ""),  # verifier's verbatim finding, either state
         "benzinga_checked_at": benz.checked_at.isoformat() if benz else None,
-        "news_source_label": (
-            "Benzinga News (licensed primary) + other licensed publishers"
-            if benz_ok
-            else "Licensed multi-publisher feed (Benzinga not currently entitled on this key)"
-        ),
+        "news_source_label": source_label,
     }
 
 
@@ -663,6 +683,19 @@ def strategy_promotion_context(session: Session) -> dict[str, Any]:
             "at least one strategy is PAPER_APPROVED" if any_approved else VERDICT_NO_TRADE
         ),
     }
+
+
+def paper_probation_context(session: Session) -> dict[str, Any]:
+    """Every PAPER_APPROVED strategy's approved scope, sealed/walk-forward
+    evidence, and real live-paper performance vs. what the promotion
+    pipeline expected — plus whether candidate-trade alerts are currently
+    enabled for the probation."""
+    from signalforge.research.paper_probation import paper_probation_context as _ctx
+
+    ctx = _ctx(session)
+    ctx["paper_probation_enabled"] = bool(get_setting(session, "paper_probation_enabled", False))
+    ctx["alerts_enabled"] = bool(get_setting(session, "alerts_enabled", False))
+    return ctx
 
 
 def settings_context(session: Session) -> dict[str, Any]:

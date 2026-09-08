@@ -77,7 +77,7 @@ from signalforge.domain import Horizon, StrategyStatus
 from signalforge.observability import get_logger
 from signalforge.research.backtest_runner import run_strategy_over_universe
 from signalforge.research.features.daily import atr, realized_vol, rolling_return, sma
-from signalforge.research.persistence import upsert_strategy_version
+from signalforge.research.persistence import spec_json_hash, upsert_strategy_version
 from signalforge.research.portfolio_metrics import compute_portfolio_metrics
 from signalforge.research.sensitivity import run_parameter_sensitivity
 from signalforge.research.strategies.base import BaselineStrategy
@@ -929,6 +929,7 @@ def _finalize(
         evaluated_at=now,
         config_hash=config.config_hash,
         git_sha=spec.git_sha,
+        spec_json_hash=spec_json_hash(spec),
         universe_json=list(symbols),
         window_start=window_start,
         window_end=window_end,

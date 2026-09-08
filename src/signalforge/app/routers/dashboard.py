@@ -22,6 +22,7 @@ from signalforge.app.views import (
     candidate_context,
     journal_context,
     overview_context,
+    paper_probation_context,
     scanner_context,
     settings_context,
     strategies_context,
@@ -126,6 +127,31 @@ def act_run_promotion(db: DbDep) -> RedirectResponse:
     evaluate_all_default_strategies(db)
     record("promotion.run", entity="all_strategies", actor="local-user")
     return RedirectResponse("/strategies/promotion", HTTP_303_SEE_OTHER)
+
+
+@router.get("/paper-probation", response_class=HTMLResponse)
+def paper_probation_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
+    return _page(request, user, "paper_probation.html", paper_probation_context(db))
+
+
+@router.post("/paper-probation/toggle", dependencies=Guard)
+def act_toggle_paper_probation(
+    db: DbDep, enable: Annotated[bool, Form()] = False
+) -> RedirectResponse:
+    """Turns candidate-trade alerts on/off for PAPER_APPROVED strategies —
+    still further gated, per candidate, by an exact dataset-scope match
+    (research.approval_scope). Never touches auto-simulation (stays off) or
+    paper-trade acceptance (stays manual)."""
+    from signalforge.settings_store import set_setting
+
+    set_setting(db, "paper_probation_enabled", enable)
+    record(
+        "paper_probation.toggle",
+        entity="paper_probation_enabled",
+        actor="local-user",
+        after=enable,
+    )
+    return RedirectResponse("/paper-probation", HTTP_303_SEE_OTHER)
 
 
 @router.get("/journal", response_class=HTMLResponse)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict
 
 from sqlalchemy import select
@@ -15,6 +17,30 @@ from signalforge.db.models import (
 )
 from signalforge.research.backtest_runner import StrategyBacktestResult
 from signalforge.research.registry import StrategySpec
+
+# Fields excluded from spec_json_hash: git_sha changes on every commit to the
+# repo (unrelated strategies included), so hashing it would falsely invalidate
+# an approval scope on any unrelated commit; status/notes carry no executable
+# meaning. Every OTHER field (rule_definition, feature_definitions,
+# entry/exit/stop logic, time_stop, ...) embeds the strategy's live numeric
+# parameters via string interpolation (see e.g. TrendContinuation.spec()), so
+# hashing them genuinely detects a parameter change even when the version
+# string wasn't bumped.
+_HASH_EXCLUDED_SPEC_FIELDS = frozenset({"git_sha", "status", "notes"})
+
+
+def spec_json_hash(spec: StrategySpec) -> str:
+    """sha256 of a strategy spec's parameter-bearing fields — used to detect
+    whether a strategy's actual behavior has drifted since it was approved,
+    independent of the repo-wide git_sha and independent of whether its
+    `version` string was bumped (see research.promotion.approval_scope)."""
+    payload = {
+        k: (list(v) if isinstance(v, tuple) else v)
+        for k, v in asdict(spec).items()
+        if k not in _HASH_EXCLUDED_SPEC_FIELDS
+    }
+    canonical = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def upsert_strategy_version(session: Session, spec: StrategySpec) -> StrategyVersion:

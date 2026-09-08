@@ -66,6 +66,9 @@ def persist_scan(session: Session, result: ScanResult) -> ScanRun:
             for reason, syms in result.excluded.items()
         },
         data_snapshot_ref="",
+        universe_json=list(result.universe),
+        source=result.source,
+        dataset_snapshot_id=result.dataset_snapshot_id,
     )
     session.add(run)
     session.flush()

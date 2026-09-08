@@ -72,7 +72,17 @@ class ScanRun(Base, IntPK):
     candidate_count: Mapped[int] = mapped_column(Integer, default=0)
     # reason -> {"count": int, "symbols": [str]}
     exclusions_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    data_snapshot_ref: Mapped[str] = mapped_column(String(120), default="")
+    data_snapshot_ref: Mapped[str] = mapped_column(String(120), default="")  # legacy, unused
+    # The EXACT symbols and provider this run actually scanned, and the
+    # DataSnapshot they resolve to (via get_or_create_dataset_snapshot, the
+    # same mechanism the promotion pipeline uses) -- lets a candidate's
+    # provenance be compared against the exact scope a strategy was actually
+    # approved for (research.promotion.approval_scope), not just its status.
+    universe_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source: Mapped[str] = mapped_column(String(40), default="")
+    dataset_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("data_snapshot.id", ondelete="SET NULL"), default=None
+    )
 
     candidates: Mapped[list[Candidate]] = relationship(back_populates="scan_run")
 
@@ -289,6 +299,14 @@ class StrategyPromotionEvaluation(Base, IntPK, CreatedAt):
     evaluated_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
     config_hash: Mapped[str] = mapped_column(String(64))
     git_sha: Mapped[str] = mapped_column(String(40), default="")
+    # sha256 of the strategy's own spec()/params at evaluation time -- NOT
+    # git_sha (which changes on every commit to the repo, unrelated strategies
+    # included). upsert_strategy_version refreshes StrategyVersion.spec_json on
+    # every call, so a strategy's live params can drift after approval without
+    # its `version` string changing; comparing this hash against the CURRENT
+    # spec's hash at scan/alert time is what actually catches that (approval
+    # scope's "strategy version" / "changed strategy parameters" match).
+    spec_json_hash: Mapped[str] = mapped_column(String(64), default="")
     universe_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     window_start: Mapped[date] = mapped_column()
     window_end: Mapped[date] = mapped_column()

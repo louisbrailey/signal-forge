@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Paper Probation — Signal Forge{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold text-slate-900">Paper Probation</h1>
+<p class="mt-1 text-sm text-slate-500">
+  Supervised paper-trading evidence for every <code>paper_approved</code> strategy, restricted to its
+  exact approved data snapshot. A candidate is alert-eligible only when its scan's dataset snapshot,
+  universe, data source, and live strategy parameters all exactly match a passing promotion evaluation
+  — anything else is blocked with <code>NO TRADE — approval does not apply to this dataset.</code>
+</p>
+
+<div class="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+  Paper-approved does not mean profitable, and does not mean suitable for live trading. It means a
+  strategy cleared the sealed walk-forward test on one specific historical dataset. Every trade here is
+  simulated — research signal only, no order was ever placed.
+</div>
+
+<section class="mt-4 rounded-lg border border-slate-200 bg-white p-4">
+  <div class="flex flex-wrap items-center justify-between gap-3">
+    <div>
+      <h2 class="text-sm font-semibold text-slate-900">Candidate alerts for approved strategies</h2>
+      <p class="mt-1 text-xs text-slate-500">
+        Global alerts: <span class="font-medium {{ 'text-emerald-700' if alerts_enabled else 'text-slate-500' }}">{{ 'ON' if alerts_enabled else 'OFF' }}</span>
+        &middot; Paper probation: <span class="font-medium {{ 'text-emerald-700' if paper_probation_enabled else 'text-slate-500' }}">{{ 'ON' if paper_probation_enabled else 'OFF' }}</span>
+        — both must be ON, plus the per-candidate dataset-scope match, for an alert to send.
+      </p>
+    </div>
+    <form method="post" action="/paper-probation/toggle">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="enable" value="{{ 'false' if paper_probation_enabled else 'true' }}" />
+      <button class="rounded px-4 py-2 text-sm font-medium text-white {{ 'bg-red-700 hover:bg-red-800' if paper_probation_enabled else 'bg-slate-900 hover:bg-slate-800' }}">
+        {{ 'Disable paper-probation alerts' if paper_probation_enabled else 'Enable paper-probation alerts' }}
+      </button>
+    </form>
+  </div>
+  <p class="mt-2 text-xs text-slate-400">
+    Auto-simulation stays OFF and paper-trade acceptance stays manual regardless of this toggle. The
+    two-alerts-per-day cap, quiet hours, stale-data block, and the mandatory
+    "Research signal only — no order was placed." notice all still apply. Every option alert stays disabled.
+  </p>
+</section>
+
+<div class="mt-6 space-y-6">
+{% for s in strategies %}
+  <section class="rounded-lg border border-slate-200 bg-white p-4">
+    <div class="flex flex-wrap items-baseline justify-between gap-2">
+      <h2 class="text-lg font-semibold text-slate-900">
+        {{ s.strategy_key }} <span class="text-sm font-normal text-slate-500">v{{ s.version }} · {{ s.horizon }}</span>
+      </h2>
+      <span class="rounded bg-emerald-100 px-2 py-1 text-xs font-medium text-emerald-800">paper_approved</span>
+    </div>
+
+    <h3 class="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Approved dataset scope{{ 's' if s.approved_scopes | length != 1 else '' }}</h3>
+    {% if not s.approved_scopes %}
+    <p class="mt-1 text-sm text-amber-700">No passing evaluation scope found — this strategy cannot pass the dataset-scope check for any candidate.</p>
+    {% endif %}
+    {% for scope in s.approved_scopes %}
+    <dl class="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-slate-600 sm:grid-cols-4">
+      <div><dt class="text-slate-400">Dataset snapshot</dt><dd class="font-mono">#{{ scope.dataset_snapshot_id }}</dd></div>
+      <div><dt class="text-slate-400">Sources</dt><dd>{{ scope.sources | join(', ') }}</dd></div>
+      <div><dt class="text-slate-400">Universe</dt><dd>{{ scope.universe_size }} symbols</dd></div>
+      <div><dt class="text-slate-400">config_hash / spec_hash</dt><dd class="font-mono">{{ scope.config_hash[:10] }} / {{ scope.spec_json_hash[:10] }}</dd></div>
+    </dl>
+    <details class="mt-1 text-xs"><summary class="cursor-pointer text-slate-400">exact approved symbols</summary>
+      <p class="mt-1 text-slate-600">{{ scope.universe | join(', ') }}</p>
+    </details>
+    {% endfor %}
+
+    <h3 class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-400">Sealed / walk-forward evidence</h3>
+    {% if s.sealed_test %}
+    <dl class="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-slate-600 sm:grid-cols-4">
+      <div><dt class="text-slate-400">Window</dt><dd>{{ s.sealed_test.window }}</dd></div>
+      <div><dt class="text-slate-400">Trades</dt><dd>{{ s.sealed_test.n_trades }}</dd></div>
+      <div><dt class="text-slate-400">Expectancy (R)</dt><dd>{{ s.sealed_test.expectancy_r }}</dd></div>
+      <div><dt class="text-slate-400">Result</dt><dd>
+        <span class="rounded px-1.5 py-0.5 {{ 'bg-emerald-100 text-emerald-800' if s.sealed_test.passed else 'bg-red-100 text-red-700' }}">
+          {{ 'PASS' if s.sealed_test.passed else 'FAIL' }}
+        </span>
+      </dd></div>
+    </dl>
+    {% if s.sealed_test.detail %}<p class="mt-1 text-xs text-slate-500">{{ s.sealed_test.detail }}</p>{% endif %}
+    {% else %}
+    <p class="mt-1 text-sm text-slate-500">No sealed test recorded for this strategy's approved dataset scope.</p>
+    {% endif %}
+    <p class="mt-1 text-xs text-slate-500">Expected OOS expectancy (from promotion pipeline): <span class="font-mono">{{ s.expected_oos_expectancy_r if s.expected_oos_expectancy_r is not none else '—' }}</span> R/trade</p>
+
+    <h3 class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-400">Real paper trades</h3>
+    {% if s.paper.n_trades == 0 %}
+    <p class="mt-1 text-sm text-slate-500">No closed paper trades yet — probation has not accumulated evidence.</p>
+    {% else %}
+    <dl class="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-slate-600 sm:grid-cols-5">
+      <div><dt class="text-slate-400">Started</dt><dd>{{ s.paper.start_date }}</dd></div>
+      <div><dt class="text-slate-400">Trades</dt><dd>{{ s.paper.n_trades }}</dd></div>
+      <div><dt class="text-slate-400">Realized expectancy (R)</dt><dd class="font-mono">{{ s.paper.realized_expectancy_r }}</dd></div>
+      <div><dt class="text-slate-400">Max drawdown</dt><dd>{{ s.paper.max_drawdown_pct }}%</dd></div>
+      <div><dt class="text-slate-400">Equity multiple</dt><dd class="font-mono">{{ s.paper.equity_multiple }}&times;</dd></div>
+    </dl>
+    <p class="mt-2 text-xs {{ 'text-emerald-700' if s.paper.shortfall_vs_expected_r is not none and s.paper.shortfall_vs_expected_r >= 0 else 'text-amber-700' }}">
+      {% if s.paper.shortfall_vs_expected_r is not none %}
+        Realized vs expected OOS expectancy: <span class="font-mono">{{ '%+.4f' % s.paper.shortfall_vs_expected_r }}</span> R/trade
+        {{ '(tracking or beating expectation)' if s.paper.shortfall_vs_expected_r >= 0 else '(underperforming the sealed-test expectation)' }}
+      {% else %}
+        Not enough data to compare against expected OOS performance yet.
+      {% endif %}
+    </p>
+    {% endif %}
+
+    <h3 class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-400">Automatic downgrade / disable monitor</h3>
+    {% if s.health %}
+    <dl class="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-slate-600 sm:grid-cols-4">
+      <div><dt class="text-slate-400">Window</dt><dd>{{ s.health.window_label }}</dd></div>
+      <div><dt class="text-slate-400">z-score</dt><dd class="font-mono">{{ s.health.z_score }}</dd></div>
+      <div><dt class="text-slate-400">Action</dt><dd>
+        <span class="rounded px-1.5 py-0.5 {{ 'bg-emerald-100 text-emerald-800' if s.health.action == 'ok' else 'bg-red-100 text-red-700' }}">{{ s.health.action }}</span>
+      </dd></div>
+      <div><dt class="text-slate-400">Evaluated</dt><dd>{{ s.health.evaluated_at[:16] }}</dd></div>
+    </dl>
+    {% if s.health.note %}<p class="mt-1 text-xs text-slate-500">{{ s.health.note }}</p>{% endif %}
+    {% else %}
+    <p class="mt-1 text-sm text-slate-500">Health monitor has not evaluated this strategy yet — no automatic downgrade/disable signal available.</p>
+    {% endif %}
+  </section>
+{% endfor %}
+{% if not strategies %}
+<p class="text-sm text-slate-500">No strategy is currently <code>paper_approved</code>. Nothing is eligible for probation.</p>
+{% endif %}
+</div>
+
+<p class="mt-6 text-xs text-slate-400">Generated {{ generated_at }}.</p>
+{% endblock %}

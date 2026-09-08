@@ -1564,6 +1564,146 @@ def alerts() -> None:
         typer.secho(f"  - suppressed: {s}", fg=typer.colors.YELLOW)
 
 
+@app.command("scan-approved-scope")
+def scan_approved_scope_cmd() -> None:
+    """Scan every horizon that has a PAPER_APPROVED strategy, using EXACTLY
+    that strategy's approved dataset (universe + source) -- e.g. the
+    ex_meta variant, not the default watchlist. This is the intended, on-
+    demand way to produce real, in-scope candidates for a supervised paper
+    probation: a normal ``scan-all``/scheduled scan uses the default
+    universe and, per research.approval_scope, its candidates for an
+    approved strategy will be blocked from alerting because they do not
+    match the exact scope that strategy was approved on.
+
+    Read-only research: creates ScanRun/Candidate rows only, never an
+    alert, paper position, or brokerage interaction.
+    """
+    ensure_not_engaged()
+    from sqlalchemy import select
+
+    from signalforge.config import get_settings
+    from signalforge.db.models import Strategy
+    from signalforge.db.session import session_scope
+    from signalforge.domain import StrategyStatus
+    from signalforge.research.candidates import persist_scan
+    from signalforge.research.fb_meta_universe_comparison import resolve_variant
+    from signalforge.research.scan import run_scan
+
+    provider = get_settings().market_data_provider
+    with session_scope() as session:
+        horizons = sorted(
+            {
+                h.value
+                for (h,) in session.execute(
+                    select(Strategy.horizon)
+                    .where(Strategy.status == StrategyStatus.PAPER_APPROVED)
+                    .distinct()
+                )
+            }
+        )
+        if not horizons:
+            typer.secho(
+                "no PAPER_APPROVED strategy exists — nothing to scan", fg=typer.colors.YELLOW
+            )
+            raise typer.Exit(code=0)
+
+        syms, snap = resolve_variant(session, variant="ex_meta")
+        typer.echo(
+            f"Scanning {len(syms)} symbols (dataset_snapshot_id={snap.id}, key={snap.key!r}) "
+            f"via {provider!r} for horizons: {', '.join(horizons)}"
+        )
+        from signalforge.domain import Horizon
+
+        for h in horizons:
+            result = run_scan(session, Horizon(h), symbols=syms, source=provider)
+            run = persist_scan(session, result)
+            typer.secho(
+                f"  {h}: scanned={len(result.scanned)} candidates={run.candidate_count} "
+                f"dataset_snapshot_id={run.dataset_snapshot_id}",
+                fg=typer.colors.GREEN,
+            )
+    typer.echo("Research signal only — no order was placed.")
+
+
+@app.command("paper-probation-status")
+def paper_probation_status_cmd() -> None:
+    """Show every PAPER_APPROVED strategy's exact approved scope and whether
+    paper_probation_enabled is currently on."""
+    from sqlalchemy import select
+
+    from signalforge.db.models import Strategy, StrategyVersion
+    from signalforge.db.session import session_scope
+    from signalforge.domain import StrategyStatus
+    from signalforge.research.approval_scope import approved_scopes
+    from signalforge.settings_store import get_setting
+
+    with session_scope() as session:
+        enabled = bool(get_setting(session, "paper_probation_enabled", False))
+        typer.secho(
+            f"paper_probation_enabled = {enabled}",
+            fg=typer.colors.GREEN if enabled else typer.colors.YELLOW,
+            bold=True,
+        )
+        rows = session.execute(
+            select(Strategy, StrategyVersion)
+            .join(StrategyVersion, StrategyVersion.strategy_id == Strategy.id)
+            .where(Strategy.status == StrategyStatus.PAPER_APPROVED)
+        ).all()
+        if not rows:
+            typer.echo("No PAPER_APPROVED strategy exists.")
+            return
+        for strat, ver in rows:
+            typer.echo(f"\n{strat.name} v{ver.version} (strategy_version_id={ver.id})")
+            for scope in approved_scopes(session, ver.id):
+                typer.echo(
+                    f"  approved scope: dataset_snapshot_id={scope.dataset_snapshot_id}  "
+                    f"config_hash={scope.config_hash[:12]}  spec_hash={scope.spec_json_hash[:12]}  "
+                    f"sources={sorted(scope.sources)}  universe={len(scope.universe)} symbols"
+                )
+    typer.echo("\nResearch signal only — no order was placed.")
+
+
+@app.command("paper-probation-enable")
+def paper_probation_enable_cmd(
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+) -> None:
+    """Turn ON candidate-trade alerts for PAPER_APPROVED strategies, scoped
+    strictly to their exact approved dataset (research.approval_scope).
+
+    Does NOT touch auto-simulation (stays off) or paper-trade acceptance
+    (stays manual). Does NOT bypass the two-alerts-per-day cap, quiet hours,
+    the stale-data block, or the mandatory "Research signal only" text --
+    all unchanged. Run this only after reviewing the dataset-scope test
+    results and the Paper Probation dashboard page.
+    """
+    ensure_not_engaged()
+    from signalforge.db.session import session_scope
+    from signalforge.settings_store import set_setting
+
+    if not yes:
+        typer.confirm(
+            "Enable candidate-trade alerts for PAPER_APPROVED strategies "
+            "(scoped to their exact approved dataset)?",
+            abort=True,
+        )
+    with session_scope() as session:
+        set_setting(session, "paper_probation_enabled", True)
+    typer.secho("paper_probation_enabled = True", fg=typer.colors.GREEN, bold=True)
+    typer.echo("Research signal only — no order was placed.")
+
+
+@app.command("paper-probation-disable")
+def paper_probation_disable_cmd() -> None:
+    """Turn candidate-trade alerts back OFF (e.g. to pause the probation)."""
+    ensure_not_engaged()
+    from signalforge.db.session import session_scope
+    from signalforge.settings_store import set_setting
+
+    with session_scope() as session:
+        set_setting(session, "paper_probation_enabled", False)
+    typer.secho("paper_probation_enabled = False", fg=typer.colors.YELLOW, bold=True)
+
+
 notify_app = typer.Typer(help="Notification-channel checks (never creates a paper trade).")
 app.add_typer(notify_app, name="notify")
 

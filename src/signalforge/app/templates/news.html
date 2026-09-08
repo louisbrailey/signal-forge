@@ -14,6 +14,15 @@
   Items published by Benzinga are labelled <em>Benzinga</em>; other publishers keep their own name.
   <span class="text-emerald-700">verified {{ (benzinga_checked_at or '')[:16] }}</span>
 </div>
+{% elif benzinga_stale %}
+<div class="mt-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-900">
+  <span class="mr-1 inline-block rounded bg-red-600 px-1.5 py-0.5 font-semibold uppercase tracking-wide text-white">Stale feed</span>
+  <strong>Benzinga is subscribed but not delivering current content.</strong>
+  <code class="block mt-1 whitespace-pre-wrap">{{ benzinga_limitation or 'stale' }}</code>
+  Benzinga-labelled articles are shown separately below, for reference only — they are
+  <strong>not used for alerts or the daily briefing</strong> while stale.
+  <span class="text-red-700">checked {{ (benzinga_checked_at or '')[:16] }}</span>
+</div>
 {% else %}
 <div class="mt-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
   <strong>Benzinga: not currently entitled on this API key.</strong>
@@ -31,5 +40,13 @@
   <button class="rounded bg-slate-900 px-3 py-1.5 text-white">Filter</button>
 </form>
 
-<div class="mt-4">{{ news_timeline(news_items, empty="No stored news — run `signalforge news ingest`.") }}</div>
+<h2 class="mt-5 text-sm font-semibold text-slate-900">
+  Benzinga-labelled news
+  {% if benzinga_stale %}<span class="ml-1 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700">stale — reference only</span>{% endif %}
+</h2>
+<div class="mt-2">{{ news_timeline(benzinga_items, empty="No Benzinga-labelled articles stored.") }}</div>
+
+<h2 class="mt-5 text-sm font-semibold text-slate-900">Generic publisher news</h2>
+<p class="text-xs text-slate-500">Non-Benzinga licensed publishers — always used as current context.</p>
+<div class="mt-2">{{ news_timeline(generic_items, empty="No stored news — run `signalforge news ingest`.") }}</div>
 {% endblock %}
