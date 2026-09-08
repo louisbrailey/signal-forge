@@ -346,6 +346,12 @@ def options_backfill_cmd(
     since: Annotated[str, typer.Option(help="YYYY-MM-DD; default: today - lookback_days.")] = "",
     until: Annotated[str, typer.Option(help="YYYY-MM-DD; default: today.")] = "",
     max_contracts: Annotated[int, typer.Option(help="Override contracts-per-underlying cap.")] = 0,
+    max_expirations: Annotated[
+        int, typer.Option(help="Override expirations-per-underlying cap (narrows the range).")
+    ] = 0,
+    strike_band: Annotated[
+        float, typer.Option(help="Override the +/- ATM strike band, e.g. 0.05 for +/-5%.")
+    ] = 0.0,
     max_total_bars: Annotated[int, typer.Option(help="Override the total-bar ceiling.")] = 0,
     resume: Annotated[int, typer.Option(help="Resume an existing ingestion_run id.")] = 0,
     validate: Annotated[bool, typer.Option(help="Run data-validation after the backfill.")] = True,
@@ -370,6 +376,10 @@ def options_backfill_cmd(
     caps = BackfillCaps.from_config(opt)
     if max_contracts:
         caps = replace(caps, contracts_per_underlying=max_contracts)
+    if max_expirations:
+        caps = replace(caps, expirations_per_underlying=max_expirations)
+    if strike_band:
+        caps = replace(caps, strike_pct_band=strike_band)
     if max_total_bars:
         caps = replace(caps, max_total_bars=max_total_bars)
     end = _d.fromisoformat(until) if until else _d.today()
