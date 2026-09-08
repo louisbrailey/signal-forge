@@ -27,12 +27,13 @@ no request is made.
 | Field | Status |
 |---|---|
 | **Verified endpoints** | `contracts` (`/v3/reference/options/contracts`) → OK · `chain snapshot` (`/v3/snapshot/options/{u}`) → OK · `contract snapshot` (`/v3/snapshot/options/{u}/{c}`) → OK · `historical aggs` (`/v2/aggs/ticker/O:.../1/day`) → OK · `delayed trades` (`/v3/trades`) → OK · `last trade` (`/v2/last/trade`) → OK · `greeks` (snapshot field) → OK · `implied_volatility` (snapshot field) → OK · `open_interest` (snapshot field) → OK · **`NBBO bid/ask quotes` (`/v3/quotes`) → 403 not_authorized** |
-| **History available** | Contract reference + historical daily aggregates per contract are entitled (`HISTORICAL`). No bulk historical options store has been ingested yet — see gaps. |
-| **Latency** | trades / last-trade / greeks / IV → `DELAYED`; `open_interest` → `END_OF_DAY`; contract reference + per-contract aggs → `HISTORICAL`. Nothing live. Each field is labelled independently in the snapshot row; a field being present is never taken to mean it is live. |
-| **Real vs simulated** | **Real chain data** (bounded ingest just run): 878 SPY contracts + 878 delayed snapshots, exp 2026-09-30…2026-10-16, strikes 709–831, vendor greeks + IV present on all 878. **Simulated:** payoff / break-even / max-loss / time-decay in the learning UI are Black-Scholes computations from those inputs, clearly marked "computed, not a vendor quote". |
-| **UI coverage** | New **`/options` — Education & Simulation** page: chain explorer (select underlying/expiration; type/strike/exp/last-delayed/day-close/vol/OI-EOD/IV/Δ/Θ/break-even), contract detail (bid/ask row reads *"not entitled (spread estimated)"*), paper simulator for long call, long put, covered call, cash-secured put (payoff SVG + entry cost / max loss / max gain / break-even + Black-Scholes time-decay table), and a red risk-warning panel (expiry, liquidity/spread, assignment/ex-div, event risk, education-only). |
-| **Test coverage** | `tests/options/test_options_math.py` (8: Black-Scholes price/greeks/IV, all four simulators), `tests/data/test_providers_options_news.py` (6: offline adapter parsing, DELAYED labels, no secrets), `tests/app/test_options_news_ui.py` (route smoke + quote-caveat + payoff math), `tests/data/test_entitlements.py` (per-endpoint classification). |
-| **Unsupported / gaps** | NBBO bid/ask quotes (403 — spread is *estimated*, never observed). **Not yet built:** a staged, bounded *historical* options-aggregates ingester (`/v2/aggs/ticker/O:.../1/day`) with its own validation pass — the entitlement is confirmed and the adapter path exists, but no scheduled backfill is wired. By design: no options recommendations, no options alerts, no naked/uncovered/margin/spread/0DTE, no execution. |
+| **History available** | Contract reference + per-contract historical daily aggregates entitled (`HISTORICAL`). **Bounded backfill now implemented** — `option_aggregate_daily` table + `signalforge options backfill`. Live smoke: SPY 90d, cap 8 → 100 real HISTORICAL bars across 8 contracts, `validate_option_aggregates` PASS, re-run writes 0 (idempotent). |
+| **Latency** | trades / last-trade / greeks / IV → `DELAYED`; `open_interest` → `END_OF_DAY`; contract reference + per-contract aggs (chain snapshot & backfill) → `HISTORICAL`. Nothing live. Each field labelled independently; a field being present is never taken to mean it is live. |
+| **Real vs simulated** | **Real chain data**: 878 SPY delayed snapshots (greeks + IV on all). **Real historical bars**: `option_aggregate_daily`, every row `HISTORICAL`, `source=massive_options`. **Simulated**: payoff / break-even / max-loss / time-decay in the learning UI are Black-Scholes computations from those inputs, marked "computed, not a vendor quote". |
+| **UI coverage** | **`/options` — Education & Simulation**: chain explorer, contract detail (bid/ask row reads *"not entitled (spread estimated)"*), paper simulator (long call/put, covered call, cash-secured put) with payoff SVG + max-loss/gain/break-even + Black-Scholes time-decay, red risk-warning panel. (Historical-bars panel for a selected contract: available next step, not yet wired.) |
+| **Test coverage** | `tests/options/test_options_math.py` (8). `tests/data/test_providers_options_news.py` (6: adapter parsing, DELAYED labels, no secrets). `tests/app/test_options_news_ui.py` (route smoke + quote caveat + payoff). `tests/data/test_options_backfill.py` (6: cap enforcement, cap-drop recorded, idempotent, resume, HISTORICAL labelling, no post-expiry). `tests/data/test_validate_option_aggregates.py` (6: clean passes + each violation flagged). `tests/data/test_entitlements.py`. |
+| **Backfill caps (all OFF / conservative by default)** | `OptionsConfig`: `backfill_lookback_days=365`, `backfill_expirations_per_underlying=4`, `backfill_contracts_per_underlying=40`, `backfill_strike_pct_band=0.15`, `backfill_max_total_bars=200_000` (hard global ceiling). Caps enforced **before any per-contract fetch**; whatever a cap drops is recorded on the `ingestion_run` (`gaps_json[u].dropped_by_cap` + `notes`) and logged — never silent. Resumable via `--resume <run_id>`; checkpoints after every contract. |
+| **Unsupported / gaps** | NBBO bid/ask quotes (403 — spread is *estimated*, never observed). Historical-bars UI panel not yet wired (data + validation are). By design: no options recommendations, no options alerts, no naked/uncovered/margin/spread/0DTE, no execution. |
 
 ## 3. Benzinga News
 
@@ -60,15 +61,15 @@ no request is made.
 
 ## Test suite
 
-`265 passed` (`pytest -o addopts=""`). Clean: ruff, black, mypy (`127` files),
+`279 passed` (`pytest -o addopts=""`). Clean: ruff, black, mypy (`129` files),
 import-linter (**6/6** contracts incl. S11 options-not-on-decision-path, S12
-news-not-on-decision-path), detect-secrets.
+news-not-on-decision-path), detect-secrets. Migrations round-trip.
 
 ## One-line summary
 
 | Subscription | Entitled | Key limitation |
 |---|---|---|
 | Stocks Developer | ✅ bars, 10y history, delayed intraday, delayed last-trade | ✗ NBBO quotes (403); no real-time |
-| Options Developer | ✅ contracts, chain, snapshots, historical aggs, delayed trades, greeks, IV, OI | ✗ NBBO bid/ask (403); historical-aggs backfill not yet wired |
-| Benzinga News | ⚠️ generic multi-publisher feed only | ✗ dedicated Benzinga (404), ratings + analyst-insights (403) |
+| Options Developer | ✅ contracts, chain, snapshots, historical aggs (+ bounded backfill), delayed trades, greeks, IV, OI | ✗ NBBO bid/ask (403); historical-bars UI panel not yet wired |
+| Benzinga News | ✗ **not live on this API key** — licensed multi-publisher feed only | dedicated `/benzinga/v1/*` → 403; `/v2/reference/news` carries no Benzinga article newer than 2026-06-18 (81d stale) |
 | Discord | ✅ configured, OFF by design | held until validation passes |
