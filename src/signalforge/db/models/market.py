@@ -248,6 +248,37 @@ class OptionQuoteSnapshot(Base, IntPK, CreatedAt):
     quality_flags: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
+class OptionAggregateDaily(Base, IntPK, CreatedAt):
+    """Historical daily OHLCV bars for a single option contract (education /
+    simulation only). Distinct from ``OptionQuoteSnapshot`` (point-in-time chain
+    state): these are settled end-of-day bars fetched from the historical
+    aggregates endpoint. ``latency_category`` is always ``HISTORICAL`` — never
+    live, never delayed. Coverage is deliberately bounded: a small liquid
+    underlying set, the nearest few expirations, a tight strike band, and a hard
+    total-bar cap enforced by the backfill before any fetch."""
+
+    __tablename__ = "option_aggregate_daily"
+    __table_args__ = (
+        UniqueConstraint("option_ticker", "session_date", "source"),
+        Index("ix_option_agg_underlying_date", "underlying_symbol", "session_date"),
+    )
+
+    option_ticker: Mapped[str] = mapped_column(String(40), index=True)
+    underlying_symbol: Mapped[str] = mapped_column(String(16), index=True)
+    session_date: Mapped[date] = mapped_column(index=True)
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float] = mapped_column(Float, default=0.0)
+    vwap: Mapped[float | None] = mapped_column(Float, default=None)
+    transactions: Mapped[int | None] = mapped_column(Integer, default=None)
+    source: Mapped[str] = mapped_column(String(40), index=True)
+    latency_category: Mapped[LatencyCategory] = mapped_column(SAEnum(LatencyCategory, **_ENUM_KW))
+    ingested_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    quality_flags: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
 class FundamentalsSnapshot(Base, IntPK, CreatedAt):
     __tablename__ = "fundamentals_snapshot"
     __table_args__ = (UniqueConstraint("instrument_id", "as_of", "source"),)

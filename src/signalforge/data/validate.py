@@ -17,8 +17,15 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from signalforge.data.calendar import sessions
-from signalforge.db.models import DataValidationReport, Instrument, OHLCVDaily
+from signalforge.db.models import (
+    DataValidationReport,
+    Instrument,
+    OHLCVDaily,
+    OptionAggregateDaily,
+    OptionContract,
+)
 from signalforge.db.types import utcnow
+from signalforge.domain import LatencyCategory
 
 
 @dataclass(slots=True)
@@ -234,3 +241,184 @@ def latest_validation(session: Session, source: str) -> DataValidationReport | N
 
 def _utcnow_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+_OPTION_AGG_SOURCE = "massive_options"
+
+
+def validate_option_aggregates(
+    session: Session,
+    underlyings: list[str],
+    *,
+    source: str = _OPTION_AGG_SOURCE,
+    start: date | None = None,
+    end: date | None = None,
+    caps: object | None = None,
+    persist: bool = True,
+) -> ValidationResult:
+    """Data-quality validation over ``option_aggregate_daily`` for a backfill.
+
+    Independent of the ingester (which only drops post-expiry and malformed
+    rows), so these checks bite on real vendor data: chronological continuity,
+    duplicate bars, OHLC sanity, no bar past a contract's expiration, every
+    session is an XNYS trading day, every row labelled ``HISTORICAL`` (never
+    live/delayed), the window is respected, and the per-underlying / total-bar
+    caps were honoured.
+    """
+    syms = [u.upper() for u in underlyings]
+    res = ValidationResult(provider=f"{source}_agg", symbols=syms)
+
+    rows = list(
+        session.execute(
+            select(
+                OptionAggregateDaily.option_ticker,
+                OptionAggregateDaily.underlying_symbol,
+                OptionAggregateDaily.session_date,
+                OptionAggregateDaily.open,
+                OptionAggregateDaily.high,
+                OptionAggregateDaily.low,
+                OptionAggregateDaily.close,
+                OptionAggregateDaily.volume,
+                OptionAggregateDaily.latency_category,
+            )
+            .where(
+                OptionAggregateDaily.source == source,
+                OptionAggregateDaily.underlying_symbol.in_(syms),
+            )
+            .order_by(OptionAggregateDaily.option_ticker, OptionAggregateDaily.session_date)
+        )
+    )
+    res.coverage = {
+        "rows": {"count": len(rows)},
+        "contracts": {"count": len({r[0] for r in rows})},
+        "underlyings": {"present": sorted({r[1] for r in rows})},
+    }
+    if not rows:
+        res.checks.append(
+            Check("has_rows", False, "no option_aggregate_daily rows for these underlyings")
+        )
+        if persist:
+            session.add(res.to_row())
+            session.flush()
+        return res
+
+    # 1. chronological + no in-series duplicate dates, per contract
+    by_ticker: dict[str, list[date]] = defaultdict(list)
+    for r in rows:
+        by_ticker[r[0]].append(r[2])
+    disordered = [t for t, ds in by_ticker.items() if any(a >= b for a, b in pairwise(ds))]
+    res.checks.append(
+        Check(
+            "chronological_order",
+            not disordered,
+            f"contracts out-of-order/dup: {disordered[:5] or 'none'}",
+        )
+    )
+
+    # 2. DB-level uniqueness on (option_ticker, session_date, source)
+    distinct_keys = session.scalar(
+        select(func.count()).select_from(
+            select(OptionAggregateDaily.option_ticker, OptionAggregateDaily.session_date)
+            .where(OptionAggregateDaily.source == source)
+            .distinct()
+            .subquery()
+        )
+    )
+    total = session.scalar(
+        select(func.count())
+        .select_from(OptionAggregateDaily)
+        .where(OptionAggregateDaily.source == source)
+    )
+    res.checks.append(
+        Check(
+            "no_duplicate_bars",
+            distinct_keys == total,
+            f"{total} rows, {distinct_keys} distinct keys",
+        )
+    )
+
+    # 3. OHLC sanity
+    bad_ohlc = [
+        f"{r[0]}@{r[2]}"
+        for r in rows
+        if not (r[5] <= r[3] <= r[4] and r[5] <= r[6] <= r[4] and r[5] <= r[4])
+        or r[3] <= 0
+        or r[7] < 0
+    ]
+    res.checks.append(
+        Check(
+            "ohlcv_sanity", not bad_ohlc, f"rows failing OHLC relations: {bad_ohlc[:5] or 'none'}"
+        )
+    )
+
+    # 4. no bar dated after the contract's own expiration
+    exp_by_ticker: dict[str, date] = {
+        str(t): e
+        for t, e in session.execute(
+            select(OptionContract.option_ticker, OptionContract.expiration_date).where(
+                OptionContract.option_ticker.in_(list(by_ticker))
+            )
+        ).all()
+    }
+    post_expiry = [
+        f"{t}>{exp_by_ticker[t]}"
+        for t, ds in by_ticker.items()
+        if t in exp_by_ticker and max(ds) > exp_by_ticker[t]
+    ]
+    res.checks.append(
+        Check("no_post_expiry_bars", not post_expiry, f"post-expiry: {post_expiry[:5] or 'none'}")
+    )
+
+    # 5. every session_date is an XNYS trading day
+    lo = start or min(r[2] for r in rows)
+    hi = end or max(r[2] for r in rows)
+    trading = set(sessions(lo, hi))
+    non_trading = sorted({r[2].isoformat() for r in rows if r[2] not in trading})
+    res.checks.append(
+        Check(
+            "sessions_are_trading_days",
+            not non_trading,
+            f"non-trading-day bars: {non_trading[:5] or 'none'}",
+        )
+    )
+
+    # 6. latency label — must be HISTORICAL, never live/delayed
+    bad_latency = sorted({str(r[8]) for r in rows if r[8] is not LatencyCategory.HISTORICAL})
+    res.checks.append(
+        Check(
+            "latency_labelled_historical",
+            not bad_latency,
+            f"non-HISTORICAL latency labels: {bad_latency or 'none'}",
+        )
+    )
+
+    # 7. window respected
+    out_of_window = [
+        r[2].isoformat() for r in rows if (start and r[2] < start) or (end and r[2] > end)
+    ]
+    res.checks.append(
+        Check(
+            "within_window", not out_of_window, f"out-of-window bars: {out_of_window[:5] or 'none'}"
+        )
+    )
+
+    # 8. caps honoured (per-underlying contract count + total bars)
+    if caps is not None:
+        max_contracts = int(getattr(caps, "contracts_per_underlying", 10**9))
+        max_bars = int(getattr(caps, "max_total_bars", 10**18))
+        per_u: dict[str, set[str]] = defaultdict(set)
+        for r in rows:
+            per_u[r[1]].add(r[0])
+        over = {u: len(cs) for u, cs in per_u.items() if len(cs) > max_contracts}
+        res.checks.append(
+            Check(
+                "caps_respected",
+                not over and len(rows) <= max_bars,
+                f"per-underlying over cap: {over or 'none'}; total bars {len(rows)} <= {max_bars}",
+            )
+        )
+
+    if persist:
+        session.add(res.to_row())
+        session.flush()
+    return res

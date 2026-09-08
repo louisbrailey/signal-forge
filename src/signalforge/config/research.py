@@ -104,6 +104,17 @@ class OptionsConfig(BaseModel):
     poll_enabled: bool = False  # OFF by default; snapshots are on-demand
     risk_free_rate: NonNegativeFloat = 0.04  # simulator assumption, not vendor data
 
+    # --- bounded historical-aggregates backfill (education only) --------------
+    # OFF by default. Every limit below is a HARD cap the backfill enforces
+    # *before* any per-contract fetch; whatever it drops to stay under a cap is
+    # logged, never silently truncated.
+    backfill_enabled: bool = False
+    backfill_lookback_days: PositiveInt = 365  # window depth (~1 trading year)
+    backfill_expirations_per_underlying: PositiveInt = 4  # nearest N expiries only
+    backfill_contracts_per_underlying: PositiveInt = 40  # ATM-ranked, per underlying
+    backfill_strike_pct_band: PositiveFloat = 0.15  # tighter than the snapshot band
+    backfill_max_total_bars: PositiveInt = 200_000  # global storage ceiling
+
 
 class NewsConfig(BaseModel):
     model_config = {"frozen": True, "extra": "forbid"}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated
 
@@ -333,6 +334,84 @@ def options_ingest_cmd(
             )
     typer.echo(
         "Delayed data (>=15 min). Education/simulation only. "
+        "Research signal only — no order was placed."
+    )
+
+
+@options_app.command("backfill")
+def options_backfill_cmd(
+    underlyings: Annotated[
+        str, typer.Option(help="Comma-separated; default: configured set.")
+    ] = "",
+    since: Annotated[str, typer.Option(help="YYYY-MM-DD; default: today - lookback_days.")] = "",
+    until: Annotated[str, typer.Option(help="YYYY-MM-DD; default: today.")] = "",
+    max_contracts: Annotated[int, typer.Option(help="Override contracts-per-underlying cap.")] = 0,
+    max_total_bars: Annotated[int, typer.Option(help="Override the total-bar ceiling.")] = 0,
+    resume: Annotated[int, typer.Option(help="Resume an existing ingestion_run id.")] = 0,
+    validate: Annotated[bool, typer.Option(help="Run data-validation after the backfill.")] = True,
+) -> None:
+    """Bounded historical options-aggregates backfill for the approved liquid set.
+
+    HISTORICAL settled bars only — never live/delayed. Storage caps are enforced
+    before any per-contract fetch; whatever a cap drops is recorded on the run.
+    """
+    ensure_not_engaged()
+    from datetime import date as _d
+
+    from signalforge.config import get_settings
+    from signalforge.data.adapters.massive_options import MassiveOptionsAdapter
+    from signalforge.data.options_backfill import BackfillCaps, backfill_option_aggregates
+    from signalforge.data.validate import validate_option_aggregates
+    from signalforge.db.session import session_scope
+
+    s = get_settings()
+    opt = s.research.options
+    us = [x.strip().upper() for x in underlyings.split(",") if x.strip()] or list(opt.underlyings)
+    caps = BackfillCaps.from_config(opt)
+    if max_contracts:
+        caps = replace(caps, contracts_per_underlying=max_contracts)
+    if max_total_bars:
+        caps = replace(caps, max_total_bars=max_total_bars)
+    end = _d.fromisoformat(until) if until else _d.today()
+    start = _d.fromisoformat(since) if since else end - timedelta(days=caps.lookback_days)
+
+    adapter = MassiveOptionsAdapter()
+    with session_scope() as session:
+        run = backfill_option_aggregates(
+            session,
+            adapter,
+            us,
+            start=start,
+            end=end,
+            caps=caps,
+            resume_run_id=resume or None,
+        )
+        run_id = run.id
+        typer.secho(
+            f"run #{run_id} [{run.status}] {run.coverage_first}..{run.coverage_last} "
+            f"bars_written={run.bars_written} skipped={run.bars_skipped}",
+            fg=typer.colors.GREEN if run.status == "ok" else typer.colors.YELLOW,
+        )
+        for u, d in (run.gaps_json or {}).items():
+            typer.echo(
+                f"  {u}: {d.get('contracts', 0)} contracts, {d.get('bars', 0)} bars, "
+                f"dropped_by_cap={d.get('dropped_by_cap', 0)}, exp={d.get('expirations', [])}"
+            )
+        if run.symbols_failed:
+            for k, v in run.symbols_failed.items():
+                typer.secho(f"  FAIL {k}: {v}", fg=typer.colors.RED)
+        if validate:
+            res = validate_option_aggregates(
+                session, us, start=start, end=end, caps=caps, persist=True
+            )
+            mark = "PASS" if res.passed else "FAIL"
+            colour = typer.colors.GREEN if res.passed else typer.colors.RED
+            typer.secho(f"validation: {mark}", fg=colour)
+            for c in res.checks:
+                if not c.passed:
+                    typer.secho(f"  - {c.name}: {c.detail}", fg=typer.colors.RED)
+    typer.echo(
+        "HISTORICAL settled bars only — never live. Education/simulation only. "
         "Research signal only — no order was placed."
     )
 

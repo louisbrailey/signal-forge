@@ -69,9 +69,34 @@ class OptionSnapshotRow:
     quality_flags: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class OptionAggregateRow:
+    """One settled daily bar for a single option contract. Always HISTORICAL."""
+
+    option_ticker: str
+    underlying_symbol: str
+    session_date: date
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    vwap: float | None
+    transactions: int | None
+    source: str
+    latency_category: LatencyCategory  # HISTORICAL — settled end-of-day bars
+
+
 def _ns_to_dt(ns: Any) -> datetime | None:
     try:
         return datetime.fromtimestamp(float(ns) / 1e9, tz=UTC)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _ms_to_date(ms: Any) -> date | None:
+    try:
+        return datetime.fromtimestamp(float(ms) / 1e3, tz=UTC).date()
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -220,6 +245,54 @@ class MassiveOptionsAdapter:
                 )
             )
         return rows
+
+    def fetch_option_aggregates(
+        self,
+        option_ticker: str,
+        *,
+        start: date,
+        end: date,
+        adjusted: bool = True,
+    ) -> list[OptionAggregateRow]:
+        """Settled daily bars for one option contract over ``[start, end]``.
+
+        Read-only historical data. Every row is stamped ``HISTORICAL`` — this
+        endpoint never carries a live or delayed price. Rows are returned in
+        ascending date order, de-duplicated by session date.
+        """
+        u = option_ticker.split(":", 1)[-1][:6].upper() if ":" in option_ticker else ""
+        adj = "true" if adjusted else "false"
+        q = (
+            f"/v2/aggs/ticker/{option_ticker}/range/1/day/"
+            f"{start.isoformat()}/{end.isoformat()}?adjusted={adj}&sort=asc&limit=50000"
+        )
+        out: list[OptionAggregateRow] = []
+        seen: set[date] = set()
+        for r in self._paginate(q):
+            d = _ms_to_date(r.get("t"))
+            if d is None or d in seen:
+                continue
+            try:
+                row = OptionAggregateRow(
+                    option_ticker=option_ticker,
+                    underlying_symbol=u,
+                    session_date=d,
+                    open=float(r["o"]),
+                    high=float(r["h"]),
+                    low=float(r["l"]),
+                    close=float(r["c"]),
+                    volume=float(r.get("v", 0.0) or 0.0),
+                    vwap=_f(r.get("vw")),
+                    transactions=_i(r.get("n")),
+                    source=self.provider_name,
+                    latency_category=LatencyCategory.HISTORICAL,
+                )
+            except (KeyError, ValueError, TypeError):
+                continue
+            seen.add(d)
+            out.append(row)
+        out.sort(key=lambda x: x.session_date)
+        return out
 
 
 def _f(x: Any) -> float | None:
