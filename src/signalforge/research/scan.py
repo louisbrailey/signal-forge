@@ -23,6 +23,7 @@ from signalforge.data.adapters.base import FeedType
 from signalforge.data.freshness import gate_for_horizon
 from signalforge.data.series import PriceSeries
 from signalforge.db.models import EarningsEvent, Instrument
+from signalforge.db.session import set_write_intent
 from signalforge.db.types import utcnow
 from signalforge.domain import Direction, Horizon, QualityGate
 from signalforge.research.features.daily import atr, sma
@@ -205,7 +206,12 @@ def run_scan(
     versions = {
         s.spec().versioned_key: upsert_strategy_version(session, s.spec()) for s in strategies
     }
-    session.flush()
+    # End the (tiny) write transaction here AND drop write intent: the long
+    # read/compute phase that follows must run as a plain reader (BEGIN, not
+    # BEGIN IMMEDIATE) so it never holds the SQLite write lock; persist_scan
+    # re-arms write intent for its own short write transaction.
+    session.commit()
+    set_write_intent(session, False)
 
     above_ma = 0
     total_priced = 0

@@ -33,12 +33,20 @@ from sqlalchemy.orm import Session
 
 from signalforge.config import get_settings
 from signalforge.data.feeds import feed_status_report
-from signalforge.db.models import AuditLog, IngestionRun, Instrument, OHLCVDaily, Strategy
+from signalforge.db.models import (
+    AuditLog,
+    IngestionRun,
+    Instrument,
+    OHLCVDaily,
+    ScanRun,
+    Strategy,
+)
+from signalforge.db.retry import retry_on_lock
 from signalforge.domain import FeedType, Horizon, StrategyStatus
 from signalforge.observability import get_logger
 from signalforge.research.candidates import persist_scan
 from signalforge.research.fb_meta_universe_comparison import resolve_variant
-from signalforge.research.scan import run_scan
+from signalforge.research.scan import ScanResult, run_scan
 
 _log = get_logger("research.approved_scope_scan")
 
@@ -197,8 +205,13 @@ def run_approved_scope_scan(
             return report
 
     for h in horizons:
-        result = run_scan(session, h, symbols=symbols, source=source)
-        run = persist_scan(session, result)
+
+        def _one(hz: Horizon = h) -> tuple[ScanResult, ScanRun]:
+            res = run_scan(session, hz, symbols=symbols, source=source)
+            return res, persist_scan(session, res)
+
+        # per-horizon lock retry: never re-run an already-persisted horizon
+        result, run = retry_on_lock(_one, label=f"approved_scope_scan:{h.value}")
         # run_scan resolves its own DataSnapshot (by exact symbol set). It must
         # be the very row the strategies were approved on — otherwise every
         # candidate would silently fail the scope match at alert time. Refuse

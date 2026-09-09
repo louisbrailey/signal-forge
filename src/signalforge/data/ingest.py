@@ -176,12 +176,16 @@ def ingest_symbol(
     end: date,
 ) -> SymbolIngestResult:
     result = SymbolIngestResult(symbol=symbol.upper())
-    inst = get_or_create_instrument(session, symbol)
 
+    # Network FIRST, database SECOND. The fetch (with the adapter's rate-limit
+    # pacing) must never happen inside an open write transaction: the SQLite
+    # write lock would be held for the whole wait and every other writer
+    # (worker heartbeat, API settings, a second job) would time out.
     bar_cap = _capability(adapter, FeedType.BAR_DAILY)
     try:
         bars = list(adapter.fetch_daily_bars(symbol, start, end))
     except AdapterError as exc:
+        get_or_create_instrument(session, symbol)
         result.error = str(exc)
         record_feed_failure(
             session,
@@ -194,6 +198,7 @@ def ingest_symbol(
         _log.warning("ingest.bar_fetch_failed", symbol=symbol, error=str(exc))
         return result
 
+    inst = get_or_create_instrument(session, symbol)
     raw = getattr(adapter, "raw_payload", None)
     if callable(raw):
         _cache_raw(
@@ -298,6 +303,10 @@ def ingest_universe(
     report = IngestReport(provider=adapter.provider_name, started_at=utcnow().isoformat())
     for sym in symbols:
         report.results.append(ingest_symbol(session, adapter, sym, start, end))
+        # One short write transaction per symbol: release the SQLite write
+        # lock before the next symbol's paced network fetch (see
+        # docs/SQLITE_CONCURRENCY.md). Also makes a partial run durable.
+        session.commit()
     _log.info(
         "ingest.done",
         provider=adapter.provider_name,
@@ -411,13 +420,15 @@ def ingest_daily_history(
             g = _symbol_gaps(session, inst.id, adapter.provider_name, start, end)
             if g:
                 gaps[sym] = [list(x) for x in g]
-        # checkpoint after every symbol
+        # checkpoint after every symbol — COMMITTED, so each symbol is one
+        # short write transaction (resumable) and the write lock is released
+        # before the next symbol's paced network fetch.
         run.symbols_ok = list(ok)
         run.symbols_failed = failed
         run.gaps_json = gaps
         run.bars_written = written
         run.bars_skipped = skipped
-        session.flush()
+        session.commit()
 
     cov = session.execute(
         select(func.min(OHLCVDaily.session_date), func.max(OHLCVDaily.session_date)).where(

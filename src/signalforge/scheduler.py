@@ -18,12 +18,29 @@ from datetime import UTC, date, datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from signalforge.db.retry import LockRetryExhausted, is_lock_error, retry_on_lock
+from signalforge.domain import Horizon
 from signalforge.killswitch import KillSwitchEngaged, ensure_not_engaged
 from signalforge.observability import get_logger
 
 _log = get_logger("scheduler")
 
 JobFn = Callable[[], None]
+JOB_LOCK_ATTEMPTS = 3
+JOB_LOCK_BACKOFF_S = (0.5, 2.0, 5.0)
+# Jobs that persist per-unit results (a ScanRun per horizon, a bulk file per
+# session...) retry lock contention INSIDE, per unit; re-running the whole body
+# would duplicate already-persisted units, so the job-level retry is off.
+NO_JOB_LEVEL_LOCK_RETRY: frozenset[str] = frozenset(
+    {
+        "daily_eod_update",
+        "catch_up",
+        "universe_update",
+        "approved_scope_scan",
+        "catchup_scan",
+        "catchup_approved_scope_scan",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,19 +63,22 @@ def _record_job_failure(name: str, error: str) -> None:
         from signalforge.db.models import AuditLog
         from signalforge.db.session import session_scope
 
-        with session_scope() as session:
-            session.add(
-                AuditLog(
-                    ts=datetime.now(UTC),
-                    actor="scheduler",
-                    action="job.failed",
-                    entity=name,
-                    before_json={},
-                    after_json={"error": error[:300]},
+        def _write() -> None:
+            with session_scope(write=True) as session:
+                session.add(
+                    AuditLog(
+                        ts=datetime.now(UTC),
+                        actor="scheduler",
+                        action="job.failed",
+                        entity=name,
+                        before_json={},
+                        after_json={"error": error[:300]},
+                    )
                 )
-            )
-    except Exception:
-        _log.exception("job.failure_record_failed", job=name)
+
+        retry_on_lock(_write, attempts=4, backoff_s=(0.2, 0.5, 1.0), label="job.failed")
+    except Exception as exc:
+        _log.warning("job.failure_record_failed", job=name, error=repr(exc)[:160])
 
 
 def _scrub_detail(text: str) -> str:
@@ -101,18 +121,21 @@ def _record_job_run(name: str, started: datetime, status: str, detail: str = "")
         from signalforge.db.models import JobRun
         from signalforge.db.session import session_scope
 
-        with session_scope() as session:
-            session.add(
-                JobRun(
-                    name=name,
-                    started_at=started,
-                    finished_at=datetime.now(UTC),
-                    status=status,
-                    detail=_scrub_detail(detail)[:300],
+        def _write() -> None:
+            with session_scope(write=True) as session:
+                session.add(
+                    JobRun(
+                        name=name,
+                        started_at=started,
+                        finished_at=datetime.now(UTC),
+                        status=status,
+                        detail=_scrub_detail(detail)[:300],
+                    )
                 )
-            )
-    except Exception:
-        _log.debug("job.run_record_failed", job=name)
+
+        retry_on_lock(_write, attempts=4, backoff_s=(0.2, 0.5, 1.0), label="job_run")
+    except Exception as exc:
+        _log.warning("job.run_record_failed", job=name, status=status, error=repr(exc)[:160])
 
 
 def guarded(name: str, fn: JobFn) -> JobFn:
@@ -128,13 +151,24 @@ def guarded(name: str, fn: JobFn) -> JobFn:
             return
         _log.info("job.start", job=name)
         try:
-            fn()
+            # Only TRANSIENT SQLite lock contention is retried (bounded); any
+            # other error, and the lock error once attempts are exhausted,
+            # surfaces as a real failure with the reason recorded.
+            if name in NO_JOB_LEVEL_LOCK_RETRY:
+                fn()
+            else:
+                retry_on_lock(
+                    fn, attempts=JOB_LOCK_ATTEMPTS, backoff_s=JOB_LOCK_BACKOFF_S, label=name
+                )
             _log.info("job.done", job=name)
             _record_job_run(name, started, "ok")
         except Exception as exc:
+            reason = repr(exc)
+            if isinstance(exc, LockRetryExhausted) or is_lock_error(exc):
+                reason = f"database lock contention: {exc}"
             _log.exception("job.failed", job=name)
-            _record_job_run(name, started, "failed", repr(exc))
-            _record_job_failure(name, repr(exc))
+            _record_job_run(name, started, "failed", reason)
+            _record_job_failure(name, reason)
             raise
 
     return _run
@@ -163,7 +197,7 @@ def job_ingest() -> None:
     symbols = list(settings.research.universe)
     end = date.today()
     start = end - timedelta(days=400)
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         adapter = get_primary_adapter(settings)
         started = utcnow()
         report = ingest_universe(session, adapter, symbols, start, end)
@@ -196,16 +230,23 @@ def job_scan_all() -> None:
     from signalforge.research.scan import run_scan
 
     for horizon in get_settings().research.enabled_horizons:
-        with session_scope() as session:
-            result = run_scan(session, horizon)
-            persist_scan(session, result)
+
+        def _one(h: Horizon = horizon) -> None:
+            with session_scope(write=True) as session:
+                result = run_scan(session, h)
+                persist_scan(session, result)
+
+        # retry per horizon: a lock hit on horizon N never re-runs horizon 1..N-1
+        retry_on_lock(
+            _one, attempts=JOB_LOCK_ATTEMPTS, backoff_s=JOB_LOCK_BACKOFF_S, label=f"scan:{horizon}"
+        )
 
 
 def job_paper_mtm() -> None:
     from signalforge.db.session import session_scope
     from signalforge.paper.ledger import mark_to_market
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         mark_to_market(session)
 
 
@@ -222,7 +263,7 @@ def job_daily_briefing() -> None:
     from signalforge.briefing import build_and_store_briefing
     from signalforge.db.session import session_scope
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         build_and_store_briefing(session)
 
 
@@ -230,7 +271,7 @@ def job_strategy_health() -> None:
     from signalforge.db.session import session_scope
     from signalforge.research.health_monitor import run_health_monitor
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         run_health_monitor(session)
 
 
@@ -245,7 +286,7 @@ def job_approved_scope_scan() -> None:
     from signalforge.db.session import session_scope
     from signalforge.research.approved_scope_scan import run_approved_scope_scan
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         report = run_approved_scope_scan(session)
     if not report.ran:
         _log.warning("approved_scope_scan.not_run", reason=report.blocked_reason)
@@ -278,7 +319,7 @@ def job_universe_update() -> None:
     from signalforge.settings_store import effective_research_config
     from signalforge.universe.pipeline import run_universe_update
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         cfg = effective_research_config(session).universe_pipeline
         if not cfg.enabled:
             _log.info("universe.update.skipped_disabled")
@@ -320,7 +361,7 @@ def job_news_poll() -> None:
     if cfg.us_session_only and not _in_us_market_session():
         return
     tickers = list(get_settings().research.universe)
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         ingest_news(
             session,
             MassiveNewsAdapter(),
@@ -328,6 +369,7 @@ def job_news_poll() -> None:
             lookback_days=cfg.lookback_days,
             limit=cfg.per_ticker_limit,
         )
+        session.commit()  # release the write lock before the second feed's network fetch
         ingest_news(
             session,
             BenzingaNewsAdapter(),
@@ -398,7 +440,7 @@ def job_alerts() -> None:
     from signalforge.alerts.dispatch import run_alert_cycle
     from signalforge.db.session import session_scope
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         run_alert_cycle(session)
 
 
@@ -435,21 +477,59 @@ def record_heartbeat(
             for job in scheduler.get_jobs():
                 nrt = getattr(job, "next_run_time", None)
                 next_runs[job.id] = nrt.astimezone(UTC).isoformat() if nrt else None
-        with session_scope() as session:
-            row = session.scalar(select(WorkerHeartbeat).where(WorkerHeartbeat.worker == worker))
-            if row is None:
-                row = WorkerHeartbeat(worker=worker, started_at=started_at, last_beat_at=started_at)
-                session.add(row)
-            row.host = socket.gethostname()[:120]
-            row.pid = os.getpid()
-            row.started_at = started_at
-            row.last_beat_at = datetime.now(UTC)
-            row.next_runs_json = next_runs
-            row.detail = detail[:300]
+
+        def _write() -> None:
+            with session_scope(write=True) as session:
+                row = session.scalar(
+                    select(WorkerHeartbeat).where(WorkerHeartbeat.worker == worker)
+                )
+                if row is None:
+                    row = WorkerHeartbeat(
+                        worker=worker, started_at=started_at, last_beat_at=started_at
+                    )
+                    session.add(row)
+                row.host = socket.gethostname()[:120]
+                row.pid = os.getpid()
+                row.started_at = started_at
+                row.last_beat_at = datetime.now(UTC)
+                row.next_runs_json = next_runs
+                row.detail = detail[:300]
+
+        retry_on_lock(_write, attempts=3, backoff_s=(0.2, 0.5), label="heartbeat")
     except Exception as exc:
         # WARNING, not debug: a silent heartbeat failure would make /ops report a
         # live worker as dead with nothing in the log to tell the two apart.
         _log.warning("worker.heartbeat_failed", error=repr(exc)[:200])
+
+
+def other_live_worker() -> str | None:
+    """A fresh heartbeat from a different pid/host means a worker is alive
+    somewhere else (another container/host sharing the database)."""
+    import os
+    import socket
+
+    from sqlalchemy import select
+
+    from signalforge.db.models import WorkerHeartbeat
+    from signalforge.db.session import session_scope
+
+    try:
+        with session_scope() as session:
+            hb = session.scalar(
+                select(WorkerHeartbeat).where(WorkerHeartbeat.worker == "scheduler")
+            )
+            if hb is None:
+                return None
+            age = (datetime.now(UTC) - hb.last_beat_at).total_seconds()
+            same = hb.host == socket.gethostname()[:120] and hb.pid == os.getpid()
+            if age <= WORKER_STALE_AFTER_S and not same:
+                return (
+                    f"a live scheduler heartbeat exists from pid {hb.pid} on {hb.host} "
+                    f"({age:.0f}s ago) — stop it first"
+                )
+    except Exception:
+        return None
+    return None
 
 
 def last_completed_session(now: datetime | None = None) -> date:

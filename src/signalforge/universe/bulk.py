@@ -163,6 +163,10 @@ def archive_session(
     )
     if existing is not None and existing.status in ("ok", "empty"):
         return existing
+    # The existence check above opened a transaction; close it so the paced
+    # network fetch below runs with NO lock held (write intent re-engages
+    # at the first write after the fetch).
+    session.commit()
 
     fetched_at = datetime.now(UTC)
     try:
@@ -333,7 +337,11 @@ def backfill(
             break
         try:
             row = archive_session(session, client, cur, source=source)
+            # one short write transaction per archived session — never hold the
+            # SQLite write lock across the next paced HTTP request
+            session.commit()
         except (AdapterError, ValueError) as exc:
+            session.commit()  # persist the 'failed' index row, release the lock
             rep.failed += 1
             rep.failures.append(f"{cur.isoformat()}: {exc}")
             if rep.failed >= 3:

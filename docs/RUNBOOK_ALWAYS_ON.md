@@ -181,6 +181,42 @@ vs the expected session, and whether a catch-up is pending. Reviewed plist
 files live in `deploy/launchd/` (`make launchd-check` validates them; nothing
 installs them for you).
 
+### Manual smoke test (do this before installing launchd)
+
+Run each step in its own terminal at the repo root; stop anything from `make dev`
+first (a `--reload` child can outlive Ctrl-C — `pkill -f "uvicorn signalforge"`).
+
+1. **Start the API**
+   ```bash
+   make api
+   ```
+   Expect `Uvicorn running on http://127.0.0.1:8787`; `curl -s http://127.0.0.1:8787/healthz`.
+2. **Start one worker**
+   ```bash
+   make worker
+   ```
+   Expect `scheduler running — Ctrl-C to stop`. It first runs the catch-up (ingest →
+   rescan → approved-scope scan) if the EOD update is owed; that takes ~5 min at the
+   provider's 5 req/min pacing. Starting a **second** `make worker` must print
+   `refusing to start: another scheduler worker already holds …` and exit 1.
+3. **Verify the heartbeat** — open `http://127.0.0.1:8787/ops`: the worker row reads
+   *running · pid … · beat Ns ago* within 30 s, and "Next scheduled EOD update" shows a
+   time *from worker*.
+4. **Verify catch-up** — in `/ops`, `catchup_ingest`, `catchup_scan`,
+   `catchup_approved_scope_scan` show `ok` (or the exact failure reason), "Daily bars
+   current for last completed session" turns green, and "Catch-up" reads *not pending*
+   (`approved_scope_scan` may legitimately show *blocked* with its reason on a
+   holiday/stale day).
+5. **Confirm no lock errors** — the worker terminal shows no `database is locked`; in
+   `/ops`, no job's failure reason mentions `lock contention`;
+   `sqlite3 data/signalforge.sqlite "select name,status,detail from job_run order by id desc limit 10"`
+   shows no `failed`.
+6. **Stop cleanly** — Ctrl-C the worker (it writes a final `stopping` heartbeat and
+   releases `data/worker.lock`), then Ctrl-C the API. `/ops` will then show the worker
+   as *STALE — process gone* after 90 s, which is correct.
+
+Only after all six pass, install the launchd agents below.
+
 ### `launchd` LaunchAgents
 
 Two agents keep the API and the scheduler running independently, each

@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -48,12 +49,20 @@ def refresh_reference(
 ) -> DiscoveryReport:
     today = today or datetime.now(UTC).date()
     rep = DiscoveryReport()
-    existing = {t.ticker: t for t in session.scalars(select(UniverseTicker))}
-    seen: set[str] = set()
+    # Network FIRST: page through the reference list with no transaction open,
+    # then apply everything in one short write transaction.
+    pages: list[dict[str, Any]] = []
     path: str | None = _LIST_PATH
     while path and rep.pages < _MAX_PAGES:
         body = client.get_json(path)
         rep.pages += 1
+        pages.append(body)
+        nxt = body.get("next_url") or ""
+        path = re.sub(r"^https?://[^/]+", "", nxt) if nxt else None
+
+    existing = {t.ticker: t for t in session.scalars(select(UniverseTicker))}
+    seen: set[str] = set()
+    for body in pages:
         for r in body.get("results") or []:
             if not isinstance(r, dict):
                 continue
@@ -80,8 +89,6 @@ def refresh_reference(
             rep.upserted += 1
             if sec_type in security_types:
                 rep.in_scope += 1
-        nxt = body.get("next_url") or ""
-        path = re.sub(r"^https?://[^/]+", "", nxt) if nxt else None
     # anything previously discovered but absent now is no longer active
     for tk, row in existing.items():
         if tk not in seen and row.active:
@@ -116,6 +123,7 @@ def enrich_market_caps(
         row = session.scalar(select(UniverseTicker).where(UniverseTicker.ticker == tk))
         if row is None or row.market_cap is not None:
             continue
+        session.commit()  # close the read snapshot before the network call
         try:
             body = client.get_json(f"/v3/reference/tickers/{tk}")
         except Exception as exc:  # one bad ticker must not stop the run
@@ -129,5 +137,5 @@ def enrich_market_caps(
         row.list_date = _parse_date(res.get("list_date")) or row.list_date
         row.refreshed_at = datetime.now(UTC)
         done += 1
-    session.flush()
+        session.commit()  # one ticker per write transaction; next HTTP call runs lock-free
     return done

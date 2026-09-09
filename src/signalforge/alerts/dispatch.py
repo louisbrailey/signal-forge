@@ -393,7 +393,7 @@ def run_alert_cycle(session: Session, now: datetime | None = None) -> AlertCycle
                     payload_json=pa.payload,
                 )
             )
-            session.flush()
+            session.commit()
             result.suppressed.append(f"{pa.alert_type.value}: {reason}")
             continue
 
@@ -415,7 +415,10 @@ def run_alert_cycle(session: Session, now: datetime | None = None) -> AlertCycle
                     sent_at=utcnow() if ok else None,
                 )
             )
-        session.flush()
+            # COMMIT per dispatched alert: the send already happened and cannot
+            # be undone, so its AlertLog must survive any later failure in this
+            # cycle — otherwise a retried cycle would re-send it.
+            session.commit()
         if ok_any:
             result.sent += 1
     _log.info("alerts.cycle", planned=result.planned, sent=result.sent, enabled=enabled)

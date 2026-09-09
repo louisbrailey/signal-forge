@@ -45,18 +45,36 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _log.info("app.start", version=__version__, env=settings.app_env.value)
 
     scheduler = None
+    worker_lock = None
     if os.environ.get("APP_RUN_SCHEDULER", "").lower() in {"1", "true", "yes"}:
         from signalforge.scheduler import build_scheduler, run_catch_up
+        from signalforge.worker_lock import WorkerAlreadyRunning, acquire_worker_lock
 
-        run_catch_up()
-        scheduler = build_scheduler()
-        scheduler.start()
-        _log.info("app.scheduler_started")
+        try:
+            worker_lock = acquire_worker_lock()
+        except WorkerAlreadyRunning as exc:
+            # Never run a second scheduler against the same database.
+            _log.error("app.scheduler_not_started", reason=str(exc))
+        else:
+            from signalforge.scheduler import other_live_worker
+
+            other = other_live_worker()
+            if other:
+                _log.error("app.scheduler_not_started", reason=other)
+                worker_lock.release()
+                worker_lock = None
+            else:
+                run_catch_up()
+                scheduler = build_scheduler()
+                scheduler.start()
+                _log.info("app.scheduler_started")
     try:
         yield
     finally:
         if scheduler is not None:
             scheduler.shutdown(wait=False)
+        if worker_lock is not None:
+            worker_lock.release()
         _log.info("app.stop")
 
 

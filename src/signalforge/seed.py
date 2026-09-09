@@ -40,7 +40,7 @@ def seed_demo_data(years: int = 3) -> SeedSummary:
     end = date.today()
     start = end - timedelta(days=365 * years + 10)
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         # Paper account
         acct = session.scalar(select(PaperAccount).where(PaperAccount.name == "default"))
         if acct is None:

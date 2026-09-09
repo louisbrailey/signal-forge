@@ -12,6 +12,7 @@ from sqlalchemy import ColumnElement
 from sqlalchemy.orm import Session
 
 from signalforge.db.models import Candidate, ScanRun
+from signalforge.db.session import set_write_intent
 from signalforge.db.types import utcnow
 from signalforge.domain import QualityGate
 from signalforge.research.scan import CandidateDraft, ScanResult
@@ -50,6 +51,12 @@ def _draft_to_row(draft: CandidateDraft, scan_run_id: int) -> Candidate:
 
 
 def persist_scan(session: Session, result: ScanResult) -> ScanRun:
+    # run_scan leaves the session as a plain reader (possibly mid read
+    # transaction). Close that transaction and re-arm write intent so the
+    # writes below begin a fresh BEGIN IMMEDIATE — never a read->write upgrade
+    # (SQLite's un-retryable BUSY_SNAPSHOT when another process committed).
+    session.commit()
+    set_write_intent(session, True)
     passing = [d for d in result.candidates if d.quality_gate_status is QualityGate.PASSED]
 
     run = ScanRun(

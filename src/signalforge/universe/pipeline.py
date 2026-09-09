@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from signalforge.config import get_settings
 from signalforge.config.research import UniversePipelineConfig
 from signalforge.db.models import AuditLog, BulkFile, OHLCVDaily, ScanRun
+from signalforge.db.retry import retry_on_lock
 from signalforge.domain import Horizon
 from signalforge.observability import get_logger
 from signalforge.research.candidates import persist_scan
@@ -162,8 +163,14 @@ def run_universe_update(
         for h in effective_research_config(session).enabled_horizons:
             if h is Horizon.INTRADAY:
                 continue
-            result = run_scan(session, h, symbols=sc.eligible_symbols, source=cfg.normalized_source)
-            run = persist_scan(session, result)
+
+            def _one(hz: Horizon = h) -> ScanRun:
+                res = run_scan(
+                    session, hz, symbols=sc.eligible_symbols, source=cfg.normalized_source
+                )
+                return persist_scan(session, res)
+
+            run = retry_on_lock(_one, label=f"universe_scan:{h.value}")
             rep.scans.append(
                 asdict(
                     ScanStage(

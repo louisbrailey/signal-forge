@@ -125,7 +125,7 @@ def data_ingest_history(
         probe_at = _dt.fromisoformat(depth.probed_at)
         typer.echo(f"discovered earliest {depth.earliest_available}; ingesting from {start}")
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         run = ingest_daily_history(
             session,
             adapter,
@@ -163,7 +163,7 @@ def data_validate(
 
     s = get_settings()
     syms = [x.strip().upper() for x in symbols.split(",") if x.strip()] or list(s.research.universe)
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         res = validate_daily(session, syms, source=s.market_data_provider)
         checks = [(c.name, c.passed, c.detail) for c in res.checks]
         passed = res.passed
@@ -248,7 +248,7 @@ def providers_verify(
     typer.secho(f"\n[discord] {report.discord_note}", fg=typer.colors.CYAN)
 
     if not no_store:
-        with session_scope() as session:
+        with session_scope(write=True) as session:
             for c in report.checks:
                 session.add(
                     EntitlementCheck(
@@ -305,7 +305,7 @@ def options_ingest_cmd(
     adapter = MassiveOptionsAdapter()
     from datetime import date as _d
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         for u in us:
             ref = None
             inst = session.scalar(select(Instrument).where(Instrument.symbol == u))
@@ -386,7 +386,7 @@ def options_backfill_cmd(
     start = _d.fromisoformat(since) if since else end - timedelta(days=caps.lookback_days)
 
     adapter = MassiveOptionsAdapter()
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         run = backfill_option_aggregates(
             session,
             adapter,
@@ -557,7 +557,7 @@ def news_ingest_cmd(
         adapters.append(BenzingaNewsAdapter())
 
     for adapter in adapters:
-        with session_scope() as session:
+        with session_scope(write=True) as session:
             rep = ingest_news(session, adapter, tk, lookback_days=lookback_days, limit=limit)
         if rep.error:
             typer.secho(f"news [{adapter.provider_name}]: {rep.error}", fg=typer.colors.RED)
@@ -607,7 +607,7 @@ def ingest(
     start = date.fromisoformat(since) if since else (datetime.now().date() - timedelta(days=400))
     end = datetime.now().date()
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         report = ingest_universe(session, adapter, syms, start, end)
 
     typer.secho(
@@ -646,7 +646,7 @@ def ingest_intraday_cmd(
     )
     end = datetime.now(UTC)
     start = end - timedelta(days=days)
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         report = ingest_intraday_universe(
             session, adapter, syms, start, end, bar_size=bar_size  # type: ignore[arg-type]
         )
@@ -891,7 +891,7 @@ def backtest_report(
         upsert_strategy_version,
     )
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         for strat in default_strategies():
             is_intraday = strat.spec().horizon is Horizon.INTRADAY
             result = run_strategy_over_universe(
@@ -992,7 +992,7 @@ def sensitivity(
     end = date.today()
     start = end - timedelta(days=365 * years + 10)
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         report = run_parameter_sensitivity(
             session,
             strategy_key=strategy,
@@ -1056,7 +1056,7 @@ def calibrate(
     end = _date.today()
     start = end - timedelta(days=365 * years + 10)
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         result = run_strategy_over_universe(session, strat, symbols, start, end)
         proxy = PriceSeries.load(session, "SPY", start, end)
         regimes = regime_lookup(proxy) if len(proxy) else {}
@@ -1101,7 +1101,7 @@ def scan(
     from signalforge.research.scan import run_scan
 
     h = Horizon(horizon.upper())
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         result = run_scan(session, h)
         run = persist_scan(session, result)
 
@@ -1136,7 +1136,7 @@ def paper_init(
     from signalforge.db.models import PaperAccount
     from signalforge.db.session import session_scope
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         acct = session.scalar(select(PaperAccount).where(PaperAccount.name == name))
         if acct is not None:
             typer.secho(
@@ -1161,7 +1161,7 @@ def paper_accept(candidate_id: int) -> None:
     from signalforge.db.session import session_scope
     from signalforge.paper.ledger import accept_candidate
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         res = accept_candidate(session, candidate_id)
     typer.secho(
         f"SIMULATED {res.side.value} {res.shares} @ {res.fill_price} "
@@ -1177,7 +1177,7 @@ def paper_mtm() -> None:
     from signalforge.db.session import session_scope
     from signalforge.paper.ledger import mark_to_market
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         r = mark_to_market(session)
     typer.echo(
         f"checked {r.checked}, closed {r.closed}, realized {r.realized_pnl:+.2f}, "
@@ -1206,7 +1206,7 @@ def portfolio_import(path: str) -> None:
     from signalforge.portfolio import import_csv
 
     text = Path(path).read_text(encoding="utf-8", errors="replace")
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         s = import_csv(session, Path(path).name, text)
     if s.already_imported:
         typer.secho(f"Already imported (batch #{s.batch_id}).", fg=typer.colors.YELLOW)
@@ -1241,7 +1241,7 @@ def briefing(
     from signalforge.briefing import build_and_store_briefing
     from signalforge.db.session import session_scope
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         payload = build_and_store_briefing(session)
     typer.echo(payload["text"])
     if payload["narrative"]:
@@ -1263,7 +1263,7 @@ def strategy_health() -> None:
     from signalforge.db.session import session_scope
     from signalforge.research.health_monitor import run_health_monitor
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         assessments = run_health_monitor(session)
 
     for a in assessments:
@@ -1328,7 +1328,7 @@ def evaluate_promotion_cmd(
 
     end = _date.fromisoformat(until) if until else _date.today()
     syms = None
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         cfg = effective_research_config(session)
         explicit_symbols = [x.strip().upper() for x in symbols.split(",") if x.strip()]
         start = _date.fromisoformat(since) if since else end - timedelta(days=365 * 10)
@@ -1455,7 +1455,7 @@ def symbol_continuity_backfill_cmd(
     end = date.fromisoformat(until) if until else date.today()
     start = date.fromisoformat(since) if since else end - timedelta(days=365 * 10)
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         adapter = get_primary_adapter(settings)
         typer.echo(
             f"Backfilling {old_symbol.upper()} [{start}..{end}] via {adapter.provider_name}..."
@@ -1529,7 +1529,7 @@ def promotion_dataset_comparison_cmd(
     end = date.fromisoformat(until) if until else date.today()
     start = date.fromisoformat(since) if since else end - timedelta(days=365 * 10)
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         mapping = latest_mapping(session, "FB", "META")
         derived_symbol = (
             mapping.derived_symbol if mapping and mapping.validation_status == "verified" else None
@@ -1571,7 +1571,7 @@ def alerts() -> None:
     from signalforge.alerts.dispatch import run_alert_cycle
     from signalforge.db.session import session_scope
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         r = run_alert_cycle(session)
     typer.echo(
         f"alerts: enabled={r.enabled} planned={r.planned} sent={r.sent} "
@@ -1605,7 +1605,7 @@ def scan_approved_scope_cmd(
     from signalforge.db.session import session_scope
     from signalforge.research.approved_scope_scan import run_approved_scope_scan
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         report = run_approved_scope_scan(session, enforce_readiness=not force)
     if not report.ran:
         typer.secho(f"NOT RUN — {report.blocked_reason}", fg=typer.colors.YELLOW, bold=True)
@@ -1685,7 +1685,7 @@ def paper_probation_enable_cmd(
             "(scoped to their exact approved dataset)?",
             abort=True,
         )
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         set_setting(session, "paper_probation_enabled", True)
     typer.secho("paper_probation_enabled = True", fg=typer.colors.GREEN, bold=True)
     typer.echo("Research signal only — no order was placed.")
@@ -1698,7 +1698,7 @@ def paper_probation_disable_cmd() -> None:
     from signalforge.db.session import session_scope
     from signalforge.settings_store import set_setting
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         set_setting(session, "paper_probation_enabled", False)
     typer.secho("paper_probation_enabled = False", fg=typer.colors.YELLOW, bold=True)
 
@@ -1725,7 +1725,7 @@ def universe_update_cmd(
     from signalforge.settings_store import effective_research_config
     from signalforge.universe.pipeline import run_universe_update
 
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         cfg = effective_research_config(session).universe_pipeline
         overrides: dict[str, object] = {}
         if sessions is not None:
@@ -1805,7 +1805,7 @@ def universe_enrich_caps_cmd(
     from signalforge.universe.pipeline import cap_enrichment_candidates
 
     client = GroupedDailyClient(spacing_s=spacing)
-    with session_scope() as session:
+    with session_scope(write=True) as session:
         todo = cap_enrichment_candidates(session)
         typer.echo(f"market caps missing for {len(todo)} otherwise-eligible common stocks")
         done = enrich_market_caps(session, client, todo, max_requests=max_requests)
@@ -1901,7 +1901,19 @@ def run_scheduler() -> None:
     from datetime import UTC as _UTC
     from datetime import datetime as _dt
 
-    from signalforge.scheduler import HEARTBEAT_INTERVAL_S, record_heartbeat
+    from signalforge.scheduler import HEARTBEAT_INTERVAL_S, other_live_worker, record_heartbeat
+    from signalforge.worker_lock import WorkerAlreadyRunning, acquire_worker_lock
+
+    try:
+        lock = acquire_worker_lock()
+    except WorkerAlreadyRunning as exc:
+        typer.secho(f"refusing to start: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from None
+    other = other_live_worker()
+    if other:
+        typer.secho(f"refusing to start: {other}", fg=typer.colors.RED)
+        lock.release()
+        raise typer.Exit(code=1)
 
     started = _dt.now(_UTC)
     record_heartbeat(None, started_at=started, detail="starting: catch-up check")
@@ -1920,6 +1932,8 @@ def run_scheduler() -> None:
     except (KeyboardInterrupt, SystemExit):
         record_heartbeat(scheduler, started_at=started, detail="stopping")
         scheduler.shutdown(wait=False)
+    finally:
+        lock.release()
 
 
 @app.command("run-job")
