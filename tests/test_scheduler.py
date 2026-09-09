@@ -138,6 +138,95 @@ def test_job_news_poll_ingests_generic_and_benzinga_feeds_separately(
     assert seen_providers == ["massive_news_generic", "massive_benzinga_news"]
 
 
+def test_guarded_records_a_job_run_row_for_ok_failed_and_skipped(
+    db_url: str, isolated_data_dir: Path
+) -> None:
+    """The Operational Status page reads the last JobRun per job; every guarded
+    outcome must leave one."""
+    from sqlalchemy import select
+
+    from signalforge.db.models import JobRun
+    from signalforge.db.session import session_scope
+
+    guarded("ok_job", lambda: None)()
+
+    def _boom() -> None:
+        raise RuntimeError("nope")
+
+    with pytest.raises(RuntimeError):
+        guarded("bad_job", _boom)()
+
+    get_kill_switch().engage(reason="halt", actor="pytest")
+    guarded("skipped_job", lambda: None)()
+    get_kill_switch().release(reason="resume", actor="pytest")
+
+    with session_scope() as session:
+        rows = {r.name: r for r in session.scalars(select(JobRun))}
+    assert rows["ok_job"].status == "ok" and rows["ok_job"].finished_at is not None
+    assert rows["bad_job"].status == "failed" and "nope" in rows["bad_job"].detail
+    assert rows["skipped_job"].status == "skipped" and "kill switch" in rows["skipped_job"].detail
+
+
+def test_daily_eod_update_runs_ingest_scan_then_approved_scope_scan(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy import select
+
+    from signalforge.db.models import JobRun
+    from signalforge.db.session import session_scope
+
+    calls: list[str] = []
+    monkeypatch.setattr(sched, "job_ingest", lambda: calls.append("ingest"))
+    monkeypatch.setattr(sched, "job_scan_all", lambda: calls.append("scan"))
+    monkeypatch.setattr(sched, "job_approved_scope_scan", lambda: calls.append("approved"))
+    sched.job_daily_eod_update()
+    assert calls == ["ingest", "scan", "approved"]
+    # the nested guard leaves its own JobRun row on the scheduled path
+    with session_scope() as session:
+        row = session.scalar(select(JobRun).where(JobRun.name == "approved_scope_scan"))
+        assert row is not None and row.status == "ok"
+
+    # an ingest failure must stop BOTH scans — never scan on incomplete data
+    calls.clear()
+
+    def _fail() -> None:
+        calls.append("ingest")
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(sched, "job_ingest", _fail)
+    with pytest.raises(RuntimeError):
+        sched.job_daily_eod_update()
+    assert calls == ["ingest"]
+    assert "approved_scope_scan" in sched.MANUAL_JOBS
+
+
+def test_job_run_detail_is_scrubbed_before_it_reaches_the_ops_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import types
+
+    class _Secret:
+        def __init__(self, v: str) -> None:
+            self._v = v
+
+        def get_secret_value(self) -> str:
+            return self._v
+
+    fake = types.SimpleNamespace(
+        market_data_api_key=_Secret("sk-REALKEY-123"),
+        discord_webhook_url=_Secret("https://discord.com/api/webhooks/1/abc"),
+    )
+    monkeypatch.setattr("signalforge.config.get_settings", lambda: fake)
+    out = sched._scrub_detail(
+        "HTTPError sk-REALKEY-123 at https://discord.com/api/webhooks/1/abc "
+        "Bearer xyz.123 ?apiKey=deadbeef&x=1"
+    )
+    assert "sk-REALKEY-123" not in out
+    assert "webhooks/1/abc" not in out
+    assert "xyz.123" not in out and "deadbeef" not in out
+    assert out.count("[REDACTED]") >= 4
+
+
 def test_job_ingest_writes_an_ingestion_run_row(db_url: str) -> None:
     """review finding (data-issue visibility, medium): the scheduled
     job_ingest -> ingest_universe path used to write no IngestionRun row at

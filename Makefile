@@ -77,8 +77,12 @@ safety: ## Only the S1-S10 invariant tests
 	$(RUN) pytest -m safety
 
 .PHONY: secrets
-secrets: ## Scan the tree for committed secrets
-	$(RUN) detect-secrets scan --baseline .secrets.baseline
+secrets: ## Fail on any secret not already audited into .secrets.baseline (check-only; never rewrites the baseline)
+	git ls-files -z | xargs -0 $(RUN) detect-secrets-hook --baseline .secrets.baseline
+
+.PHONY: secrets-baseline
+secrets-baseline: ## Re-generate .secrets.baseline (then audit every new entry: uv run detect-secrets audit .secrets.baseline)
+	$(RUN) detect-secrets scan --baseline .secrets.baseline --exclude-lines '^(revision|down_revision): str( \| None)? = "[0-9a-f]{12}"$$'
 
 .PHONY: check
 check: lint test ## Everything CI runs

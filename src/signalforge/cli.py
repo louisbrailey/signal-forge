@@ -1582,63 +1582,45 @@ def alerts() -> None:
 
 
 @app.command("scan-approved-scope")
-def scan_approved_scope_cmd() -> None:
+def scan_approved_scope_cmd(
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Bypass the fresh/complete-data gate (manual, supervised use only; "
+            "the scheduled path never bypasses it).",
+        ),
+    ] = False,
+) -> None:
     """Scan every horizon that has a PAPER_APPROVED strategy, using EXACTLY
-    that strategy's approved dataset (universe + source) -- e.g. the
-    ex_meta variant, not the default watchlist. This is the intended, on-
-    demand way to produce real, in-scope candidates for a supervised paper
-    probation: a normal ``scan-all``/scheduled scan uses the default
-    universe and, per research.approval_scope, its candidates for an
-    approved strategy will be blocked from alerting because they do not
-    match the exact scope that strategy was approved on.
+    that strategy's approved dataset (the ex_meta variant, not the default
+    watchlist) so the candidates can pass research.approval_scope's five-way
+    match. The same code runs automatically at the end of the daily EOD job;
+    both are hard-gated on fresh, complete data unless --force.
 
     Read-only research: creates ScanRun/Candidate rows only, never an
     alert, paper position, or brokerage interaction.
     """
     ensure_not_engaged()
-    from sqlalchemy import select
-
-    from signalforge.config import get_settings
-    from signalforge.db.models import Strategy
     from signalforge.db.session import session_scope
-    from signalforge.domain import StrategyStatus
-    from signalforge.research.candidates import persist_scan
-    from signalforge.research.fb_meta_universe_comparison import resolve_variant
-    from signalforge.research.scan import run_scan
+    from signalforge.research.approved_scope_scan import run_approved_scope_scan
 
-    provider = get_settings().market_data_provider
     with session_scope() as session:
-        horizons = sorted(
-            {
-                h.value
-                for (h,) in session.execute(
-                    select(Strategy.horizon)
-                    .where(Strategy.status == StrategyStatus.PAPER_APPROVED)
-                    .distinct()
-                )
-            }
+        report = run_approved_scope_scan(session, enforce_readiness=not force)
+    if not report.ran:
+        typer.secho(f"NOT RUN — {report.blocked_reason}", fg=typer.colors.YELLOW, bold=True)
+        raise typer.Exit(code=2)
+    typer.echo(
+        f"Scanned {report.n_symbols} symbols (dataset_snapshot_id={report.dataset_snapshot_id}, "
+        f"key={report.dataset_key!r}) for horizons: {', '.join(report.horizons)}"
+        + ("  [readiness gate BYPASSED with --force]" if force else "")
+    )
+    for r in report.runs:
+        typer.secho(
+            f"  {r['horizon']}: scanned={r['scanned']} candidates={r['candidates']} "
+            f"no_trade={r['no_trade']} dataset_snapshot_id={r['dataset_snapshot_id']}",
+            fg=typer.colors.GREEN,
         )
-        if not horizons:
-            typer.secho(
-                "no PAPER_APPROVED strategy exists — nothing to scan", fg=typer.colors.YELLOW
-            )
-            raise typer.Exit(code=0)
-
-        syms, snap = resolve_variant(session, variant="ex_meta")
-        typer.echo(
-            f"Scanning {len(syms)} symbols (dataset_snapshot_id={snap.id}, key={snap.key!r}) "
-            f"via {provider!r} for horizons: {', '.join(horizons)}"
-        )
-        from signalforge.domain import Horizon
-
-        for h in horizons:
-            result = run_scan(session, Horizon(h), symbols=syms, source=provider)
-            run = persist_scan(session, result)
-            typer.secho(
-                f"  {h}: scanned={len(result.scanned)} candidates={run.candidate_count} "
-                f"dataset_snapshot_id={run.dataset_snapshot_id}",
-                fg=typer.colors.GREEN,
-            )
     typer.echo("Research signal only — no order was placed.")
 
 
@@ -1771,9 +1753,21 @@ def run_scheduler() -> None:
     """
     import time
 
+    from signalforge.killswitch import KillSwitchEngaged
     from signalforge.scheduler import build_scheduler, run_catch_up
 
-    ensure_not_engaged()
+    # Start even while the kill switch is engaged: every job is individually
+    # guarded (a logged no-op until release), so refusing to start here would
+    # only make a launchd KeepAlive / Docker restart policy crash-loop the
+    # worker for the duration of an incident.
+    try:
+        ensure_not_engaged()
+    except KillSwitchEngaged as exc:
+        typer.secho(
+            f"kill switch ENGAGED ({exc.state.reason}) — scheduler starting anyway; every job "
+            "is a no-op until it is released",
+            fg=typer.colors.YELLOW,
+        )
     run_catch_up()
     scheduler = build_scheduler()
     scheduler.start()
@@ -1790,19 +1784,20 @@ def run_job(
     name: Annotated[
         str,
         typer.Argument(
-            help="daily_eod_update | paper_mtm | feed_probe | daily_briefing | alerts | "
-            "strategy_health"
+            help="daily_eod_update | paper_mtm | feed_probe | health_check | news_poll | "
+            "daily_briefing | alerts | strategy_health | approved_scope_scan"
         ),
     ],
 ) -> None:
     """Run one scheduled job once (kill-switch guarded)."""
-    from signalforge.scheduler import default_job_specs, guarded
+    from signalforge.scheduler import MANUAL_JOBS, default_job_specs, guarded
 
     spec = next((s for s in default_job_specs() if s.name == name), None)
-    if spec is None:
+    fn = spec.fn if spec is not None else MANUAL_JOBS.get(name)
+    if fn is None:
         typer.secho(f"unknown job {name!r}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
-    guarded(spec.name, spec.fn)()
+    guarded(name, fn)()
     typer.secho(f"job {name} finished", fg=typer.colors.GREEN)
 
 

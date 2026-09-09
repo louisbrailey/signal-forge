@@ -111,6 +111,7 @@ PAGES = [
     "/journal",
     "/options",
     "/news",
+    "/ops",
     "/settings",
 ]
 
@@ -127,7 +128,7 @@ def test_pages_redirect_when_signed_out(client: TestClient) -> None:
         "/register",
         data={
             "username": "u",
-            "password": "correct horse battery",
+            "password": "correct horse battery",  # pragma: allowlist secret
             "csrf_token": _csrf(client, "/register"),
         },
     )

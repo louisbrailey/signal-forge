@@ -23,3 +23,19 @@ def git_sha() -> str:
         return sha or "unknown"
     except (OSError, subprocess.SubprocessError):  # pragma: no cover
         return "unknown"
+
+
+@lru_cache(maxsize=1)
+def git_branch() -> str:
+    """Current branch name ("HEAD" when detached), for the Operational Status page."""
+    try:
+        out = subprocess.run(  # noqa: S603
+            ["git", "-C", str(_REPO), "rev-parse", "--abbrev-ref", "HEAD"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        return out.stdout.strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover
+        return "unknown"

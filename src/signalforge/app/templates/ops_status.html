@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}Operational Status — Signal Forge{% endblock %}
+{% block content %}
+{% macro pill(ok, yes='ok', no='attention') -%}
+<span class="rounded px-1.5 py-0.5 text-xs font-medium {{ 'bg-emerald-100 text-emerald-800' if ok else 'bg-red-100 text-red-700' }}">{{ yes if ok else no }}</span>
+{%- endmacro %}
+{% macro onoff(flag) -%}
+<span class="font-medium {{ 'text-emerald-700' if flag else 'text-slate-500' }}">{{ 'ON' if flag else 'OFF' }}</span>
+{%- endmacro %}
+
+<h1 class="text-2xl font-semibold text-slate-900">Operational Status</h1>
+<p class="mt-1 text-sm text-slate-500">
+  Read-only view of the always-on runtime. No key or webhook URL is ever shown here.
+  Research / paper-trading only — nothing on this page places, mirrors, or routes an order.
+</p>
+
+<section class="mt-4 rounded-lg border border-slate-200 bg-white p-4">
+  <h2 class="text-sm font-semibold text-slate-900">Readiness checklist</h2>
+  <ul class="mt-2 grid gap-1 text-sm sm:grid-cols-2">
+    {% for c in checks %}
+    <li class="flex items-start gap-2">{{ pill(c.ok) }}<span>{{ c.label }} <span class="text-xs text-slate-400">— {{ c.note }}</span></span></li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="mt-4 grid gap-4 lg:grid-cols-2">
+  <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
+    <h2 class="text-sm font-medium text-slate-500">Version &amp; database</h2>
+    <dl class="mt-2 grid grid-cols-2 gap-y-1 text-xs text-slate-600">
+      <dt class="text-slate-400">Branch / commit</dt><dd class="font-mono">{{ version.branch }} @ {{ version.sha }}</dd>
+      <dt class="text-slate-400">DB connected</dt><dd>{{ pill(db.connected, 'yes', 'no') }}</dd>
+      <dt class="text-slate-400">Migration</dt><dd class="font-mono">{{ db.current_revision or '—' }} {{ pill(db.at_head, 'at head', 'behind head ' ~ (db.expected_head or '?')) }}</dd>
+      {% if db.error %}<dt class="text-slate-400">Error</dt><dd class="text-red-700">{{ db.error }}</dd>{% endif %}
+      <dt class="text-slate-400">Kill switch</dt><dd>{{ pill(not kill_switch.active, 'released', 'ENGAGED') }} <span class="text-slate-400">{{ kill_switch.reason }}</span></dd>
+    </dl>
+  </div>
+
+  <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
+    <h2 class="text-sm font-medium text-slate-500">Switches</h2>
+    <dl class="mt-2 grid grid-cols-2 gap-y-1 text-xs text-slate-600">
+      <dt class="text-slate-400">Alerts (global)</dt><dd>{{ onoff(switches.alerts_enabled) }}</dd>
+      <dt class="text-slate-400">Paper probation alerts</dt><dd>{{ onoff(switches.paper_probation_enabled) }}</dd>
+      <dt class="text-slate-400">Auto-simulate paper trades</dt><dd>{{ onoff(switches.auto_simulate) }} <span class="text-slate-400">(acceptance is manual)</span></dd>
+      <dt class="text-slate-400">Discord</dt><dd>{{ 'configured' if switches.discord_configured else 'not configured' }} <span class="text-slate-400">(URL never displayed)</span></dd>
+      <dt class="text-slate-400">Max alerts / day</dt><dd>{{ switches.max_alerts_per_day }}</dd>
+      <dt class="text-slate-400">Quiet hours</dt><dd>{{ switches.quiet_hours.start }}:00 → {{ switches.quiet_hours.end }}:00</dd>
+    </dl>
+  </div>
+</section>
+
+<section class="mt-4 grid gap-4 lg:grid-cols-2">
+  <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
+    <h2 class="text-sm font-medium text-slate-500">Data-feed freshness {{ pill(not any_stale, 'fresh', 'stale') }}</h2>
+    {% if not feeds %}<p class="mt-2 text-xs text-slate-500">No feed registered yet — run an ingestion.</p>{% endif %}
+    <table class="mt-2 min-w-full text-xs">
+      <thead class="text-left text-slate-400"><tr><th class="pr-3">Provider / feed</th><th class="pr-3">Latency label</th><th class="pr-3">Last success</th><th>State</th></tr></thead>
+      <tbody>
+      {% for f in feeds %}
+      <tr class="border-t border-slate-100">
+        <td class="py-1 pr-3">{{ f.provider }}/{{ f.feed_type }}</td>
+        <td class="pr-3">{{ f.latency_category }}{% if f.is_simulated %} <em class="text-amber-700">simulated</em>{% endif %}</td>
+        <td class="pr-3">{{ (f.last_success_at or '—')[:16] }}</td>
+        <td>{{ pill(not f.is_stale, 'fresh', 'stale') }}{% if f.last_error %} <span class="text-red-700">{{ f.last_error[:60] }}</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
+    <h2 class="text-sm font-medium text-slate-500">Benzinga News feed
+      {% if benzinga.available %}{{ pill(true, 'current') }}{% elif benzinga.stale %}<span class="rounded bg-red-600 px-1.5 py-0.5 text-xs font-semibold uppercase text-white">Stale feed</span>{% else %}{{ pill(false, '', 'unavailable') }}{% endif %}
+    </h2>
+    <p class="mt-2 text-xs text-slate-600">{{ benzinga.detail }}</p>
+    <p class="mt-1 text-xs text-slate-400">endpoint {{ benzinga.endpoint or '—' }} · checked {{ (benzinga.checked_at or 'never')[:16] }}</p>
+  </div>
+</section>
+
+<section class="mt-4 rounded-lg border border-slate-200 bg-white p-4 text-sm">
+  <h2 class="text-sm font-medium text-slate-500">Approved strategies &amp; exact data scope</h2>
+  {% if not approved %}<p class="mt-2 text-xs text-slate-500">No strategy is paper_approved.</p>{% endif %}
+  {% for a in approved %}
+  <div class="mt-2 border-t border-slate-100 pt-2">
+    <div class="font-medium">{{ a.strategy_key }} <span class="text-xs font-normal text-slate-500">v{{ a.version }} · {{ a.horizon }}</span></div>
+    {% for sc in a.scopes %}
+    <div class="mt-1 grid grid-cols-2 gap-x-4 text-xs text-slate-600 sm:grid-cols-4">
+      <div><span class="text-slate-400">snapshot</span> #{{ sc.dataset_snapshot_id }} <span class="font-mono">{{ sc.dataset_key or '' }}</span></div>
+      <div><span class="text-slate-400">universe</span> {{ sc.universe_size }} symbols</div>
+      <div><span class="text-slate-400">sources</span> {{ sc.sources | join(', ') }}</div>
+      <div><span class="text-slate-400">config / spec</span> <span class="font-mono">{{ sc.config_hash[:10] }} / {{ sc.spec_json_hash[:10] }}</span></div>
+    </div>
+    {% else %}
+    <p class="text-xs text-amber-700">no passing evaluation scope — candidates can never match</p>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</section>
+
+<section class="mt-4 grid gap-4 lg:grid-cols-2">
+  <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
+    <h2 class="text-sm font-medium text-slate-500">Last scheduled-job outcomes</h2>
+    <table class="mt-2 min-w-full text-xs">
+      <thead class="text-left text-slate-400"><tr><th class="pr-3">Job</th><th class="pr-3">Outcome</th><th class="pr-3">Started</th><th>Detail</th></tr></thead>
+      <tbody>
+      {% for j in jobs %}
+      <tr class="border-t border-slate-100">
+        <td class="py-1 pr-3 font-mono">{{ j.name }}</td>
+        <td class="pr-3">
+          {% if j.status == 'ok' %}{{ pill(true, 'ok') }}{% elif j.status == 'never' %}<span class="text-slate-400">never</span>{% elif j.status == 'skipped' %}<span class="rounded bg-amber-100 px-1.5 py-0.5 text-amber-800">skipped</span>{% else %}{{ pill(false, '', j.status) }}{% endif %}
+        </td>
+        <td class="pr-3">{{ (j.started_at or '—')[:16] }}{% if j.age_hours is not none %} <span class="text-slate-400">({{ j.age_hours }}h ago)</span>{% endif %}</td>
+        <td class="text-slate-500">{{ j.detail[:80] }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
+    <h2 class="text-sm font-medium text-slate-500">Last ingest · scans · approved-scope scan · briefing</h2>
+    <dl class="mt-2 grid grid-cols-3 gap-y-1 text-xs text-slate-600">
+      <dt class="text-slate-400">Ingest</dt>
+      <dd class="col-span-2">{% if ingest %}{{ pill(ingest.status == 'ok', 'ok', ingest.status) }} {{ ingest.kind }} via {{ ingest.provider }} · {{ ingest.bars_written }} bars · {{ ingest.symbols_ok }} ok / {{ ingest.symbols_failed }} failed · {{ (ingest.finished_at or '—')[:16] }}{% else %}never{% endif %}</dd>
+      {% for s in scans %}
+      <dt class="text-slate-400">Scan {{ s.horizon }}</dt>
+      <dd class="col-span-2">{% if s.has_run %}{{ s.started_at[:16] }} · scanned {{ s.scanned }} · no-trade {{ s.no_trade }} · qualified {{ s.qualified }} · snapshot #{{ s.dataset_snapshot_id or '—' }} · {{ s.source or '?' }}{% else %}never{% endif %}</dd>
+      {% endfor %}
+      <dt class="text-slate-400">Approved-scope scan</dt>
+      <dd class="col-span-2">
+        {% if approved_scan %}
+          {{ pill(approved_scan.outcome == 'completed', 'completed', 'blocked') }} {{ approved_scan.at[:16] }}
+          {% if approved_scan.outcome == 'blocked' %}<span class="text-red-700">{{ approved_scan.payload.reason }}</span>
+          {% else %}snapshot #{{ approved_scan.payload.dataset_snapshot_id }} {{ approved_scan.payload.dataset_key }} · {{ approved_scan.payload.n_symbols }} symbols{% for r in approved_scan.payload.runs %} · {{ r.horizon }}: {{ r.candidates }} qualified / {{ r.no_trade }} no-trade{% endfor %}{% endif %}
+        {% else %}never{% endif %}
+      </dd>
+      <dt class="text-slate-400">Briefing</dt><dd class="col-span-2">{{ briefing_as_of or 'never' }}</dd>
+    </dl>
+  </div>
+</section>
+
+<p class="mt-6 text-xs text-slate-400">Generated {{ generated_at[:19] }} UTC.</p>
+{% endblock %}

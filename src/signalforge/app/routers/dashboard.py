@@ -21,6 +21,7 @@ from signalforge.app.templating import templates
 from signalforge.app.views import (
     candidate_context,
     journal_context,
+    ops_status_context,
     overview_context,
     paper_probation_context,
     scanner_context,
@@ -209,6 +210,12 @@ def news_page(
     from signalforge.app.views import news_context
 
     return _page(request, user, "news.html", news_context(db, symbol=symbol))
+
+
+@router.get("/ops", response_class=HTMLResponse)
+def ops_status_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
+    """Operational Status — read-only; no secrets, no actions."""
+    return _page(request, user, "ops_status.html", ops_status_context(db))
 
 
 @router.get("/settings", response_class=HTMLResponse)

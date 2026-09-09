@@ -18,7 +18,7 @@ import pytest
 from signalforge.data import entitlements as ent
 from signalforge.data.entitlements import _classify, _scrub, verify_entitlements
 
-_SECRET = "sk-live-DEADBEEF-must-never-appear"
+_SECRET = "sk-live-DEADBEEF-must-never-appear"  # pragma: allowlist secret
 _REAL_HTTPX_CLIENT = httpx.Client  # captured before any monkeypatch replaces it
 
 

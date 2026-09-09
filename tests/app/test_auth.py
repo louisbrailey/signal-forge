@@ -56,7 +56,7 @@ def test_login_wrong_password_401_then_correct_303(registered_client: TestClient
         "/login",
         data={
             "username": "trader",
-            "password": "wrong-password-xx",
+            "password": "wrong-password-xx",  # pragma: allowlist secret
             "csrf_token": _csrf(registered_client, "/login"),
         },
         follow_redirects=False,

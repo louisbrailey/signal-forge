@@ -7,7 +7,7 @@ feed drives the "live alerts disabled" banner (invariant S8).
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -25,7 +25,7 @@ from signalforge.db.models import (
     Strategy,
     StrategyVersion,
 )
-from signalforge.domain import Horizon, QualityGate
+from signalforge.domain import FeedType, Horizon, QualityGate, StrategyStatus
 from signalforge.killswitch import get_kill_switch
 from signalforge.paper.journal import weekly_review
 from signalforge.paper.portfolio import portfolio_snapshot
@@ -707,6 +707,248 @@ def paper_probation_context(session: Session) -> dict[str, Any]:
     ctx["paper_probation_enabled"] = bool(get_setting(session, "paper_probation_enabled", False))
     ctx["alerts_enabled"] = bool(get_setting(session, "alerts_enabled", False))
     return ctx
+
+
+def ops_status_context(session: Session) -> dict[str, Any]:
+    """Operational Status: is the always-on runtime healthy and are the safety
+    switches where the operator expects them? Read-only. Never exposes a key
+    or the Discord webhook URL — only "configured / not configured"."""
+    from signalforge.alerts.channels.discord import DiscordChannel
+    from signalforge.db.health import check_db
+    from signalforge.db.models import (
+        AuditLog,
+        DataSnapshot,
+        EntitlementCheck,
+        IngestionRun,
+        JobRun,
+    )
+    from signalforge.gitinfo import git_branch, git_sha
+    from signalforge.research.approval_scope import approved_scopes
+    from signalforge.research.approved_scope_scan import AUDIT_BLOCKED, AUDIT_COMPLETED
+    from signalforge.scheduler import MANUAL_JOBS, default_job_specs
+
+    now = datetime.now(UTC)
+
+    # --- version + database -------------------------------------------------
+    db = check_db()
+    version = {"branch": git_branch(), "sha": git_sha()}
+
+    # --- feeds ----------------------------------------------------------------
+    feeds = feed_status_report(session)
+    any_stale = any(f["is_stale"] for f in feeds["feeds"]) or not feeds["feeds"]
+
+    # --- Benzinga -------------------------------------------------------------
+    benz = session.scalar(
+        select(EntitlementCheck)
+        .where(EntitlementCheck.feed == "benzinga_news")
+        .order_by(EntitlementCheck.checked_at.desc())
+        .limit(1)
+    )
+    benzinga = {
+        "checked": benz is not None,
+        "available": bool(benz and benz.available),
+        "stale": bool(benz and not benz.available and (benz.detail or "").startswith("STALE")),
+        "endpoint": benz.endpoint if benz else None,
+        "detail": benz.detail if benz else "not yet verified — run `signalforge providers verify`",
+        "checked_at": benz.checked_at.isoformat() if benz else None,
+    }
+
+    # --- switches -------------------------------------------------------------
+    discord_configured = DiscordChannel.from_settings() is not None
+    switches = {
+        "alerts_enabled": bool(get_setting(session, "alerts_enabled", False)),
+        "paper_probation_enabled": bool(get_setting(session, "paper_probation_enabled", False)),
+        "auto_simulate": bool(get_setting(session, "auto_simulate_qualified_signals", False)),
+        "max_alerts_per_day": get_setting(session, "max_alerts_per_day", 2),
+        "quiet_hours": get_setting(session, "quiet_hours", {"start": 21, "end": 7}),
+        "discord_configured": discord_configured,
+    }
+    ks = get_kill_switch().state()
+
+    # --- approved strategies + exact scope -----------------------------------
+    approved: list[dict[str, Any]] = []
+    for strat, ver in session.execute(
+        select(Strategy, StrategyVersion)
+        .join(StrategyVersion, StrategyVersion.strategy_id == Strategy.id)
+        .where(
+            Strategy.status == StrategyStatus.PAPER_APPROVED,
+            StrategyVersion.status == StrategyStatus.PAPER_APPROVED,
+        )
+    ).all():
+        scopes = []
+        seen_scopes: set[tuple[int | None, str, str, tuple[str, ...]]] = set()
+        for sc in approved_scopes(session, ver.id):
+            key = (
+                sc.dataset_snapshot_id,
+                sc.config_hash,
+                sc.spec_json_hash,
+                tuple(sorted(sc.sources)),
+            )
+            if key in seen_scopes:
+                continue  # repeated identical passing evaluations -> one scope line
+            seen_scopes.add(key)
+            snap = session.get(DataSnapshot, sc.dataset_snapshot_id)
+            scopes.append(
+                {
+                    "dataset_snapshot_id": sc.dataset_snapshot_id,
+                    "dataset_key": snap.key if snap else None,
+                    "universe_size": len(sc.universe),
+                    "sources": sorted(sc.sources),
+                    "config_hash": sc.config_hash,
+                    "spec_json_hash": sc.spec_json_hash,
+                }
+            )
+        approved.append(
+            {
+                "strategy_key": strat.name,
+                "version": ver.version,
+                "horizon": strat.horizon.value,
+                "scopes": scopes,
+            }
+        )
+
+    # --- last job outcomes ----------------------------------------------------
+    job_names = (
+        [s.name for s in default_job_specs()]
+        + list(MANUAL_JOBS)
+        + [
+            "catchup_ingest",
+            "catchup_scan",
+            "catchup_approved_scope_scan",
+        ]
+    )
+    jobs: list[dict[str, Any]] = []
+    for name in job_names:
+        last = session.scalar(
+            select(JobRun).where(JobRun.name == name).order_by(JobRun.started_at.desc()).limit(1)
+        )
+        jobs.append(
+            {
+                "name": name,
+                "status": last.status if last else "never",
+                "started_at": last.started_at.isoformat() if last else None,
+                "finished_at": (
+                    last.finished_at.isoformat() if last and last.finished_at else None
+                ),
+                "age_hours": (
+                    round((now - last.started_at).total_seconds() / 3600, 1) if last else None
+                ),
+                "detail": last.detail if last else "",
+            }
+        )
+
+    # daily-bar ingestion specifically (options backfills / news are separate)
+    last_ingest = session.scalar(
+        select(IngestionRun)
+        .where(IngestionRun.feed_type == FeedType.BAR_DAILY)
+        .order_by(IngestionRun.started_at.desc())
+        .limit(1)
+    )
+    ingest = (
+        {
+            "status": last_ingest.status,
+            "kind": last_ingest.kind,
+            "provider": last_ingest.provider,
+            "finished_at": (
+                last_ingest.finished_at.isoformat() if last_ingest.finished_at else None
+            ),
+            "bars_written": last_ingest.bars_written,
+            "symbols_ok": len(last_ingest.symbols_ok or []),
+            "symbols_failed": len(last_ingest.symbols_failed or {}),
+        }
+        if last_ingest
+        else None
+    )
+
+    scans: list[dict[str, Any]] = []
+    for h in effective_research_config(session).enabled_horizons:
+        run = _latest_scan(session, h)
+        if run is None:
+            scans.append({"horizon": h.value, "has_run": False})
+            continue
+        scans.append(
+            {
+                "horizon": h.value,
+                "has_run": True,
+                "started_at": run.started_at.isoformat(),
+                "scanned": run.scanned_count,
+                "no_trade": run.no_trade_count,
+                "qualified": run.candidate_count,
+                "dataset_snapshot_id": run.dataset_snapshot_id,
+                "source": run.source,
+            }
+        )
+
+    last_approved = session.scalar(
+        select(AuditLog)
+        .where(AuditLog.action.in_((AUDIT_COMPLETED, AUDIT_BLOCKED)))
+        .order_by(AuditLog.ts.desc())
+        .limit(1)
+    )
+    approved_scan = (
+        {
+            "outcome": "completed" if last_approved.action == AUDIT_COMPLETED else "blocked",
+            "at": last_approved.ts.isoformat(),
+            "payload": last_approved.after_json or {},
+        }
+        if last_approved
+        else None
+    )
+
+    briefing = get_setting(session, "last_briefing", None)
+    briefing_as_of = briefing.get("as_of") if isinstance(briefing, dict) else None
+
+    # --- readiness checklist --------------------------------------------------
+    checks = [
+        ("Database at migration head", bool(db["at_head"]), db.get("current_revision") or "?"),
+        ("All data feeds fresh", not any_stale, "stale or unregistered" if any_stale else "ok"),
+        ("Benzinga feed current", benzinga["available"], benzinga["detail"] or ""),
+        ("Kill switch released", not ks.active, ks.reason),
+        (
+            "Last ingestion ok",
+            bool(ingest and ingest["status"] == "ok"),
+            ingest["status"] if ingest else "never",
+        ),
+        (
+            "Approved strategy with exact scope",
+            bool(approved and all(a["scopes"] for a in approved)),
+            f"{len(approved)} approved",
+        ),
+        (
+            "Discord configured (URL never shown)",
+            discord_configured,
+            "set" if discord_configured else "not set",
+        ),
+        (
+            "Alerts OFF (expected during preparation)",
+            not switches["alerts_enabled"],
+            "alerts_enabled",
+        ),
+        (
+            "Paper probation OFF (expected during preparation)",
+            not switches["paper_probation_enabled"],
+            "paper_probation_enabled",
+        ),
+        ("Auto-simulation OFF", not switches["auto_simulate"], "auto_simulate_qualified_signals"),
+    ]
+
+    return {
+        "generated_at": now.isoformat(),
+        "version": version,
+        "db": db,
+        "feeds": feeds["feeds"],
+        "any_stale": any_stale,
+        "benzinga": benzinga,
+        "switches": switches,
+        "kill_switch": ks,
+        "approved": approved,
+        "jobs": jobs,
+        "ingest": ingest,
+        "scans": scans,
+        "approved_scan": approved_scan,
+        "briefing_as_of": briefing_as_of,
+        "checks": [{"label": lbl, "ok": ok, "note": note} for lbl, ok, note in checks],
+    }
 
 
 def settings_context(session: Session) -> dict[str, Any]:

@@ -39,7 +39,7 @@ def registered_client(client: TestClient) -> TestClient:
         "/register",
         data={
             "username": "trader",
-            "password": "correct horse battery",
+            "password": "correct horse battery",  # pragma: allowlist secret
             "csrf_token": _csrf(client, "/register"),
         },
         follow_redirects=False,

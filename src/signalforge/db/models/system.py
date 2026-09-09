@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -99,6 +100,23 @@ class AuditLog(Base, IntPK):
     request_id: Mapped[str] = mapped_column(String(48), default="")
     before_json: Mapped[Any] = mapped_column(JSON, default=None)
     after_json: Mapped[Any] = mapped_column(JSON, default=None)
+
+
+class JobRun(Base, IntPK):
+    """One execution of a guarded scheduled job — ok, failed, or skipped by the
+    kill switch — so the Operational Status page can show the last outcome per
+    job without scanning the audit log. A failure is ALSO still written to
+    ``AuditLog(action="job.failed")`` for the alert policy; this is the operator
+    view, not a replacement."""
+
+    __tablename__ = "job_run"
+    __table_args__ = (Index("ix_job_run_name_started", "name", "started_at"),)
+
+    name: Mapped[str] = mapped_column(String(60), index=True)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
+    status: Mapped[str] = mapped_column(String(12), default="running")  # running|ok|failed|skipped
+    detail: Mapped[str] = mapped_column(String(300), default="")
 
 
 class LlmCall(Base, IntPK):

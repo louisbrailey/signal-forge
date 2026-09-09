@@ -61,21 +61,79 @@ def _record_job_failure(name: str, error: str) -> None:
         _log.exception("job.failure_record_failed", job=name)
 
 
+def _scrub_detail(text: str) -> str:
+    """``JobRun.detail`` is rendered on the /ops page, so redact every
+    configured secret value and any bearer/apikey-shaped fragment first.
+    Best-effort: a settings problem must never block recording."""
+    import re
+
+    out = text
+    try:
+        from signalforge.config import get_settings
+
+        s = get_settings()
+        for attr in (
+            "market_data_api_key",
+            "market_data_api_key_secondary",
+            "options_api_key",
+            "news_api_key",
+            "llm_api_key",
+            "notification_api_key",
+            "discord_webhook_url",
+            "app_encryption_key",
+        ):
+            val = getattr(s, attr, None)
+            getter = getattr(val, "get_secret_value", None)
+            secret = getter() if callable(getter) else ""
+            if secret:
+                out = out.replace(secret, "[REDACTED]")
+    except Exception:  # pragma: no cover - settings unavailable in some test contexts
+        _log.debug("job.detail_scrub_settings_unavailable")
+    out = re.sub(r"(api[_-]?key|token|apikey)=[^&\s\"']+", r"\1=[REDACTED]", out, flags=re.I)
+    out = re.sub(r"Bearer\s+[A-Za-z0-9._\-]+", "Bearer [REDACTED]", out)
+    return out
+
+
+def _record_job_run(name: str, started: datetime, status: str, detail: str = "") -> None:
+    """Persist one ``JobRun`` row (ok / failed / skipped) for the Operational
+    Status page. Best-effort: never masks the job's own outcome."""
+    try:
+        from signalforge.db.models import JobRun
+        from signalforge.db.session import session_scope
+
+        with session_scope() as session:
+            session.add(
+                JobRun(
+                    name=name,
+                    started_at=started,
+                    finished_at=datetime.now(UTC),
+                    status=status,
+                    detail=_scrub_detail(detail)[:300],
+                )
+            )
+    except Exception:
+        _log.debug("job.run_record_failed", job=name)
+
+
 def guarded(name: str, fn: JobFn) -> JobFn:
     """Wrap a job so an engaged kill switch makes it a logged no-op."""
 
     def _run() -> None:
+        started = datetime.now(UTC)
         try:
             ensure_not_engaged()
         except KillSwitchEngaged as exc:
             _log.warning("job.skipped_kill_switch", job=name, reason=exc.state.reason)
+            _record_job_run(name, started, "skipped", f"kill switch engaged: {exc.state.reason}")
             return
         _log.info("job.start", job=name)
         try:
             fn()
             _log.info("job.done", job=name)
+            _record_job_run(name, started, "ok")
         except Exception as exc:
             _log.exception("job.failed", job=name)
+            _record_job_run(name, started, "failed", repr(exc))
             _record_job_failure(name, repr(exc))
             raise
 
@@ -176,14 +234,44 @@ def job_strategy_health() -> None:
         run_health_monitor(session)
 
 
+def job_approved_scope_scan() -> None:
+    """Scan ONLY the PAPER_APPROVED strategies' horizons on EXACTLY their
+    approved ``ex_meta`` dataset, so the candidates can pass the five-way
+    approval-scope match at alert time. Hard-gated on fresh, complete data
+    (``research.approved_scope_scan.data_readiness``) — a stale feed, a
+    non-ok ingestion, or missing bars for the latest session blocks it and
+    records why. Never intraday, never options, never an alert or a paper
+    trade."""
+    from signalforge.db.session import session_scope
+    from signalforge.research.approved_scope_scan import run_approved_scope_scan
+
+    with session_scope() as session:
+        report = run_approved_scope_scan(session)
+    if not report.ran:
+        _log.warning("approved_scope_scan.not_run", reason=report.blocked_reason)
+
+
 def job_daily_eod_update() -> None:
-    """The single post-close update: fetch the day's completed bars, then rescan.
+    """The single post-close update: fetch the day's completed bars, rescan,
+    then run the approved-scope scan on the freshly completed data.
 
     End-of-day only. Never runs intraday. ``job_ingest`` throttles to the
-    provider's rate limit; a stale/failed feed just leaves the last scan in place.
+    provider's rate limit; a stale/failed feed just leaves the last scan in
+    place — and the approved-scope scan additionally refuses to run on it.
+    Ordering is guaranteed by running the three steps sequentially in one job:
+    an ingest failure raises before either scan starts.
     """
     job_ingest()
     job_scan_all()
+    # Nested guard so the approved-scope step leaves its OWN JobRun row (the
+    # Operational Status page shows it by name) — a failure still propagates
+    # and also marks daily_eod_update failed.
+    guarded("approved_scope_scan", job_approved_scope_scan)()
+
+
+# Jobs runnable on demand via `signalforge run-job <name>` that are NOT
+# separately scheduled (they run inside daily_eod_update / catch-up).
+MANUAL_JOBS: dict[str, JobFn] = {"approved_scope_scan": job_approved_scope_scan}
 
 
 def _in_us_market_session(now: datetime | None = None) -> bool:
@@ -306,6 +394,7 @@ def run_catch_up(stale_after_hours: int = 18) -> None:
         try:
             guarded("catchup_ingest", job_ingest)()
             guarded("catchup_scan", job_scan_all)()
+            guarded("catchup_approved_scope_scan", job_approved_scope_scan)()
         except KillSwitchEngaged:
             _log.warning("scheduler.catch_up_skipped_kill_switch")
 
