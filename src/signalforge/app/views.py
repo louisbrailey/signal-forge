@@ -492,6 +492,7 @@ def _news_items(session: Session, symbol: str | None, limit: int) -> list[dict[s
             "headline": r.headline,
             "url": r.url,
             "publisher": r.source,
+            "provider": r.provider,
             "author": r.author,
             "category": r.category,
             "published_at": r.published_at.isoformat(),
@@ -529,11 +530,21 @@ def news_context(session: Session, *, symbol: str | None = None, limit: int = 40
         )
 
     all_items = _news_items(session, symbol, limit)
+
     # Keep Benzinga-labelled articles visually and structurally separate from
     # every other licensed publisher — never blend a stale, un-refreshed feed
-    # into "current" generic news.
-    benzinga_items = [n for n in all_items if (n["publisher"] or "").strip().lower() == "benzinga"]
-    generic_items = [n for n in all_items if (n["publisher"] or "").strip().lower() != "benzinga"]
+    # into "current" generic news. Primary signal is the DB-level `provider`
+    # tag set by BenzingaNewsAdapter (massive_benzinga_news); the publisher
+    # name is kept as a fallback for any row ingested before that adapter
+    # existed.
+    def _is_benzinga(n: dict[str, Any]) -> bool:
+        return (
+            n["provider"] == "massive_benzinga_news"
+            or (n["publisher"] or "").strip().lower() == "benzinga"
+        )
+
+    benzinga_items = [n for n in all_items if _is_benzinga(n)]
+    generic_items = [n for n in all_items if not _is_benzinga(n)]
 
     if benz_ok:
         source_label = "Benzinga News (licensed primary) + other licensed publishers"

@@ -40,9 +40,10 @@ def test_scrub_removes_key_and_querystring_secrets() -> None:
     assert "[REDACTED]" in clean
 
 
-def _news_page(benzinga_age_days: float | None) -> dict[str, object]:
-    """~40 current Motley-Fool items + (optionally) 6 Benzinga items aged
-    ``benzinga_age_days``. One page, no ``next_url``."""
+def _generic_news_page() -> dict[str, object]:
+    """~40 current Motley-Fool items on the unified /v2/reference/news feed.
+    No Benzinga content mixed in here — Benzinga has its own dedicated
+    endpoint (/benzinga/v2/news), probed separately below."""
     now = datetime.now(UTC)
     results: list[dict[str, object]] = []
     for i in range(40):
@@ -56,25 +57,36 @@ def _news_page(benzinga_age_days: float | None) -> dict[str, object]:
                 "tickers": ["AAPL"],
             }
         )
-    if benzinga_age_days is not None:
-        for i in range(6):
-            results.append(
-                {
-                    "id": f"bz-{i}",
-                    "publisher": {"name": "Benzinga"},
-                    "title": f"Benzinga piece {i}",
-                    "article_url": "https://www.benzinga.com/x",
-                    "published_utc": (
-                        (now - timedelta(days=benzinga_age_days, hours=i))
-                        .isoformat()
-                        .replace("+00:00", "Z")
-                    ),
-                    "tickers": ["AAPL"],
-                    "insights": [{"sentiment": "positive"}],
-                    "keywords": ["markets"],
-                }
-            )
     return {"status": "OK", "count": len(results), "results": results}
+
+
+def _benzinga_v2_page(benzinga_age_days: float | None) -> dict[str, object]:
+    """The dedicated GET /benzinga/v2/news response shape. ``None`` means the
+    add-on currently returns no content at all (e.g. not entitled) — an empty
+    results page, distinct from "entitled but stale"."""
+    if benzinga_age_days is None:
+        return {"status": "OK", "request_id": "r1", "results": [], "next_url": None}
+    now = datetime.now(UTC)
+    results: list[dict[str, object]] = []
+    for i in range(6):
+        pub = (now - timedelta(days=benzinga_age_days, hours=i)).isoformat().replace("+00:00", "Z")
+        results.append(
+            {
+                "benzinga_id": 1000 + i,
+                "author": "test author",
+                "published": pub,
+                "last_updated": pub,
+                "title": f"Benzinga piece {i}",
+                "teaser": "teaser text",
+                "body": "<p>body</p>",
+                "url": "https://www.benzinga.com/x",
+                "images": ["https://cdn.benzinga.com/img.jpg"],
+                "channels": ["markets"],
+                "tickers": ["AAPL"],
+                "tags": ["markets"],
+            }
+        )
+    return {"status": "OK", "request_id": "r1", "results": results, "next_url": None}
 
 
 def _make_handler(benzinga_age_days: float | None):
@@ -83,8 +95,10 @@ def _make_handler(benzinga_age_days: float | None):
         assert request.headers["authorization"] == f"Bearer {_SECRET}"
         assert _SECRET not in str(request.url)
         url = str(request.url)
+        if "/benzinga/v2/news" in url:
+            return httpx.Response(200, json=_benzinga_v2_page(benzinga_age_days))
         if "/v2/reference/news" in url:
-            return httpx.Response(200, json=_news_page(benzinga_age_days))
+            return httpx.Response(200, json=_generic_news_page())
         if "/benzinga/v1/" in url:  # ratings, analyst-insights — separate entitlement
             return httpx.Response(
                 403, json={"message": f"You are not entitled to this data (key {_SECRET})"}
@@ -178,13 +192,14 @@ def test_verify_entitlements_groups_and_classifies(monkeypatch: pytest.MonkeyPat
 def test_benzinga_news_available_only_when_feed_is_currently_delivering_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # fresh Benzinga items -> available, DELAYED
+    # fresh Benzinga items on the dedicated /benzinga/v2/news endpoint -> available, DELAYED
     _mock(monkeypatch, benzinga_age_days=1)
     report = verify_entitlements(_settings(monkeypatch))
     bz = next(c for c in report.checks if c.feed == "benzinga_news")
     assert bz.available is True
     assert bz.latency_category == "DELAYED"
-    assert "live via /v2/reference/news" in bz.detail
+    assert bz.endpoint == "/benzinga/v2/news"
+    assert "live via /benzinga/v2/news" in bz.detail
 
     # Benzinga items present but 81 days stale -> NOT available
     _mock(monkeypatch, benzinga_age_days=81)
@@ -193,14 +208,14 @@ def test_benzinga_news_available_only_when_feed_is_currently_delivering_it(
     assert bz.available is False
     assert bz.error_category == "empty"
     assert "STALE" in bz.detail
-    assert "not currently delivering Benzinga" in bz.detail
+    assert "not currently delivering current content" in bz.detail
 
-    # no Benzinga items at all -> NOT available, distinct message
+    # no Benzinga items at all -> NOT available, distinct "empty sample" message
     _mock(monkeypatch, benzinga_age_days=None)
     report = verify_entitlements(_settings(monkeypatch))
     bz = next(c for c in report.checks if c.feed == "benzinga_news")
     assert bz.available is False
-    assert "no Benzinga-published articles" in bz.detail
+    assert "returned no articles for the sample" in bz.detail
 
 
 def test_benzinga_freshness_gate_is_not_fooled_by_days_truncation(

@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from signalforge.data.adapters.base import AdapterError
-from signalforge.data.adapters.massive_news import MassiveNewsAdapter
+from signalforge.data.adapters.massive_news import NewsFeedAdapter
 from signalforge.db.models import NewsItem
 from signalforge.observability import get_logger
 
@@ -30,7 +30,7 @@ class NewsIngestReport:
 
 def ingest_news(
     session: Session,
-    adapter: MassiveNewsAdapter,
+    adapter: NewsFeedAdapter,
     tickers: list[str],
     *,
     lookback_days: int = 3,

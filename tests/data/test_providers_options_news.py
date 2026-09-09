@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from signalforge.data.adapters.base import AdapterError
-from signalforge.data.adapters.massive_news import MassiveNewsAdapter
+from signalforge.data.adapters.massive_news import BenzingaNewsAdapter, MassiveNewsAdapter
 from signalforge.data.adapters.massive_options import MassiveOptionsAdapter
 from signalforge.data.entitlements import _scrub
 from signalforge.data.news_ingest import ingest_news
@@ -66,7 +66,7 @@ _NEWS = {
     "results": [
         {
             "id": "abc123",
-            "publisher": {"name": "Benzinga"},
+            "publisher": {"name": "Reuters"},
             "title": "Example headline",
             "author": "A Writer",
             "published_utc": (datetime.now(UTC) - timedelta(hours=2))
@@ -77,6 +77,48 @@ _NEWS = {
             "image_url": "https://example.com/i.png",
             "description": "body text",
             "keywords": ["earnings"],
+        }
+    ],
+}
+_NEWS_WITH_STRAY_BENZINGA_ITEM = {
+    "status": "OK",
+    "results": [
+        *_NEWS["results"],
+        {
+            "id": "bz999",
+            "publisher": {"name": "Benzinga"},
+            "title": "Should never surface via the generic adapter",
+            "author": "Someone",
+            "published_utc": (datetime.now(UTC) - timedelta(hours=1))
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "article_url": "https://benzinga.com/stray",
+            "tickers": ["AAPL"],
+        },
+    ],
+}
+_BENZINGA_V2_NEWS = {
+    "status": "OK",
+    "request_id": "r1",
+    "next_url": None,
+    "results": [
+        {
+            "benzinga_id": 61677101,
+            "author": "A Writer",
+            "published": (datetime.now(UTC) - timedelta(hours=1))
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "last_updated": (datetime.now(UTC) - timedelta(hours=1))
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "title": "Benzinga headline",
+            "teaser": "short summary",
+            "body": "<p>full html body</p>",
+            "url": "https://www.benzinga.com/markets/x",
+            "images": ["https://cdn.benzinga.com/img.jpg"],
+            "channels": ["tech", "earnings"],
+            "tickers": ["AAPL"],
+            "tags": ["apple"],
         }
     ],
 }
@@ -126,9 +168,35 @@ def test_news_adapter_parses_dedups_and_keeps_provenance() -> None:
     rows = a.fetch_news(["AAPL", "AAPL"], limit=5)  # same ticker twice -> still one row
     assert len(rows) == 1
     r = rows[0]
-    assert r.source == "Benzinga" and r.provider_id == "abc123"
-    assert r.dedupe_key == "massive_news:abc123"
+    assert r.source == "Reuters" and r.provider_id == "abc123"
+    assert r.dedupe_key == "massive_news_generic:abc123"
     assert r.url and r.published_at.tzinfo is not None
+
+
+def test_generic_news_adapter_excludes_benzinga_items() -> None:
+    """Defense in depth: even if the unified feed still includes a
+    Benzinga-attributed item, the generic adapter must never surface it —
+    Benzinga content only ever comes from BenzingaNewsAdapter."""
+    a = MassiveNewsAdapter("k", client=_client({"reference/news": _NEWS_WITH_STRAY_BENZINGA_ITEM}))
+    rows = a.fetch_news(["AAPL"], limit=5)
+    assert len(rows) == 1
+    assert rows[0].source == "Reuters"
+    assert all(r.source.lower() != "benzinga" for r in rows)
+
+
+def test_benzinga_news_adapter_parses_dedups_and_keeps_provenance() -> None:
+    a = BenzingaNewsAdapter("k", client=_client({"benzinga/v2/news": _BENZINGA_V2_NEWS}))
+    rows = a.fetch_news(["AAPL", "AAPL"], limit=5)  # same ticker twice -> still one row
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.source == "Benzinga" and r.provider_id == "61677101"
+    assert r.dedupe_key == "massive_benzinga_news:61677101"
+    assert r.url == "https://www.benzinga.com/markets/x"
+    assert r.tickers == ["AAPL"]
+    assert r.image_url == "https://cdn.benzinga.com/img.jpg"
+    assert r.category == "tech"
+    assert r.description == "short summary"
+    assert r.published_at.tzinfo is not None
 
 
 def test_options_ingest_persists_and_dedups(session: Session) -> None:
@@ -147,10 +215,24 @@ def test_options_ingest_persists_and_dedups(session: Session) -> None:
 def test_news_ingest_persists_and_dedups(session: Session) -> None:
     a = MassiveNewsAdapter("k", client=_client({"reference/news": _NEWS}))
     r1 = ingest_news(session, a, ["AAPL"], lookback_days=1)
+    assert r1.written == 1 and r1.publishers == ["Reuters"]
+    r2 = ingest_news(session, a, ["AAPL"], lookback_days=1)
+    assert r2.written == 0 and r2.duplicates >= 1
+    assert session.scalar(select(func.count()).select_from(NewsItem)) == 1
+    stored = session.scalar(select(NewsItem))
+    assert stored is not None and stored.provider == "massive_news_generic"
+
+
+def test_benzinga_news_ingest_persists_and_dedups(session: Session) -> None:
+    a = BenzingaNewsAdapter("k", client=_client({"benzinga/v2/news": _BENZINGA_V2_NEWS}))
+    r1 = ingest_news(session, a, ["AAPL"], lookback_days=1)
     assert r1.written == 1 and r1.publishers == ["Benzinga"]
     r2 = ingest_news(session, a, ["AAPL"], lookback_days=1)
     assert r2.written == 0 and r2.duplicates >= 1
     assert session.scalar(select(func.count()).select_from(NewsItem)) == 1
+    stored = session.scalar(select(NewsItem))
+    assert stored is not None and stored.provider == "massive_benzinga_news"
+    assert stored.source == "Benzinga"
 
 
 def test_scrub_removes_secrets_and_keylike_query_fragments() -> None:

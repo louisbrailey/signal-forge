@@ -1,11 +1,27 @@
-"""Read-only licensed news adapter (Benzinga / publisher feed via Massive).
+"""Read-only licensed news adapters via Massive.
+
+Two distinct, separately-labelled feeds, never merged:
+
+- ``MassiveNewsAdapter`` — the generic multi-publisher feed
+  (``/v2/reference/news``). Benzinga-attributed rows are explicitly excluded
+  here (defense in depth) so Benzinga content only ever enters through its
+  own adapter below.
+- ``BenzingaNewsAdapter`` — the dedicated Benzinga News add-on endpoint
+  (``GET /benzinga/v2/news``). The retired workaround of sampling the
+  generic feed and filtering client-side for ``publisher == "Benzinga"``
+  (the only option before this add-on was active, since ``?publisher=``
+  is silently ignored on the generic feed and there never was a working
+  ``/benzinga/v1/news`` path) is gone — this is the only Benzinga news
+  endpoint used anywhere in this codebase.
 
 Read-only: no posting, no scraping of article bodies beyond the licensed
-``description`` the API returns, no LLM here. Callers persist raw audit metadata,
-deduplicate by the vendor id, and keep the source link. News never creates,
-ranks, alters, or overrides a trading recommendation (import-linter contract S12).
+short-form text the API returns, no LLM here. Callers persist raw audit
+metadata, deduplicate by the vendor id, and keep the source link. News never
+creates, ranks, alters, or overrides a trading recommendation (import-linter
+contract S12).
 
-The API key travels only in the Authorization header and is scrubbed from errors.
+The API key travels only in the Authorization header and is scrubbed from
+errors.
 """
 
 from __future__ import annotations
@@ -14,7 +30,7 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
@@ -44,6 +60,23 @@ class NewsRow:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+class NewsFeedAdapter(Protocol):
+    """Structural type shared by every news adapter here — lets
+    ``news_ingest.ingest_news`` accept ``MassiveNewsAdapter`` or
+    ``BenzingaNewsAdapter`` (or any future feed adapter) interchangeably
+    without importing every concrete class."""
+
+    provider_name: str
+
+    def fetch_news(
+        self,
+        tickers: list[str],
+        *,
+        published_gte: datetime | None = None,
+        limit: int = 50,
+    ) -> list[NewsRow]: ...
+
+
 def _parse_dt(s: Any) -> datetime | None:
     if not s:
         return None
@@ -53,8 +86,13 @@ def _parse_dt(s: Any) -> datetime | None:
         return None
 
 
-class MassiveNewsAdapter:
-    provider_name = "massive_news"
+class _MassiveNewsBase:
+    """Shared HTTP plumbing for every Massive-hosted news adapter: key
+    resolution, auth header, error classification, and ``next_url``
+    pagination (cursor- or date-based — both are plain absolute URLs, so the
+    same domain-stripping regex follows either)."""
+
+    provider_name = "massive_news_base"  # overridden by each concrete adapter
 
     def __init__(self, api_key: str | None = None, *, client: httpx.Client | None = None) -> None:
         s = get_settings()
@@ -101,6 +139,15 @@ class MassiveNewsAdapter:
             nxt = re.sub(r"^https?://[^/]+", "", follow) if follow else None
             pages += 1
 
+
+class MassiveNewsAdapter(_MassiveNewsBase):
+    """The generic, multi-publisher licensed feed. Benzinga-attributed items
+    are excluded here even if the vendor's unified feed still includes some —
+    Benzinga content only ever comes from ``BenzingaNewsAdapter``, so the two
+    stay cleanly separate in the database (``NewsItem.provider``)."""
+
+    provider_name = "massive_news_generic"
+
     def fetch_news(
         self,
         tickers: list[str],
@@ -119,15 +166,17 @@ class MassiveNewsAdapter:
                 pub_at = _parse_dt(r.get("published_utc"))
                 if pub_at is None:
                     continue
+                publisher = str((r.get("publisher") or {}).get("name", "") or "unknown")
+                if publisher.strip().lower() == "benzinga":
+                    continue  # belongs to BenzingaNewsAdapter, not the generic feed
                 vid = str(r.get("id") or r.get("article_url") or r.get("title", ""))
-                publisher = (r.get("publisher") or {}).get("name", "") or "unknown"
                 out.append(
                     NewsRow(
                         provider_id=vid,
                         dedupe_key=f"{self.provider_name}:{vid}",
                         headline=str(r.get("title", ""))[:400],
                         url=str(r.get("article_url", ""))[:600],
-                        source=str(publisher)[:60],
+                        source=publisher[:60],
                         author=str(r.get("author", ""))[:160],
                         published_at=pub_at,
                         retrieved_at=retrieved,
@@ -138,12 +187,67 @@ class MassiveNewsAdapter:
                         raw=r,
                     )
                 )
-        # newest first, de-duplicated within this fetch
-        seen: set[str] = set()
-        uniq: list[NewsRow] = []
-        for row in sorted(out, key=lambda x: x.published_at, reverse=True):
-            if row.dedupe_key in seen:
-                continue
-            seen.add(row.dedupe_key)
-            uniq.append(row)
-        return uniq
+        return _dedupe_newest_first(out)
+
+
+class BenzingaNewsAdapter(_MassiveNewsBase):
+    """The dedicated Benzinga News add-on feed — ``GET /benzinga/v2/news``.
+    Every item is Benzinga-published by construction (the endpoint carries no
+    other publisher), so ``source`` is set directly rather than read from a
+    per-item field."""
+
+    provider_name = "massive_benzinga_news"
+
+    def fetch_news(
+        self,
+        tickers: list[str],
+        *,
+        published_gte: datetime | None = None,
+        limit: int = 50,
+    ) -> list[NewsRow]:
+        retrieved = datetime.now(UTC)
+        out: list[NewsRow] = []
+        for tk in [t.upper().strip() for t in tickers if t.strip()]:
+            q = f"/benzinga/v2/news?tickers={tk}&order=desc&limit={min(limit, 100)}"
+            for r in self._paginate(q):
+                pub_at = _parse_dt(r.get("published"))
+                if pub_at is None:
+                    continue
+                if published_gte is not None and pub_at < published_gte:
+                    # results are strictly newest-first; once a page goes
+                    # older than the cutoff, every later page will too.
+                    break
+                vid = str(r.get("benzinga_id") or r.get("url") or r.get("title", ""))
+                images = r.get("images")
+                image_url = str(images[0]) if isinstance(images, list) and images else ""
+                channels = r.get("channels")
+                category = str(channels[0]) if isinstance(channels, list) and channels else ""
+                out.append(
+                    NewsRow(
+                        provider_id=vid,
+                        dedupe_key=f"{self.provider_name}:{vid}",
+                        headline=str(r.get("title", ""))[:400],
+                        url=str(r.get("url", ""))[:600],
+                        source="Benzinga",
+                        author=str(r.get("author", ""))[:160],
+                        published_at=pub_at,
+                        retrieved_at=retrieved,
+                        tickers=[str(x).upper() for x in (r.get("tickers") or [])][:40],
+                        category=category[:60],
+                        image_url=image_url[:600],
+                        description=str(r.get("teaser", "")),
+                        raw=r,
+                    )
+                )
+        return _dedupe_newest_first(out)
+
+
+def _dedupe_newest_first(rows: list[NewsRow]) -> list[NewsRow]:
+    seen: set[str] = set()
+    uniq: list[NewsRow] = []
+    for row in sorted(rows, key=lambda x: x.published_at, reverse=True):
+        if row.dedupe_key in seen:
+            continue
+        seen.add(row.dedupe_key)
+        uniq.append(row)
+    return uniq

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 
@@ -528,28 +528,45 @@ def news_ingest_cmd(
     ] = "",
     lookback_days: Annotated[int, typer.Option()] = 3,
     limit: Annotated[int, typer.Option()] = 50,
+    source: Annotated[
+        str, typer.Option(help="generic | benzinga | both — which feed(s) to pull.")
+    ] = "both",
 ) -> None:
-    """Pull recent licensed headlines for the universe; dedupe + persist audit metadata."""
+    """Pull recent licensed headlines for the universe; dedupe + persist audit metadata.
+
+    The generic multi-publisher feed and the Benzinga News add-on feed
+    (GET /benzinga/v2/news) are two separate adapters — each ingest call
+    tags its rows with a distinct ``provider``, so the two never mix."""
     ensure_not_engaged()
     from signalforge.config import get_settings
-    from signalforge.data.adapters.massive_news import MassiveNewsAdapter
+    from signalforge.data.adapters.massive_news import BenzingaNewsAdapter, MassiveNewsAdapter
     from signalforge.data.news_ingest import ingest_news
     from signalforge.db.session import session_scope
 
+    if source not in ("generic", "benzinga", "both"):
+        typer.secho(f"news: unknown --source {source!r} (expected generic|benzinga|both)")
+        raise typer.Exit(code=1)
+
     s = get_settings()
     tk = [x.strip().upper() for x in tickers.split(",") if x.strip()] or list(s.research.universe)
-    with session_scope() as session:
-        rep = ingest_news(
-            session, MassiveNewsAdapter(), tk, lookback_days=lookback_days, limit=limit
+
+    adapters: list[Any] = []
+    if source in ("generic", "both"):
+        adapters.append(MassiveNewsAdapter())
+    if source in ("benzinga", "both"):
+        adapters.append(BenzingaNewsAdapter())
+
+    for adapter in adapters:
+        with session_scope() as session:
+            rep = ingest_news(session, adapter, tk, lookback_days=lookback_days, limit=limit)
+        if rep.error:
+            typer.secho(f"news [{adapter.provider_name}]: {rep.error}", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+        typer.secho(
+            f"news [{adapter.provider_name}]: fetched {rep.fetched}, written {rep.written}, "
+            f"duplicates {rep.duplicates} (publishers: {', '.join(rep.publishers or [])})",
+            fg=typer.colors.GREEN,
         )
-    if rep.error:
-        typer.secho(f"news: {rep.error}", fg=typer.colors.RED)
-        raise typer.Exit(code=1)
-    typer.secho(
-        f"news: fetched {rep.fetched}, written {rep.written}, duplicates {rep.duplicates} "
-        f"(publishers: {', '.join(rep.publishers or [])})",
-        fg=typer.colors.GREEN,
-    )
     typer.echo("News is for context and LLM summaries only — it never drives a recommendation.")
 
 

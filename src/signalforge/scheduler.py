@@ -196,9 +196,13 @@ def _in_us_market_session(now: datetime | None = None) -> bool:
 
 def job_news_poll() -> None:
     """Poll licensed news for the universe — only during U.S. market sessions and
-    only when explicitly enabled in config. Never influences a recommendation."""
+    only when explicitly enabled in config. Never influences a recommendation.
+
+    Ingests the generic multi-publisher feed and the dedicated Benzinga News
+    add-on feed as two separate calls, through two separate adapters — they
+    stay distinct in the database (``NewsItem.provider``) and never merge."""
     from signalforge.config import get_settings
-    from signalforge.data.adapters.massive_news import MassiveNewsAdapter
+    from signalforge.data.adapters.massive_news import BenzingaNewsAdapter, MassiveNewsAdapter
     from signalforge.data.news_ingest import ingest_news
     from signalforge.db.session import session_scope
 
@@ -212,6 +216,13 @@ def job_news_poll() -> None:
         ingest_news(
             session,
             MassiveNewsAdapter(),
+            tickers,
+            lookback_days=cfg.lookback_days,
+            limit=cfg.per_ticker_limit,
+        )
+        ingest_news(
+            session,
+            BenzingaNewsAdapter(),
             tickers,
             lookback_days=cfg.lookback_days,
             limit=cfg.per_ticker_limit,

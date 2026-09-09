@@ -97,6 +97,47 @@ def test_catch_up_runs_when_no_scan_exists(db_url: str, monkeypatch: pytest.Monk
     assert calls == ["ingest", "scan"]
 
 
+def test_job_news_poll_ingests_generic_and_benzinga_feeds_separately(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """job_news_poll must call ingest_news once per adapter — the generic
+    multi-publisher feed and the dedicated Benzinga News add-on feed — so the
+    two stay separately tagged (NewsItem.provider) and never merge."""
+    import types
+
+    class _FakeSecret:
+        def get_secret_value(self) -> str:
+            return ""
+
+    fake_news_cfg = types.SimpleNamespace(
+        poll_enabled=True, us_session_only=False, lookback_days=3, per_ticker_limit=25
+    )
+    fake_research = types.SimpleNamespace(news=fake_news_cfg, universe=["AAPL", "SPY"])
+    # Also carries news_api_key/market_data_api_key: if this is the first test
+    # in the process to import massive_news.py, its own module-level
+    # `from signalforge.config import get_settings` binds fresh and would
+    # otherwise pick up this fake too (adapter construction reads those keys).
+    fake_settings = types.SimpleNamespace(
+        research=fake_research, news_api_key=_FakeSecret(), market_data_api_key=_FakeSecret()
+    )
+    monkeypatch.setattr("signalforge.config.get_settings", lambda: fake_settings)
+
+    seen_providers: list[str] = []
+
+    def fake_ingest_news(session, adapter, tickers, *, lookback_days=3, limit=50):
+        from signalforge.data.news_ingest import NewsIngestReport
+
+        seen_providers.append(adapter.provider_name)
+        assert tickers == ["AAPL", "SPY"]
+        return NewsIngestReport(fetched=0, written=0, duplicates=0, publishers=[])
+
+    monkeypatch.setattr("signalforge.data.news_ingest.ingest_news", fake_ingest_news)
+
+    sched.job_news_poll()
+
+    assert seen_providers == ["massive_news_generic", "massive_benzinga_news"]
+
+
 def test_job_ingest_writes_an_ingestion_run_row(db_url: str) -> None:
     """review finding (data-issue visibility, medium): the scheduled
     job_ingest -> ingest_universe path used to write no IngestionRun row at

@@ -108,7 +108,7 @@ def _seed_news_and_entitlements(*, benzinga_ok: bool = False, not_authorized: bo
                 published_at=datetime(2026, 6, 17, 15, 0, tzinfo=UTC),
                 retrieved_at=datetime(2026, 6, 17, 15, 10, tzinfo=UTC),
                 source="Benzinga",
-                provider="massive_news_generic",
+                provider="massive_benzinga_news",
                 provider_id="bz-1",
                 dedupe_key="dk-bz-1",
                 category="markets",
