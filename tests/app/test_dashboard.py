@@ -112,6 +112,7 @@ PAGES = [
     "/options",
     "/news",
     "/ops",
+    "/universe",
     "/settings",
 ]
 
@@ -242,3 +243,41 @@ def test_settings_override_is_persisted(seeded: TestClient) -> None:
 
 def test_post_without_csrf_is_forbidden(seeded: TestClient) -> None:
     assert seeded.post("/killswitch", data={"action": "engage"}).status_code == 403
+
+
+def test_ops_page_shows_not_ready_with_exact_reason_when_scan_gate_blocks(
+    seeded: TestClient,
+) -> None:
+    """A PAPER_APPROVED strategy exists but there is no fresh daily-bar
+    ingest -> the page must say NOT READY and print the gate's reason."""
+    from signalforge.db.models import Strategy
+    from signalforge.db.session import session_scope
+    from signalforge.domain import Horizon, StrategyStatus
+
+    with session_scope() as s:
+        strat = s.scalar(select(Strategy).where(Strategy.horizon == Horizon.SHORT_SWING))
+        assert strat is not None
+        strat.status = StrategyStatus.PAPER_APPROVED
+    r = seeded.get("/ops")
+    assert r.status_code == 200
+    assert "NOT READY" in r.text
+    assert "Approved-scope scan is blocked:" in r.text
+    assert "Last successful daily-bar ingest:" in r.text
+
+
+def test_settings_persist_per_alert_type_switches(seeded: TestClient) -> None:
+    from signalforge.alerts.dispatch import alert_type_states
+    from signalforge.db.session import session_scope
+
+    with session_scope() as s:
+        assert not any(alert_type_states(s).values())
+    seeded.post(
+        "/settings",
+        data={"csrf_token": _csrf(seeded, "/settings"), "alert_candidate": "true"},
+    )
+    with session_scope() as s:
+        states = alert_type_states(s)
+    assert states["candidate"] is True
+    assert states["system_health"] is False and states["daily_briefing"] is False
+    r = seeded.get("/settings")
+    assert "approved paper-probation candidate" in r.text

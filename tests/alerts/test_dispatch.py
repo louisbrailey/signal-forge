@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from signalforge import RESEARCH_ONLY_NOTICE
+from signalforge.alerts.dispatch import ALERT_TYPE_SETTING_KEYS as _ALERT_TYPE_KEYS
 from signalforge.alerts.dispatch import plan_alerts, run_alert_cycle
 from signalforge.alerts.render import render_candidate_alert
 from signalforge.data.adapters.fixture import FixtureMarketDataAdapter
@@ -47,7 +48,8 @@ def test_nothing_is_sent_until_alerts_enabled(session: Session) -> None:
 def test_briefing_alert_is_sent_once_then_deduped(session: Session) -> None:
     _seed_feed_and_briefing(session)
     set_setting(session, "alerts_enabled", True)
-
+    for _key in _ALERT_TYPE_KEYS.values():  # per-type switches default OFF
+        set_setting(session, _key, True)
     r1 = run_alert_cycle(session, now=NOON)
     assert r1.sent >= 1
     sent = session.scalar(
@@ -154,6 +156,8 @@ def test_every_alert_carries_the_research_only_notice(session: Session) -> None:
 def test_quiet_hours_suppress_briefing_but_not_health(session: Session) -> None:
     _seed_feed_and_briefing(session)
     set_setting(session, "alerts_enabled", True)
+    for _key in _ALERT_TYPE_KEYS.values():  # per-type switches default OFF
+        set_setting(session, _key, True)
     set_setting(session, "quiet_hours", {"start": 0, "end": 23})  # basically always quiet
 
     r = run_alert_cycle(session, now=datetime(2024, 6, 30, 3, 0, tzinfo=UTC))
@@ -165,6 +169,8 @@ def test_quiet_hours_suppress_briefing_but_not_health(session: Session) -> None:
 def test_kill_switch_blocks_the_alert_cycle(session: Session, isolated_data_dir) -> None:
     _seed_feed_and_briefing(session)
     set_setting(session, "alerts_enabled", True)
+    for _key in _ALERT_TYPE_KEYS.values():  # per-type switches default OFF
+        set_setting(session, _key, True)
     get_kill_switch().engage(reason="halt", actor="pytest")
     with pytest.raises(KillSwitchEngaged):
         run_alert_cycle(session, now=NOON)
@@ -293,3 +299,40 @@ def test_candidate_alert_body_has_every_mandatory_field() -> None:
         RESEARCH_ONLY_NOTICE,
     ]:
         assert needle in body, needle
+
+
+# --- per-alert-type switches ------------------------------------------------
+def test_every_alert_type_is_off_by_default_and_suppresses_even_with_alerts_enabled(
+    session: Session,
+) -> None:
+    from signalforge.alerts.dispatch import ALERT_TYPE_SETTING_KEYS, alert_type_states
+
+    _seed_feed_and_briefing(session)
+    assert alert_type_states(session) == {
+        "system_health": False,
+        "data_issue": False,
+        "daily_briefing": False,
+        "candidate": False,
+    }
+    set_setting(session, "alerts_enabled", True)
+    r = run_alert_cycle(session, now=NOON)
+    assert r.sent == 0
+    assert any("daily_briefing is off in Settings" in s for s in r.suppressed)
+    rows = list(session.scalars(select(AlertLog)))
+    assert rows and all(
+        row.status is AlertStatus.SUPPRESSED and "off in Settings" in (row.suppressed_reason or "")
+        for row in rows
+    )
+    # keys are stable strings shared with Settings and /ops
+    assert ALERT_TYPE_SETTING_KEYS[AlertType.CANDIDATE] == "alert_type_enabled:candidate"
+
+
+def test_enabling_one_alert_type_lets_only_that_type_through(session: Session) -> None:
+    from signalforge.alerts.dispatch import ALERT_TYPE_SETTING_KEYS
+
+    _seed_feed_and_briefing(session)
+    set_setting(session, "alerts_enabled", True)
+    set_setting(session, ALERT_TYPE_SETTING_KEYS[AlertType.DAILY_BRIEFING], True)
+    r = run_alert_cycle(session, now=NOON)
+    sent = [row for row in session.scalars(select(AlertLog)) if row.status is AlertStatus.SENT]
+    assert r.sent >= 1 and {row.alert_type for row in sent} == {AlertType.DAILY_BRIEFING}

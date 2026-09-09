@@ -40,9 +40,11 @@ from signalforge.settings_store import effective_research_config, get_setting
 
 
 def _latest_scan(session: Session, horizon: Horizon) -> ScanRun | None:
+    from signalforge.research.candidates import not_universe_scan
+
     return session.scalar(
         select(ScanRun)
-        .where(ScanRun.horizon == horizon)
+        .where(ScanRun.horizon == horizon, not_universe_scan(session))
         .order_by(ScanRun.started_at.desc())
         .limit(1)
     )
@@ -756,6 +758,7 @@ def ops_status_context(session: Session) -> dict[str, Any]:
     # --- switches -------------------------------------------------------------
     discord_configured = DiscordChannel.from_settings() is not None
     switches = {
+        "alert_types": _alert_type_states(session),
         "alerts_enabled": bool(get_setting(session, "alerts_enabled", False)),
         "paper_probation_enabled": bool(get_setting(session, "paper_probation_enabled", False)),
         "auto_simulate": bool(get_setting(session, "auto_simulate_qualified_signals", False)),
@@ -818,7 +821,7 @@ def ops_status_context(session: Session) -> dict[str, Any]:
         ]
     )
     jobs: list[dict[str, Any]] = []
-    for name in job_names:
+    for name in dict.fromkeys(job_names):  # universe_update is scheduled AND manual
         last = session.scalar(
             select(JobRun).where(JobRun.name == name).order_by(JobRun.started_at.desc()).limit(1)
         )
@@ -898,8 +901,58 @@ def ops_status_context(session: Session) -> dict[str, Any]:
     briefing = get_setting(session, "last_briefing", None)
     briefing_as_of = briefing.get("as_of") if isinstance(briefing, dict) else None
 
+    # --- approved-scope scan readiness (the same gate the scheduled job uses) ---
+    # /ops must never look "ready" while the daily data-freshness gate would
+    # block the approved-scope scan: evaluate it live, and show the exact
+    # reason plus the last SUCCESSFUL daily-bar ingest time.
+    from signalforge.config import get_settings as _get_settings
+    from signalforge.research.approved_scope_scan import (
+        APPROVED_VARIANT,
+        approved_horizons,
+        data_readiness,
+    )
+    from signalforge.research.fb_meta_universe_comparison import resolve_variant
+
+    last_ok_ingest = session.scalar(
+        select(IngestionRun)
+        .where(IngestionRun.feed_type == FeedType.BAR_DAILY, IngestionRun.status == "ok")
+        .order_by(IngestionRun.finished_at.desc())
+        .limit(1)
+    )
+    readiness: dict[str, Any] = {
+        "ready": False,
+        "reason": "no PAPER_APPROVED strategy — nothing to scan",
+        "last_ok_ingest_at": (
+            (last_ok_ingest.finished_at or last_ok_ingest.started_at).isoformat()
+            if last_ok_ingest
+            else None
+        ),
+        "dataset_key": None,
+        "n_symbols": 0,
+    }
+    if approved_horizons(session):
+        try:
+            syms, snap = resolve_variant(session, variant=APPROVED_VARIANT)
+            reason = data_readiness(
+                session, syms, source=_get_settings().market_data_provider, now=now
+            )
+            readiness.update(
+                ready=reason is None,
+                reason=reason or "fresh, complete daily data for the approved universe",
+                dataset_key=snap.key,
+                n_symbols=len(syms),
+            )
+        except Exception as exc:  # never let the status page itself fail
+            readiness.update(ready=False, reason=f"readiness check failed: {exc}")
+
     # --- readiness checklist --------------------------------------------------
     checks = [
+        (
+            "Approved-scope scan data readiness",
+            bool(readiness["ready"]),
+            f"{readiness['reason']} (last ok daily-bar ingest: "
+            f"{readiness['last_ok_ingest_at'] or 'never'})",
+        ),
         ("Database at migration head", bool(db["at_head"]), db.get("current_revision") or "?"),
         ("All data feeds fresh", not any_stale, "stale or unregistered" if any_stale else "ok"),
         ("Benzinga feed current", benzinga["available"], benzinga["detail"] or ""),
@@ -947,8 +1000,17 @@ def ops_status_context(session: Session) -> dict[str, Any]:
         "scans": scans,
         "approved_scan": approved_scan,
         "briefing_as_of": briefing_as_of,
+        "readiness": readiness,
         "checks": [{"label": lbl, "ok": ok, "note": note} for lbl, ok, note in checks],
+        "overall_ready": all(ok for _lbl, ok, _n in checks),
     }
+
+
+def universe_context(session: Session) -> dict[str, Any]:
+    """Liquid-universe coverage dashboard: stage counts, exclusions, storage."""
+    from signalforge.universe.pipeline import universe_status
+
+    return {"u": universe_status(session)}
 
 
 def settings_context(session: Session) -> dict[str, Any]:
@@ -974,7 +1036,14 @@ def settings_context(session: Session) -> dict[str, Any]:
         "llm_enabled": s.llm_enabled,
         "auto_simulate": bool(get_setting(session, "auto_simulate_qualified_signals", False)),
         "alerts_enabled": bool(get_setting(session, "alerts_enabled", False)),
+        "alert_types": _alert_type_states(session),
         "quiet_hours": get_setting(session, "quiet_hours", {"start": 21, "end": 7}),
         "max_alerts_per_day": get_setting(session, "max_alerts_per_day", 2),
         "kill_switch": get_kill_switch().state(),
     }
+
+
+def _alert_type_states(session: Session) -> dict[str, bool]:
+    from signalforge.alerts.dispatch import alert_type_states
+
+    return alert_type_states(session)

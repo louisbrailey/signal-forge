@@ -238,3 +238,16 @@ forbidden_modules = [
     "signalforge.data.adapters.massive_news",
     "signalforge.llm.summarize_news",
 ]
+
+[[tool.importlinter.contracts]]
+name = "S13: Signal Forge 1000 is simulated research only — no alerts, no paper acceptance, no LLM, no brokerage"
+type = "forbidden"
+source_modules = ["signalforge.sf1000"]
+forbidden_modules = [
+    "signalforge.alerts",
+    "signalforge.paper.ledger",
+    "signalforge.llm",
+    "signalforge.research.promotion",
+    "httpx",
+    "requests",
+]

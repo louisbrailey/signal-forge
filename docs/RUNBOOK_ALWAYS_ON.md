@@ -388,6 +388,12 @@ what you asked them to do.
 uv run signalforge providers verify
 ```
 
+The liquid-universe pipeline (`/universe` page; `signalforge universe status`)
+is a separate, config-gated post-close job (`universe_update`, 18:15 ET, OFF
+until `research.universe_pipeline.enabled` is true). Run it by hand with
+`signalforge universe update` (resumable; stops at its runtime/storage
+budgets). Its scans are research-only and never feed alerts.
+
 Probes every configured provider endpoint and records the result to
 `entitlement_check` — never prints or logs a key or the Discord webhook URL.
 
@@ -593,8 +599,9 @@ uv run signalforge run-job daily_eod_update
 Valid names are the eight in `default_job_specs()`
 (`src/signalforge/scheduler.py`) — `daily_eod_update`, `paper_mtm`,
 `feed_probe`, `health_check`, `news_poll`, `daily_briefing`, `alerts`,
-`strategy_health` — plus one entry in `MANUAL_JOBS` that is not on any
-schedule of its own: `approved_scope_scan` (it normally only runs as the
+`strategy_health`, `universe_update` (18:15 ET, config-gated OFF via
+`research.universe_pipeline.enabled`) — plus `MANUAL_JOBS` entries that are not on a
+schedule of their own: `approved_scope_scan` (it normally only runs as the
 last step of `daily_eod_update` and at catch-up).
 
 If specifically the approved-scope scan keeps showing `blocked` rather than
@@ -659,16 +666,15 @@ paper-trade acceptance stays manual):
 uv run signalforge paper-probation-enable
 ```
 
-**Step 3 — open the outbound alert gate.** In the dashboard, `/settings` →
-tick "enable outbound alerts" → Save. (Equivalent: the `alerts_enabled`
-setting, written through the same audited settings path.) Nothing leaves the
-process until this is on.
-
-Known limitation: `alerts_enabled` is a single global gate. Turning it on
-also lets the three informational alert types through — `DATA_ISSUE` (stale
-feed / failed ingest), `SYSTEM_HEALTH` (failed job), `DAILY_BRIEFING` — all
-still subject to quiet hours and the daily cap. There is no per-type toggle
-yet; if you want candidate alerts *only*, that is a small follow-up change.
+**Step 3 — open the outbound alert gate for candidate alerts only.** In the
+dashboard, `/settings` → tick "enable outbound alerts" AND, under "Alert
+types", tick only "approved paper-probation candidate" → Save. Every alert
+type is OFF by default and stays off until ticked; with only the candidate
+type on, the informational types (`system_health`, `data_issue`,
+`daily_briefing`) remain suppressed and logged locally as
+"alert type … is off in Settings". Tick those separately later if you want
+them on Discord too. Everything is still subject to quiet hours and the
+2-per-day candidate cap.
 
 **Verify:** `/ops` now shows Alerts ON and Paper probation ON (those two
 checklist rows go red on purpose — they flag that the switches moved), and

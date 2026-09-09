@@ -56,6 +56,7 @@ from signalforge.domain import (
 )
 from signalforge.killswitch import ensure_not_engaged
 from signalforge.observability import get_logger
+from signalforge.research.candidates import not_universe_scan
 from signalforge.settings_store import effective_research_config, get_setting, set_setting
 
 _log = get_logger("alerts.dispatch")
@@ -239,7 +240,10 @@ def plan_alerts(session: Session, now: datetime) -> list[PlannedAlert]:
         if h is Horizon.INTRADAY:
             continue  # never alert on intraday signals (EOD-only operation)
         run = session.scalar(
-            select(ScanRun).where(ScanRun.horizon == h).order_by(ScanRun.started_at.desc()).limit(1)
+            select(ScanRun)
+            .where(ScanRun.horizon == h, not_universe_scan(session))
+            .order_by(ScanRun.started_at.desc())
+            .limit(1)
         )
         if run is None:
             continue
@@ -315,6 +319,25 @@ def plan_alerts(session: Session, now: datetime) -> list[PlannedAlert]:
     return planned
 
 
+# Per-alert-type switches — every type OFF by default, on top of the global
+# ``alerts_enabled`` gate. Keys are stable strings so Settings, /ops and the
+# CLI all read the same rows.
+ALERT_TYPE_SETTING_KEYS: dict[AlertType, str] = {
+    AlertType.SYSTEM_HEALTH: "alert_type_enabled:system_health",
+    AlertType.DATA_ISSUE: "alert_type_enabled:data_issue",
+    AlertType.DAILY_BRIEFING: "alert_type_enabled:daily_briefing",
+    AlertType.CANDIDATE: "alert_type_enabled:candidate",
+}
+
+
+def alert_type_enabled(session: Session, alert_type: AlertType) -> bool:
+    return bool(get_setting(session, ALERT_TYPE_SETTING_KEYS[alert_type], False))
+
+
+def alert_type_states(session: Session) -> dict[str, bool]:
+    return {t.value: alert_type_enabled(session, t) for t in ALERT_TYPE_SETTING_KEYS}
+
+
 def run_alert_cycle(session: Session, now: datetime | None = None) -> AlertCycleResult:
     ensure_not_engaged()
     now = now or utcnow()
@@ -344,6 +367,8 @@ def run_alert_cycle(session: Session, now: datetime | None = None) -> AlertCycle
         reason: str | None = None
         if pa.force_suppress_reason:
             reason = pa.force_suppress_reason
+        elif not alert_type_enabled(session, pa.alert_type):
+            reason = f"alert type {pa.alert_type.value} is off in Settings"
         elif quiet and not pa.overnight_ok:
             reason = "quiet hours"
         elif (

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from sqlalchemy import ColumnElement
 from sqlalchemy.orm import Session
 
 from signalforge.db.models import Candidate, ScanRun
@@ -77,3 +78,15 @@ def persist_scan(session: Session, result: ScanResult) -> ScanRun:
         session.add(_draft_to_row(draft, run.id))
     session.flush()
     return run
+
+
+def not_universe_scan(session: Session) -> ColumnElement[bool]:
+    """Filter that keeps the research/promotion scans and EXCLUDES the liquid-
+    universe pipeline's research scans (source == its normalized_source).
+    Those are discovery-universe scans on as-of-adjusted bulk data — they must
+    never become "the latest scan" for the alert planner, the overview, the
+    scanner page, or the catch-up staleness check."""
+    from signalforge.settings_store import effective_research_config
+
+    src = effective_research_config(session).universe_pipeline.normalized_source
+    return ScanRun.source != src

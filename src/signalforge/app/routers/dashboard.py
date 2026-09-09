@@ -28,6 +28,7 @@ from signalforge.app.views import (
     settings_context,
     strategies_context,
     strategy_promotion_context,
+    universe_context,
 )
 from signalforge.audit import record
 from signalforge.auth import csrf
@@ -218,6 +219,12 @@ def ops_status_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
     return _page(request, user, "ops_status.html", ops_status_context(db))
 
 
+@router.get("/universe", response_class=HTMLResponse)
+def universe_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
+    """Liquid-universe coverage — read-only; research only."""
+    return _page(request, user, "universe.html", universe_context(db))
+
+
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
     return _page(request, user, "settings.html", settings_context(db))
@@ -321,6 +328,10 @@ def act_settings(
     max_alerts_per_day: Annotated[int | None, Form()] = None,
     quiet_start: Annotated[int | None, Form()] = None,
     quiet_end: Annotated[int | None, Form()] = None,
+    alert_system_health: Annotated[bool, Form()] = False,
+    alert_data_issue: Annotated[bool, Form()] = False,
+    alert_daily_briefing: Annotated[bool, Form()] = False,
+    alert_candidate: Annotated[bool, Form()] = False,
 ) -> RedirectResponse:
     risk: dict[str, float] = {}
     if per_trade_risk_pct:
@@ -337,6 +348,16 @@ def act_settings(
     set_setting(db, RESEARCH_OVERRIDES_KEY, overrides)
     set_setting(db, "auto_simulate_qualified_signals", auto_simulate)
     set_setting(db, "alerts_enabled", alerts_enabled)
+    from signalforge.alerts.dispatch import ALERT_TYPE_SETTING_KEYS
+    from signalforge.domain import AlertType
+
+    for alert_type, flag in (
+        (AlertType.SYSTEM_HEALTH, alert_system_health),
+        (AlertType.DATA_ISSUE, alert_data_issue),
+        (AlertType.DAILY_BRIEFING, alert_daily_briefing),
+        (AlertType.CANDIDATE, alert_candidate),
+    ):
+        set_setting(db, ALERT_TYPE_SETTING_KEYS[alert_type], flag)
     if max_alerts_per_day is not None:
         set_setting(db, "max_alerts_per_day", max_alerts_per_day)
     if quiet_start is not None and quiet_end is not None:

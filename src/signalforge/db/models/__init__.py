@@ -70,6 +70,12 @@ from signalforge.db.models.system import (
     PortfolioImport,
     User,
 )
+from signalforge.db.models.universe import (
+    BulkFile,
+    UniverseMember,
+    UniverseScreenRun,
+    UniverseTicker,
+)
 
 __all__ = [
     "Base",
@@ -126,6 +132,10 @@ __all__ = [
     "AlertSetting",
     "AlertLog",
     "JobRun",
+    "BulkFile",
+    "UniverseMember",
+    "UniverseScreenRun",
+    "UniverseTicker",
     "KillSwitchEvent",
     "AuditLog",
     "LlmCall",

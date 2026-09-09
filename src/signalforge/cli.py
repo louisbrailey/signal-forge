@@ -1703,6 +1703,104 @@ def paper_probation_disable_cmd() -> None:
     typer.secho("paper_probation_enabled = False", fg=typer.colors.YELLOW, bold=True)
 
 
+universe_app = typer.Typer(
+    help="Liquid U.S. research-universe pipeline (grouped-daily bulk; EOD only; research only)."
+)
+app.add_typer(universe_app, name="universe")
+
+
+@universe_app.command("update")
+def universe_update_cmd(
+    sessions: Annotated[int | None, typer.Option(help="Override backfill_sessions.")] = None,
+    max_minutes: Annotated[int | None, typer.Option(help="Override the runtime budget.")] = None,
+    no_scan: Annotated[
+        bool, typer.Option("--no-scan", help="Skip the research scan stage.")
+    ] = False,
+) -> None:
+    """Run one budgeted, resumable update now (discovery -> bulk backfill ->
+    screen -> normalize eligible -> scan). Ignores the config `enabled` flag
+    because this is an explicit operator action; never alerts or trades."""
+    ensure_not_engaged()
+    from signalforge.db.session import session_scope
+    from signalforge.settings_store import effective_research_config
+    from signalforge.universe.pipeline import run_universe_update
+
+    with session_scope() as session:
+        cfg = effective_research_config(session).universe_pipeline
+        overrides: dict[str, object] = {}
+        if sessions is not None:
+            overrides["backfill_sessions"] = sessions
+        if max_minutes is not None:
+            overrides["max_runtime_seconds"] = max_minutes * 60
+        if overrides:
+            cfg = cfg.model_copy(update=overrides)
+        rep = run_universe_update(session, cfg=cfg, do_scan=not no_scan)
+    _print_universe_report(rep)
+
+
+def _print_universe_report(rep: Any) -> None:
+    b = rep.backfill or {}
+    sc = rep.screen or {}
+    typer.secho(f"universe update: {rep.seconds}s  stopped={rep.stopped_reason or '-'}", bold=True)
+    if rep.discovery:
+        typer.echo(
+            f"  discovered {rep.discovery['discovered_all_types']} tickers (all types), "
+            f"in scope {rep.discovery['in_scope']}"
+        )
+    typer.echo(
+        f"  backfill: fetched {b.get('fetched')} skipped {b.get('skipped_existing')} "
+        f"empty {b.get('empty')} failed {b.get('failed')} -> {b.get('sessions_archived')} sessions "
+        f"({b.get('archive_bytes', 0) / 1e6:.1f} MB) stopped={b.get('stopped_reason') or '-'}"
+    )
+    if sc:
+        typer.echo(
+            f"  screen: {sc['discovered']} discovered -> {sc['in_scope']} in scope -> "
+            f"{sc['eligible']} eligible  (sessions {sc['sessions_used']}, "
+            f"snapshot #{sc['dataset_snapshot_id']})"
+        )
+        for reason, n in sorted(sc.get("excluded_by_reason", {}).items(), key=lambda kv: -kv[1]):
+            typer.echo(f"    excluded {reason}: {n}")
+        for flag, n in sorted(sc.get("flags", {}).items()):
+            typer.echo(f"    flag {flag}: {n}")
+    if rep.normalize:
+        nz = rep.normalize
+        typer.echo(
+            f"  normalize: {nz['symbols']} symbols, {nz['rows_written']} rows written, "
+            f"{nz['rows_skipped']} skipped, {nz['sessions']} sessions, {nz['seconds']}s"
+        )
+    for st in rep.scans:
+        typer.echo(
+            f"  scan {st['horizon']}: scanned {st['scanned']} excluded {st['excluded']} "
+            f"no-trade {st['no_trade']} qualified {st['qualified']}"
+        )
+    if rep.storage:
+        so = rep.storage
+        typer.echo(
+            f"  storage: archive {so['archive_bytes'] / 1e6:.1f} MB "
+            f"({so['archive_sessions']} sessions) + {so['normalized_rows']} normalized rows "
+            f"(~{so['normalized_bytes_estimate'] / 1e6:.0f} MB) = "
+            f"{so['used_share'] * 100:.1f}% of {so['budget_bytes'] / 1e9:.1f} GB budget; "
+            f"db file {(so['db_file_bytes'] or 0) / 1e6:.1f} MB"
+        )
+    typer.echo(
+        "Split-adjusted as of fetch date (NOT point-in-time); active-only discovery (NOT "
+        "survivorship-free). Research signal only — no order was placed."
+    )
+
+
+@universe_app.command("status")
+def universe_status_cmd() -> None:
+    """Stage counts, exclusions by reason, storage vs budget, last update."""
+    import json as _json
+
+    from signalforge.db.session import session_scope
+    from signalforge.universe.pipeline import universe_status
+
+    with session_scope() as session:
+        st = universe_status(session)
+    typer.echo(_json.dumps(st, indent=2, default=str))
+
+
 notify_app = typer.Typer(help="Notification-channel checks (never creates a paper trade).")
 app.add_typer(notify_app, name="notify")
 

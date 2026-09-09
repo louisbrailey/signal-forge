@@ -269,9 +269,29 @@ def job_daily_eod_update() -> None:
     guarded("approved_scope_scan", job_approved_scope_scan)()
 
 
+def job_universe_update() -> None:
+    """Post-close liquid-universe update (discovery -> bulk archive -> screen
+    -> normalize eligible -> research scan). Config-gated OFF
+    (``research.universe_pipeline.enabled``); strict runtime/storage budgets;
+    never an alert, paper trade, option, or intraday bar."""
+    from signalforge.db.session import session_scope
+    from signalforge.settings_store import effective_research_config
+    from signalforge.universe.pipeline import run_universe_update
+
+    with session_scope() as session:
+        cfg = effective_research_config(session).universe_pipeline
+        if not cfg.enabled:
+            _log.info("universe.update.skipped_disabled")
+            return
+        run_universe_update(session, cfg=cfg)
+
+
 # Jobs runnable on demand via `signalforge run-job <name>` that are NOT
 # separately scheduled (they run inside daily_eod_update / catch-up).
-MANUAL_JOBS: dict[str, JobFn] = {"approved_scope_scan": job_approved_scope_scan}
+MANUAL_JOBS: dict[str, JobFn] = {
+    "approved_scope_scan": job_approved_scope_scan,
+    "universe_update": job_universe_update,
+}
 
 
 def _in_us_market_session(now: datetime | None = None) -> bool:
@@ -337,6 +357,15 @@ def default_job_specs() -> list[JobSpec]:
             cron_hour=17,
             cron_minute=30,
         ),
+        # Post-close, after the EOD update has had time to finish; config-gated OFF.
+        JobSpec(
+            "universe_update",
+            job_universe_update,
+            24 * 60,
+            "Post-close liquid-universe bulk update + screen (config-gated OFF; EOD only)",
+            cron_hour=18,
+            cron_minute=15,
+        ),
         JobSpec("paper_mtm", job_paper_mtm, 12 * 60, "Mark paper positions to market"),
         JobSpec("feed_probe", job_feed_probe, 60, "Warn on stale data feeds"),
         JobSpec("health_check", job_health_check, 15, "24/7 DB + feed-staleness health check"),
@@ -375,10 +404,14 @@ def _last_scan_age() -> timedelta | None:
 
     from signalforge.db.models import ScanRun
     from signalforge.db.session import session_scope
+    from signalforge.research.candidates import not_universe_scan
 
     with session_scope() as session:
         last = session.scalar(
-            select(ScanRun.started_at).order_by(ScanRun.started_at.desc()).limit(1)
+            select(ScanRun.started_at)
+            .where(not_universe_scan(session))
+            .order_by(ScanRun.started_at.desc())
+            .limit(1)
         )
     return (datetime.now(UTC) - last) if last else None
 

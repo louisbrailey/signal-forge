@@ -139,6 +139,40 @@ class UniverseFilters(BaseModel):
     max_universe_size: PositiveInt = 150
 
 
+class UniversePipelineConfig(BaseModel):
+    """Liquid U.S. research-universe pipeline (grouped-daily bulk path).
+
+    OFF by default. Everything here is END_OF_DAY, split-adjusted AS OF the
+    fetch date (not point-in-time), and survivorship-biased at discovery
+    (active tickers only) — the pipeline records those facts on every
+    snapshot; nothing downstream may treat bulk history as adjusted
+    point-in-time research data."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    enabled: bool = False  # scheduled post-close update is a no-op until True
+    security_types: tuple[str, ...] = ("CS", "ETF")
+    min_price: PositiveFloat = 5.0
+    min_avg_dollar_volume: PositiveFloat = 20_000_000.0
+    adv_sessions: PositiveInt = 20
+    min_market_cap: PositiveFloat = 2_000_000_000.0  # CS only; ETFs have no cap
+    min_history_sessions: PositiveInt = 400
+    min_session_coverage: float = 0.95  # share of archived sessions a symbol must be present in
+    max_sector_share: float = 0.25  # max fraction of the eligible set in one 2-digit SIC group
+    max_abs_daily_return: float = 0.50  # data-quality spike flag
+    max_zero_volume_share: float = 0.05
+    min_listing_age_days: PositiveInt = 30
+    backfill_sessions: PositiveInt = (
+        420  # bulk files to keep (>= min_history_sessions + ADV window)
+    )
+    max_storage_bytes: PositiveInt = 5 * 1024**3  # raw archive + normalized rows budget
+    max_runtime_seconds: PositiveInt = 20 * 60  # per scheduled run; resumable
+    request_spacing_s: float = 2.0  # grouped-daily bulk requests only (1 per session)
+    normalized_source: str = (
+        "massive_grouped"  # ohlcv_daily.source label; never the research source
+    )
+
+
 class OptionsConfig(BaseModel):
     """Options coverage (education / simulation only). Deliberately narrow —
     a small liquid ETF + large-cap set, bounded expirations and strikes."""
@@ -264,6 +298,7 @@ class ResearchConfig(BaseModel):
     promotion: PromotionThresholds = Field(default_factory=PromotionThresholds)
     health_monitor: HealthMonitorConfig = Field(default_factory=HealthMonitorConfig)
     universe_filters: UniverseFilters = Field(default_factory=UniverseFilters)
+    universe_pipeline: UniversePipelineConfig = Field(default_factory=UniversePipelineConfig)
     options: OptionsConfig = Field(default_factory=OptionsConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
 

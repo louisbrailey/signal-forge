@@ -40,6 +40,15 @@
     <label class="flex items-center gap-2"><input type="checkbox" name="allow_short_candidates" value="true" {{ 'checked' if research.allow_short_candidates }} /> allow short candidates</label>
     <label class="flex items-center gap-2"><input type="checkbox" name="auto_simulate" value="true" {{ 'checked' if auto_simulate }} /> auto-simulate qualified signals</label>
     <label class="flex items-center gap-2"><input type="checkbox" name="alerts_enabled" value="true" {{ 'checked' if alerts_enabled }} /> enable outbound alerts (local log is always written)</label>
+    <fieldset class="sm:col-span-2 rounded border border-slate-200 p-2">
+      <legend class="px-1 text-xs text-slate-500">Alert types (each OFF by default; also requires "enable outbound alerts")</legend>
+      <div class="grid gap-1 sm:grid-cols-2">
+        <label class="flex items-center gap-2"><input type="checkbox" name="alert_system_health" value="true" {{ 'checked' if alert_types.system_health }} /> system health (failed job / DB)</label>
+        <label class="flex items-center gap-2"><input type="checkbox" name="alert_data_issue" value="true" {{ 'checked' if alert_types.data_issue }} /> data issue / staleness</label>
+        <label class="flex items-center gap-2"><input type="checkbox" name="alert_daily_briefing" value="true" {{ 'checked' if alert_types.daily_briefing }} /> daily briefing</label>
+        <label class="flex items-center gap-2"><input type="checkbox" name="alert_candidate" value="true" {{ 'checked' if alert_types.candidate }} /> approved paper-probation candidate (also requires paper probation ON)</label>
+      </div>
+    </fieldset>
     <div class="flex items-end gap-2">Quiet hours
       <input name="quiet_start" type="number" min="0" max="23" value="{{ quiet_hours.start }}" class="w-16 rounded border border-slate-300 px-2 py-1" />–
       <input name="quiet_end" type="number" min="0" max="23" value="{{ quiet_hours.end }}" class="w-16 rounded border border-slate-300 px-2 py-1" />
