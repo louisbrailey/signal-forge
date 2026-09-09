@@ -31,7 +31,7 @@ _log = get_logger("universe.bulk")
 _BASE_URL = "https://api.massive.com"
 _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 _MAX_ATTEMPTS = 4
-_MAX_LOOKBACK_DAYS = 3 * 366  # never walk back further than ~3 years of calendar days
+_MIN_LOOKBACK_DAYS = 3 * 366  # floor; the walk-back window scales with the requested sessions
 DEFAULT_SOURCE = "massive_grouped"
 
 
@@ -313,7 +313,8 @@ def backfill(
     )
     d = _last_completed_session_et(now)
     walked = 0
-    while len(have) < sessions and walked < _MAX_LOOKBACK_DAYS:
+    max_walk = max(_MIN_LOOKBACK_DAYS, int(sessions * 1.6) + 30)  # ~252 sessions/365 days
+    while len(have) < sessions and walked < max_walk:
         walked += 1
         cur = d
         d -= timedelta(days=1)

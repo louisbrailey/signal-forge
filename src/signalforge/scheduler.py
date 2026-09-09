@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -366,6 +366,12 @@ def default_job_specs() -> list[JobSpec]:
             cron_hour=18,
             cron_minute=15,
         ),
+        JobSpec(
+            "catch_up",
+            job_catch_up,
+            30,
+            "Run the EOD update if it is owed for the last completed session (missed/slept)",
+        ),
         JobSpec("paper_mtm", job_paper_mtm, 12 * 60, "Mark paper positions to market"),
         JobSpec("feed_probe", job_feed_probe, 60, "Warn on stale data feeds"),
         JobSpec("health_check", job_health_check, 15, "24/7 DB + feed-staleness health check"),
@@ -394,6 +400,143 @@ def job_alerts() -> None:
 
     with session_scope() as session:
         run_alert_cycle(session)
+
+
+# --------------------------------------------------------------------------- #
+# Worker liveness, expected-session logic, catch-up
+# --------------------------------------------------------------------------- #
+HEARTBEAT_INTERVAL_S = 30
+WORKER_STALE_AFTER_S = 3 * HEARTBEAT_INTERVAL_S
+EOD_CRON = (17, 30)  # America/New_York — matches the daily_eod_update JobSpec
+CATCH_UP_RETRY_BACKOFF = timedelta(hours=2)
+WORKER_NAME = "scheduler"
+
+
+def record_heartbeat(
+    scheduler: BackgroundScheduler | None,
+    *,
+    started_at: datetime,
+    worker: str = WORKER_NAME,
+    detail: str = "",
+) -> None:
+    """Upsert this worker's liveness row with the scheduler's real next-run
+    times. Best-effort: a DB hiccup must never stop the worker."""
+    import os
+    import socket
+
+    try:
+        from sqlalchemy import select
+
+        from signalforge.db.models import WorkerHeartbeat
+        from signalforge.db.session import session_scope
+
+        next_runs: dict[str, str | None] = {}
+        if scheduler is not None:
+            for job in scheduler.get_jobs():
+                nrt = getattr(job, "next_run_time", None)
+                next_runs[job.id] = nrt.astimezone(UTC).isoformat() if nrt else None
+        with session_scope() as session:
+            row = session.scalar(select(WorkerHeartbeat).where(WorkerHeartbeat.worker == worker))
+            if row is None:
+                row = WorkerHeartbeat(worker=worker, started_at=started_at, last_beat_at=started_at)
+                session.add(row)
+            row.host = socket.gethostname()[:120]
+            row.pid = os.getpid()
+            row.started_at = started_at
+            row.last_beat_at = datetime.now(UTC)
+            row.next_runs_json = next_runs
+            row.detail = detail[:300]
+    except Exception as exc:
+        # WARNING, not debug: a silent heartbeat failure would make /ops report a
+        # live worker as dead with nothing in the log to tell the two apart.
+        _log.warning("worker.heartbeat_failed", error=repr(exc)[:200])
+
+
+def last_completed_session(now: datetime | None = None) -> date:
+    """The most recent U.S. session whose completed daily bars the provider
+    should already have published: today (ET) if it is a weekday and the
+    EOD cron time has passed, else the previous weekday. Exchange holidays
+    are NOT modelled — on a holiday this expects a session that never
+    happened, which shows as "1 session behind" until the next real close
+    (a conservative, visible error rather than a silent one)."""
+    from zoneinfo import ZoneInfo
+
+    n = (now or datetime.now(UTC)).astimezone(ZoneInfo("America/New_York"))
+    d = n.date()
+    if n.weekday() >= 5 or (n.hour, n.minute) < EOD_CRON:
+        d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def _session_cutoff_utc(session_date: date) -> datetime:
+    from zoneinfo import ZoneInfo
+
+    return datetime(
+        session_date.year,
+        session_date.month,
+        session_date.day,
+        EOD_CRON[0],
+        EOD_CRON[1],
+        tzinfo=ZoneInfo("America/New_York"),
+    ).astimezone(UTC)
+
+
+def catch_up_pending(now: datetime | None = None) -> tuple[bool, str]:
+    """Is the daily EOD update owed for the last completed session? Pending
+    when no OK daily-bar ingestion finished after that session's cutoff.
+    Backs off for ``CATCH_UP_RETRY_BACKOFF`` after a failed attempt so a
+    broken provider is retried, not hammered."""
+    from sqlalchemy import select
+
+    from signalforge.db.models import IngestionRun, JobRun
+    from signalforge.db.session import session_scope
+    from signalforge.domain import FeedType
+
+    now = now or datetime.now(UTC)
+    expected = last_completed_session(now)
+    cutoff = _session_cutoff_utc(expected)
+    with session_scope() as session:
+        last_ok = session.scalar(
+            select(IngestionRun.finished_at)
+            .where(IngestionRun.feed_type == FeedType.BAR_DAILY, IngestionRun.status == "ok")
+            .order_by(IngestionRun.finished_at.desc())
+            .limit(1)
+        )
+        last_fail = session.scalar(
+            select(JobRun)
+            .where(
+                JobRun.name.in_(("daily_eod_update", "catch_up")),
+                JobRun.status == "failed",
+            )
+            .order_by(JobRun.started_at.desc())
+            .limit(1)
+        )
+    if last_ok is not None and last_ok >= cutoff:
+        return False, f"daily bars for {expected.isoformat()} ingested at {last_ok.isoformat()}"
+    if last_fail is not None and now - last_fail.started_at < CATCH_UP_RETRY_BACKOFF:
+        return (
+            False,
+            f"catch-up owed for {expected.isoformat()} but backing off after a failed attempt "
+            f"at {last_fail.started_at.isoformat()} ({last_fail.detail[:80]})",
+        )
+    owed = f"no OK daily-bar ingestion since the {expected.isoformat()} close"
+    if last_ok is not None:
+        owed += f" (last OK: {last_ok.isoformat()})"
+    return True, owed
+
+
+def job_catch_up() -> None:
+    """Every 30 min: if the EOD update is owed for the last completed session
+    (missed cron while the Mac slept, worker restarted, provider outage),
+    run it now. Idempotent — a successful update clears the pending state."""
+    pending, reason = catch_up_pending()
+    if not pending:
+        _log.info("catch_up.not_pending", reason=reason)
+        return
+    _log.warning("catch_up.running", reason=reason)
+    job_daily_eod_update()
 
 
 # --------------------------------------------------------------------------- #

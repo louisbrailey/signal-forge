@@ -489,14 +489,18 @@ def test_run_screen_exact_exclusion_reasons_eligible_set_and_flags(session: Sess
 
     assert rep.discovered == 14
     assert rep.in_scope == 12
-    assert rep.eligible == 4
-    assert rep.eligible_symbols == ["CAPUNK", "ETFA", "ETFB", "SECTA"]
+    # CAPUNK is a common stock with NO known market cap: it is never treated as
+    # passing the market-cap filter (excluded as market_cap_unverified) while
+    # keeping its market_cap_unavailable flag.
+    assert rep.eligible == 3
+    assert rep.eligible_symbols == ["ETFA", "ETFB", "SECTA"]
     assert rep.excluded_by_reason == {
         "security_type_out_of_scope": 1,
         "inactive_listing": 1,
         "price_below_min": 1,
         "adv_dollar_volume_below_min": 1,
         "market_cap_below_min": 1,
+        "market_cap_unverified": 1,
         "insufficient_history": 1,
         "listing_too_recent": 1,
         "data_quality": 1,
@@ -526,7 +530,9 @@ def test_run_screen_exact_exclusion_reasons_eligible_set_and_flags(session: Sess
     )
     assert capunk is not None
     assert "spread_filter_not_licensed" in capunk.flags
-    assert "market_cap_unavailable" in capunk.flags
+    assert "market_cap_unavailable" in capunk.flags  # flag preserved ...
+    assert capunk.eligible is False  # ... and never counted as passing the cap filter
+    assert capunk.exclusion_reasons == ["market_cap_unverified"]
 
 
 # --------------------------------------------------------------------------- #

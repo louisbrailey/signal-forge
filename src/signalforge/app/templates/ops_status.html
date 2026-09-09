@@ -33,6 +33,20 @@
   </ul>
 </section>
 
+<section class="mt-4 rounded-lg border border-slate-200 bg-white p-4 text-sm">
+  <h2 class="text-sm font-medium text-slate-500">Worker · schedule · freshness · catch-up</h2>
+  <dl class="mt-2 grid grid-cols-2 gap-y-1 text-xs text-slate-600 sm:grid-cols-4">
+    <dt class="text-slate-400">Worker</dt>
+    <dd>{% if worker.running %}{{ pill(true, 'running') }} pid {{ worker.pid }} on {{ worker.host }} · beat {{ worker.beat_age_s }}s ago · up since {{ (worker.started_at or '')[:16] }}{% elif worker.seen %}{{ pill(false, '', 'STALE') }} last beat {{ (worker.last_beat_at or '')[:16] }} ({{ worker.beat_age_s }}s ago) — process gone{% else %}{{ pill(false, '', 'not running') }} no heartbeat ever — <code>signalforge run-scheduler</code> has not been started{% endif %}</dd>
+    <dt class="text-slate-400">Next scheduled EOD update</dt>
+    <dd>{% if next_scheduled.eod_update_from_worker %}{{ next_scheduled.eod_update_from_worker[:16] }} UTC (from worker){% else %}intended {{ next_scheduled.eod_update_intended_et[:16] }} ET — <span class="text-red-700">will not fire: no worker</span>{% endif %}</dd>
+    <dt class="text-slate-400">Daily-bar freshness</dt>
+    <dd>{{ pill(freshness.current, 'current', (freshness.sessions_behind ~ ' session(s) behind') if freshness.sessions_behind else 'no bars') }} newest {{ freshness.newest_bar or '—' }} vs expected session {{ freshness.expected_session }} <span class="text-slate-400">({{ freshness.source }}; {{ freshness.note }})</span></dd>
+    <dt class="text-slate-400">Catch-up</dt>
+    <dd>{{ pill(not catch_up.pending, 'not pending', 'PENDING') }} {{ catch_up.reason }}</dd>
+  </dl>
+</section>
+
 <section class="mt-4 grid gap-4 lg:grid-cols-2">
   <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
     <h2 class="text-sm font-medium text-slate-500">Version &amp; database</h2>
@@ -113,16 +127,18 @@
   <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
     <h2 class="text-sm font-medium text-slate-500">Last scheduled-job outcomes</h2>
     <table class="mt-2 min-w-full text-xs">
-      <thead class="text-left text-slate-400"><tr><th class="pr-3">Job</th><th class="pr-3">Outcome</th><th class="pr-3">Started</th><th>Detail</th></tr></thead>
+      <thead class="text-left text-slate-400"><tr><th class="pr-3">Job</th><th class="pr-3">Last attempt</th><th class="pr-3">Last success</th><th class="pr-3">Next</th><th>Failure reason</th></tr></thead>
       <tbody>
       {% for j in jobs %}
-      <tr class="border-t border-slate-100">
+      <tr class="border-t border-slate-100 align-top">
         <td class="py-1 pr-3 font-mono">{{ j.name }}</td>
         <td class="pr-3">
           {% if j.status == 'ok' %}{{ pill(true, 'ok') }}{% elif j.status == 'never' %}<span class="text-slate-400">never</span>{% elif j.status == 'skipped' %}<span class="rounded bg-amber-100 px-1.5 py-0.5 text-amber-800">skipped</span>{% else %}{{ pill(false, '', j.status) }}{% endif %}
+          {% if j.started_at %}<span class="text-slate-500">{{ j.started_at[:16] }}</span>{% if j.duration_s is not none %} <span class="text-slate-400">{{ j.duration_s }}s</span>{% endif %}{% endif %}
         </td>
-        <td class="pr-3">{{ (j.started_at or '—')[:16] }}{% if j.age_hours is not none %} <span class="text-slate-400">({{ j.age_hours }}h ago)</span>{% endif %}</td>
-        <td class="text-slate-500">{{ j.detail[:80] }}</td>
+        <td class="pr-3 text-slate-500">{{ (j.last_success_at or '—')[:16] }}{% if j.last_success_duration_s is not none %} <span class="text-slate-400">{{ j.last_success_duration_s }}s</span>{% endif %}</td>
+        <td class="pr-3 text-slate-500">{{ (j.next_run or '—')[:16] }}</td>
+        <td class="text-red-700">{{ j.failure_reason[:100] }}</td>
       </tr>
       {% endfor %}
       </tbody>

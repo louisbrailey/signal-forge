@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from signalforge.data.feeds import feed_status_report
@@ -711,6 +711,12 @@ def paper_probation_context(session: Session) -> dict[str, Any]:
     return ctx
 
 
+def _get_settings_provider() -> str:
+    from signalforge.config import get_settings
+
+    return get_settings().market_data_provider or "fixture"
+
+
 def ops_status_context(session: Session) -> dict[str, Any]:
     """Operational Status: is the always-on runtime healthy and are the safety
     switches where the operator expects them? Read-only. Never exposes a key
@@ -821,10 +827,22 @@ def ops_status_context(session: Session) -> dict[str, Any]:
         ]
     )
     jobs: list[dict[str, Any]] = []
-    for name in dict.fromkeys(job_names):  # universe_update is scheduled AND manual
+    for name in dict.fromkeys(job_names):
         last = session.scalar(
             select(JobRun).where(JobRun.name == name).order_by(JobRun.started_at.desc()).limit(1)
         )
+        last_ok = session.scalar(
+            select(JobRun)
+            .where(JobRun.name == name, JobRun.status == "ok")
+            .order_by(JobRun.started_at.desc())
+            .limit(1)
+        )
+
+        def _dur(r: JobRun | None) -> float | None:
+            if r is None or r.finished_at is None:
+                return None
+            return round((r.finished_at - r.started_at).total_seconds(), 1)
+
         jobs.append(
             {
                 "name": name,
@@ -836,7 +854,14 @@ def ops_status_context(session: Session) -> dict[str, Any]:
                 "age_hours": (
                     round((now - last.started_at).total_seconds() / 3600, 1) if last else None
                 ),
+                "duration_s": _dur(last),
+                "last_success_at": last_ok.started_at.isoformat() if last_ok else None,
+                "last_success_duration_s": _dur(last_ok),
+                "failure_reason": (
+                    last.detail if last and last.status in ("failed", "skipped") else ""
+                ),
                 "detail": last.detail if last else "",
+                "next_run": None,  # filled from the worker heartbeat below
             }
         )
 
@@ -901,6 +926,72 @@ def ops_status_context(session: Session) -> dict[str, Any]:
     briefing = get_setting(session, "last_briefing", None)
     briefing_as_of = briefing.get("as_of") if isinstance(briefing, dict) else None
 
+    # --- worker liveness + next scheduled run (from the worker's own heartbeat) ---
+    from signalforge.db.models import OHLCVDaily, WorkerHeartbeat
+    from signalforge.scheduler import (
+        EOD_CRON,
+        WORKER_STALE_AFTER_S,
+        catch_up_pending,
+        last_completed_session,
+    )
+
+    hb = session.scalar(select(WorkerHeartbeat).where(WorkerHeartbeat.worker == "scheduler"))
+    hb_age = (now - hb.last_beat_at).total_seconds() if hb else None
+    worker = {
+        "seen": hb is not None,
+        "running": hb is not None and hb_age is not None and hb_age <= WORKER_STALE_AFTER_S,
+        "host": hb.host if hb else None,
+        "pid": hb.pid if hb else None,
+        "started_at": hb.started_at.isoformat() if hb else None,
+        "last_beat_at": hb.last_beat_at.isoformat() if hb else None,
+        "beat_age_s": round(hb_age) if hb_age is not None else None,
+        "detail": hb.detail if hb else "",
+    }
+    next_runs: dict[str, str | None] = dict(hb.next_runs_json) if hb else {}
+    for j in jobs:
+        j["next_run"] = next_runs.get(j["name"])
+    # what the cron table intends for the EOD job even when no worker is alive
+    from zoneinfo import ZoneInfo
+
+    et_now = now.astimezone(ZoneInfo("America/New_York"))
+    intended = et_now.replace(hour=EOD_CRON[0], minute=EOD_CRON[1], second=0, microsecond=0)
+    if intended <= et_now:
+        intended += timedelta(days=1)
+    while intended.weekday() >= 5:
+        intended += timedelta(days=1)
+    next_scheduled = {
+        "eod_update_from_worker": next_runs.get("daily_eod_update"),
+        "eod_update_intended_et": intended.isoformat(),
+        "will_fire": worker["running"],
+    }
+
+    # --- daily-bar freshness vs the expected (last completed) session ---
+    expected_session = last_completed_session(now)
+    research_source = _get_settings_provider()
+    research_symbols = list(effective_research_config(session).universe)
+    newest_bar = session.scalar(
+        select(func.max(OHLCVDaily.session_date))
+        .join(Instrument, Instrument.id == OHLCVDaily.instrument_id)
+        .where(OHLCVDaily.source == research_source, Instrument.symbol.in_(research_symbols))
+    )
+    behind = 0
+    if newest_bar is not None:
+        d = newest_bar
+        while d < expected_session:
+            d += timedelta(days=1)
+            if d.weekday() < 5:
+                behind += 1
+    freshness = {
+        "expected_session": expected_session.isoformat(),
+        "newest_bar": newest_bar.isoformat() if newest_bar else None,
+        "sessions_behind": behind if newest_bar else None,
+        "current": newest_bar is not None and newest_bar >= expected_session,
+        "source": research_source,
+        "note": "exchange holidays are not modelled: a holiday shows as 1 session behind",
+    }
+    pending, pending_reason = catch_up_pending(now)
+    catch_up = {"pending": pending, "reason": pending_reason}
+
     # --- approved-scope scan readiness (the same gate the scheduled job uses) ---
     # /ops must never look "ready" while the daily data-freshness gate would
     # block the approved-scope scan: evaluate it live, and show the exact
@@ -953,6 +1044,23 @@ def ops_status_context(session: Session) -> dict[str, Any]:
             f"{readiness['reason']} (last ok daily-bar ingest: "
             f"{readiness['last_ok_ingest_at'] or 'never'})",
         ),
+        (
+            "Worker running (heartbeat)",
+            bool(worker["running"]),
+            (
+                f"last beat {worker['beat_age_s']}s ago on {worker['host']} pid {worker['pid']}"
+                if worker["seen"]
+                else "no heartbeat ever recorded — run-scheduler has not been started"
+            ),
+        ),
+        (
+            "Daily bars current for last completed session",
+            bool(freshness["current"]),
+            f"newest {freshness['newest_bar'] or 'none'} vs expected "
+            f"{freshness['expected_session']}"
+            + (f" ({freshness['sessions_behind']} behind)" if freshness["sessions_behind"] else ""),
+        ),
+        ("No catch-up pending", not catch_up["pending"], catch_up["reason"]),
         ("Database at migration head", bool(db["at_head"]), db.get("current_revision") or "?"),
         ("All data feeds fresh", not any_stale, "stale or unregistered" if any_stale else "ok"),
         ("Benzinga feed current", benzinga["available"], benzinga["detail"] or ""),
@@ -1001,6 +1109,10 @@ def ops_status_context(session: Session) -> dict[str, Any]:
         "approved_scan": approved_scan,
         "briefing_as_of": briefing_as_of,
         "readiness": readiness,
+        "worker": worker,
+        "next_scheduled": next_scheduled,
+        "freshness": freshness,
+        "catch_up": catch_up,
         "checks": [{"label": lbl, "ok": ok, "note": note} for lbl, ok, note in checks],
         "overall_ready": all(ok for _lbl, ok, _n in checks),
     }

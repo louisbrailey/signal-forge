@@ -36,6 +36,7 @@ R_NO_DATA = "no_bulk_data"
 R_PRICE = "price_below_min"
 R_ADV = "adv_dollar_volume_below_min"
 R_CAP = "market_cap_below_min"
+R_CAP_UNVERIFIED = "market_cap_unverified"  # cap unknown -> never treated as passing
 R_HISTORY = "insufficient_history"
 R_LISTING = "listing_too_recent"
 R_QUALITY = "data_quality"
@@ -188,7 +189,9 @@ def run_screen(
                 reasons.append(R_ADV)
             if t.security_type == "CS":
                 if t.market_cap is None:
-                    flags.append(F_CAP_UNKNOWN)
+                    flags.append(F_CAP_UNKNOWN)  # preserved even when it also excludes
+                    if cfg.require_market_cap:
+                        reasons.append(R_CAP_UNVERIFIED)
                 elif t.market_cap < cfg.min_market_cap:
                     reasons.append(R_CAP)
             if present < history_required * cfg.min_session_coverage:
@@ -229,7 +232,9 @@ def run_screen(
     # sector concentration: no 2-digit SIC group may exceed max_sector_share of
     # the eligible set (ETFs have no SIC and are exempt) — drop lowest-ADV first.
     cs_survivors = [s for s in survivors if s[0].security_type == "CS" and s[2]]
-    cap = int(len(survivors) * cfg.max_sector_share)
+    # at least one name per group may stay: a tiny survivor set must not
+    # round the cap to 0 and silently disable the rule
+    cap = max(1, int(len(survivors) * cfg.max_sector_share)) if survivors else 0
     by_group: dict[str, list[tuple[UniverseTicker, float, str]]] = defaultdict(list)
     for s in cs_survivors:
         by_group[s[2]].append(s)
@@ -339,4 +344,67 @@ def snapshot_summary(run: UniverseScreenRun) -> dict[str, Any]:
         "adjustment_basis": run.adjustment_basis,
         "survivorship_note": run.survivorship_note,
         "runtime_seconds": run.runtime_seconds,
+    }
+
+
+def data_quality_summary(session: Session, run: UniverseScreenRun) -> dict[str, Any]:
+    """Explicit, honest data-quality facts for the coverage page."""
+    from sqlalchemy import func
+
+    cs_in_scope = int(
+        session.scalar(
+            select(func.count())
+            .select_from(UniverseMember)
+            .where(UniverseMember.run_id == run.id, UniverseMember.security_type == "CS")
+        )
+        or 0
+    )
+    cs_missing_cap = int(
+        session.scalar(
+            select(func.count())
+            .select_from(UniverseMember)
+            .where(
+                UniverseMember.run_id == run.id,
+                UniverseMember.security_type == "CS",
+                UniverseMember.market_cap.is_(None),
+            )
+        )
+        or 0
+    )
+    inactive_seen = int(
+        session.scalar(
+            select(func.count()).select_from(UniverseTicker).where(UniverseTicker.active.is_(False))
+        )
+        or 0
+    )
+    excl = run.excluded_by_reason or {}
+    return {
+        "market_cap": {
+            "cs_in_scope": cs_in_scope,
+            "cs_missing_cap": cs_missing_cap,
+            "cs_with_cap": cs_in_scope - cs_missing_cap,
+            "excluded_market_cap_unverified": int(excl.get(R_CAP_UNVERIFIED, 0)),
+            "excluded_market_cap_below_min": int(excl.get(R_CAP, 0)),
+            "basis": "current value from the reference endpoint — NOT point-in-time; missing cap "
+            "never passes the market-cap filter (excluded as market_cap_unverified, flag kept)",
+        },
+        "spread": {
+            "licensed": False,
+            "basis": "NBBO quotes not entitled (HTTP 403) — spread filter NOT applied; every "
+            "member carries the spread_filter_not_licensed flag",
+        },
+        "discovery": {
+            "basis": "active tickers only at discovery — NOT survivorship-free",
+            "inactive_seen_since_first_discovery": inactive_seen,
+        },
+        "adjustment": {"basis": run.adjustment_basis},
+        "delisted_history": {
+            "covered": False,
+            "basis": "no delisted-symbol history — any backtest over this universe is "
+            "survivorship-biased and must be labelled provisional",
+        },
+        "history": {
+            "sessions_archived": run.sessions_used,
+            "archive": f"{run.archive_first}..{run.archive_last}",
+        },
     }

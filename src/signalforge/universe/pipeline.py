@@ -34,6 +34,7 @@ from signalforge.universe.discovery import DiscoveryReport, enrich_market_caps, 
 from signalforge.universe.normalize import NormalizeReport, normalize_symbols
 from signalforge.universe.screen import (
     ScreenReport,
+    data_quality_summary,
     eligible_symbols_for,
     exclusion_examples,
     latest_screen,
@@ -251,6 +252,7 @@ def universe_status(session: Session) -> dict[str, Any]:
         "config": cfg.model_dump(mode="json"),
         "screen": snapshot_summary(run) if run else None,
         "exclusion_examples": exclusion_examples(session, run.id) if run else {},
+        "data_quality": data_quality_summary(session, run) if run else None,
         "eligible_preview": eligible_symbols_for(session, run.id)[:40] if run else [],
         "storage": storage_usage(session, cfg),
         "failed_bulk_files": failed_files,
@@ -266,3 +268,28 @@ def universe_status(session: Session) -> dict[str, Any]:
             "candidates here cannot match any approved scope and never alert."
         ),
     }
+
+
+def cap_enrichment_candidates(session: Session) -> list[str]:
+    """Common stocks in the latest screen that lack a current market cap and
+    would otherwise be eligible (excluded ONLY because the cap is unknown),
+    highest ADV$ first — the resumable enrichment order."""
+    from signalforge.db.models import UniverseMember
+    from signalforge.universe.screen import R_CAP_UNVERIFIED
+
+    run = latest_screen(session)
+    if run is None:
+        return []
+    rows = session.execute(
+        select(
+            UniverseMember.ticker,
+            UniverseMember.avg_dollar_volume,
+            UniverseMember.exclusion_reasons,
+        ).where(
+            UniverseMember.run_id == run.id,
+            UniverseMember.security_type == "CS",
+            UniverseMember.market_cap.is_(None),
+        )
+    ).all()
+    keep = [(t, adv or 0.0) for t, adv, reasons in rows if set(reasons or []) <= {R_CAP_UNVERIFIED}]
+    return [t for t, _ in sorted(keep, key=lambda r: -r[1])]

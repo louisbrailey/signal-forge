@@ -156,6 +156,7 @@ class UniversePipelineConfig(BaseModel):
     min_avg_dollar_volume: PositiveFloat = 20_000_000.0
     adv_sessions: PositiveInt = 20
     min_market_cap: PositiveFloat = 2_000_000_000.0  # CS only; ETFs have no cap
+    require_market_cap: bool = True  # CS with UNKNOWN cap are never eligible (flag kept)
     min_history_sessions: PositiveInt = 400
     min_session_coverage: float = 0.95  # share of archived sessions a symbol must be present in
     max_sector_share: float = 0.25  # max fraction of the eligible set in one 2-digit SIC group

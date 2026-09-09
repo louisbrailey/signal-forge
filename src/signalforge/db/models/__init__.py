@@ -69,6 +69,7 @@ from signalforge.db.models.system import (
     LlmCall,
     PortfolioImport,
     User,
+    WorkerHeartbeat,
 )
 from signalforge.db.models.universe import (
     BulkFile,
@@ -132,6 +133,7 @@ __all__ = [
     "AlertSetting",
     "AlertLog",
     "JobRun",
+    "WorkerHeartbeat",
     "BulkFile",
     "UniverseMember",
     "UniverseScreenRun",

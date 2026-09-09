@@ -1788,6 +1788,38 @@ def _print_universe_report(rep: Any) -> None:
     )
 
 
+@universe_app.command("enrich-caps")
+def universe_enrich_caps_cmd(
+    max_requests: Annotated[
+        int, typer.Option(help="Reference requests this run (resumable).")
+    ] = 500,
+    spacing: Annotated[float, typer.Option(help="Seconds between requests.")] = 0.5,
+) -> None:
+    """Fill CURRENT market caps (never point-in-time) for common stocks that are
+    eligible except for an unknown cap, highest ADV$ first. Resumable: re-run
+    until it reports 0 remaining, then `universe update` to re-screen."""
+    ensure_not_engaged()
+    from signalforge.db.session import session_scope
+    from signalforge.universe.bulk import GroupedDailyClient
+    from signalforge.universe.discovery import enrich_market_caps
+    from signalforge.universe.pipeline import cap_enrichment_candidates
+
+    client = GroupedDailyClient(spacing_s=spacing)
+    with session_scope() as session:
+        todo = cap_enrichment_candidates(session)
+        typer.echo(f"market caps missing for {len(todo)} otherwise-eligible common stocks")
+        done = enrich_market_caps(session, client, todo, max_requests=max_requests)
+    typer.secho(
+        f"enriched {done}; remaining ≈ {max(0, len(todo) - done)} — re-run to continue, then "
+        "`signalforge universe update` to re-screen",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo(
+        "Current-value market cap only (NOT point-in-time). "
+        "Research signal only — no order was placed."
+    )
+
+
 @universe_app.command("status")
 def universe_status_cmd() -> None:
     """Stage counts, exclusions by reason, storage vs budget, last update."""
@@ -1866,14 +1898,27 @@ def run_scheduler() -> None:
             "is a no-op until it is released",
             fg=typer.colors.YELLOW,
         )
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    from signalforge.scheduler import HEARTBEAT_INTERVAL_S, record_heartbeat
+
+    started = _dt.now(_UTC)
+    record_heartbeat(None, started_at=started, detail="starting: catch-up check")
     run_catch_up()
     scheduler = build_scheduler()
     scheduler.start()
+    record_heartbeat(scheduler, started_at=started)
     typer.secho("scheduler running — Ctrl-C to stop", fg=typer.colors.CYAN)
+    last_beat = time.monotonic()
     try:
         while True:
             time.sleep(2)
+            if time.monotonic() - last_beat >= HEARTBEAT_INTERVAL_S:
+                record_heartbeat(scheduler, started_at=started)
+                last_beat = time.monotonic()
     except (KeyboardInterrupt, SystemExit):
+        record_heartbeat(scheduler, started_at=started, detail="stopping")
         scheduler.shutdown(wait=False)
 
 

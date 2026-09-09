@@ -86,3 +86,15 @@ secrets-baseline: ## Re-generate .secrets.baseline (then audit every new entry: 
 
 .PHONY: check
 check: lint test ## Everything CI runs
+
+.PHONY: worker
+worker: ## Run the scheduler worker in the foreground (heartbeat + catch-up; Ctrl-C to stop)
+	$(RUN) python -m signalforge.cli run-scheduler
+
+.PHONY: api
+api: ## Run the dashboard API in the foreground on 127.0.0.1:8787
+	$(RUN) uvicorn signalforge.app.main:app --host 127.0.0.1 --port 8787
+
+.PHONY: launchd-check
+launchd-check: ## Validate the launchd plists (does NOT install them)
+	plutil -lint deploy/launchd/com.signalforge.api.plist deploy/launchd/com.signalforge.worker.plist

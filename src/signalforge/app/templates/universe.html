@@ -50,5 +50,20 @@
   </div>
 </section>
 {% endif %}
+{% if u.data_quality %}
+{% set dq = u.data_quality %}
+<section class="mt-4 rounded-lg border border-red-200 bg-white p-4 text-sm">
+  <h2 class="text-sm font-semibold text-red-800">Data-quality summary (read before using this universe for anything)</h2>
+  <ul class="mt-2 space-y-1 text-xs text-slate-700">
+    <li><strong>Missing market caps:</strong> {{ dq.market_cap.cs_missing_cap }} of {{ dq.market_cap.cs_in_scope }} in-scope common stocks have no current market cap
+      ({{ dq.market_cap.excluded_market_cap_unverified }} excluded as <code>market_cap_unverified</code>, {{ dq.market_cap.excluded_market_cap_below_min }} excluded below the minimum). {{ dq.market_cap.basis }}.</li>
+    <li><strong>Spreads unavailable:</strong> {{ dq.spread.basis }}.</li>
+    <li><strong>Active-only discovery:</strong> {{ dq.discovery.basis }}; {{ dq.discovery.inactive_seen_since_first_discovery }} tickers seen going inactive since first discovery.</li>
+    <li><strong>Split adjustment:</strong> {{ dq.adjustment.basis }}.</li>
+    <li><strong>Delisted history:</strong> {{ dq.delisted_history.basis }}.</li>
+    <li><strong>History depth:</strong> {{ dq.history.sessions_archived }} archived sessions ({{ dq.history.archive }}).</li>
+  </ul>
+</section>
+{% endif %}
 <p class="mt-6 text-xs text-slate-400">Research signal only — no order was placed.</p>
 {% endblock %}

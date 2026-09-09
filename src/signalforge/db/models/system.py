@@ -102,6 +102,25 @@ class AuditLog(Base, IntPK):
     after_json: Mapped[Any] = mapped_column(JSON, default=None)
 
 
+class WorkerHeartbeat(Base, IntPK):
+    """Liveness of a background worker process (the in-process APScheduler).
+    One row per worker name, upserted every ``scheduler.HEARTBEAT_INTERVAL_S``
+    seconds with the scheduler's own next-run times, so /ops can say whether
+    the worker is ACTUALLY running and when the next job will fire — not
+    merely what the cron table intends."""
+
+    __tablename__ = "worker_heartbeat"
+    __table_args__ = (UniqueConstraint("worker"),)
+
+    worker: Mapped[str] = mapped_column(String(40))
+    host: Mapped[str] = mapped_column(String(120), default="")
+    pid: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    last_beat_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    next_runs_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    detail: Mapped[str] = mapped_column(String(300), default="")
+
+
 class JobRun(Base, IntPK):
     """One execution of a guarded scheduled job — ok, failed, or skipped by the
     kill switch — so the Operational Status page can show the last outcome per

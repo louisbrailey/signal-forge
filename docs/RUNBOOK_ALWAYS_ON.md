@@ -167,6 +167,20 @@ a terminal — not a substitute for the `pmset` settings above plus `launchd`
 (below). It stops preventing sleep the moment that terminal session ends and
 does not survive logout or reboot.
 
+### What the worker does for you (heartbeat + catch-up)
+
+`signalforge run-scheduler` (also `make worker`, foreground) writes a
+`worker_heartbeat` row every 30 s with the scheduler's real next-run times,
+and runs a `catch_up` job every 30 min: if no OK daily-bar ingestion has
+finished since the last completed session's 17:30 ET close, it runs the full
+EOD update (ingest → rescan → approved-scope scan) right then — so a Mac that
+slept through 17:30 catches up within 30 min of waking, and a failed attempt
+backs off for 2 h before retrying. `/ops` shows: worker running / stale /
+never, next scheduled EOD run (from the worker itself), daily-bar freshness
+vs the expected session, and whether a catch-up is pending. Reviewed plist
+files live in `deploy/launchd/` (`make launchd-check` validates them; nothing
+installs them for you).
+
 ### `launchd` LaunchAgents
 
 Two agents keep the API and the scheduler running independently, each

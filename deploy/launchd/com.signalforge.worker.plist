@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.signalforge.worker</string>
+  <key>WorkingDirectory</key><string>/Users/louisbrailey/signal-forge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/louisbrailey/signal-forge/.venv/bin/python</string>
+    <string>-m</string>
+    <string>signalforge.cli</string>
+    <string>run-scheduler</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/louisbrailey/signal-forge/.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>/Users/louisbrailey/Library/Logs/signalforge/worker.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/louisbrailey/Library/Logs/signalforge/worker.err.log</string>
+</dict>
+</plist>
