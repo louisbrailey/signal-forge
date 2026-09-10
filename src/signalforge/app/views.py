@@ -1125,6 +1125,49 @@ def universe_context(session: Session) -> dict[str, Any]:
     return {"u": universe_status(session)}
 
 
+def agents_context(session: Session) -> dict[str, Any]:
+    """Latest report per bounded research agent (read-only)."""
+    from signalforge.agents import all_agents
+    from signalforge.db.models import AgentReport
+
+    rows: list[dict[str, Any]] = []
+    for a in all_agents():
+        row = session.scalar(
+            select(AgentReport)
+            .where(AgentReport.agent == a.name)
+            .order_by(AgentReport.created_at.desc())
+            .limit(1)
+        )
+        rows.append(
+            {
+                "name": a.name,
+                "role": a.role,
+                "allowed_inputs": list(a.allowed_inputs),
+                "outputs": list(a.outputs),
+                "prohibited": list(a.prohibited),
+                "may_write": a.may_write,
+                "llm_narrative": a.llm_narrative,
+                "report": (
+                    {
+                        "id": row.id,
+                        "status": row.status,
+                        "created_at": row.created_at.isoformat(),
+                        "as_of": row.as_of.isoformat(),
+                        "summary": row.summary,
+                        "narrative": row.narrative,
+                        "missing_data": row.missing_data_json,
+                        "citations": row.citations_json,
+                        "duration_s": row.duration_s,
+                        "error": row.error,
+                    }
+                    if row
+                    else None
+                ),
+            }
+        )
+    return {"agents": rows, "generated_at": datetime.now(UTC).isoformat()}
+
+
 def settings_context(session: Session) -> dict[str, Any]:
     from signalforge.config import get_settings
 

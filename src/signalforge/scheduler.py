@@ -339,11 +339,32 @@ def job_universe_update() -> None:
         run_universe_update(session, cfg=cfg)
 
 
+def job_agents_daily() -> None:
+    """Run every bounded research agent once (read-only reports). Config-gated
+    OFF (``research.agents.enabled``); never touches candidates, trades,
+    alerts, or settings — contract S14."""
+    from signalforge.agents import run_all_agents
+    from signalforge.db.session import session_scope
+    from signalforge.settings_store import effective_research_config
+
+    # Read the flag under a plain read session first: a disabled run must not
+    # take the SQLite write lock (BEGIN IMMEDIATE) for nothing.
+    with session_scope() as session:
+        enabled = effective_research_config(session).agents.enabled
+    if not enabled:
+        _log.info("agents.skipped_disabled")
+        return
+    with session_scope(write=True) as session:
+        results = run_all_agents(session)
+    _log.info("agents.daily_done", failed=[r.agent for r in results if r.status != "ok"])
+
+
 # Jobs runnable on demand via `signalforge run-job <name>` that are NOT
 # separately scheduled (they run inside daily_eod_update / catch-up).
 MANUAL_JOBS: dict[str, JobFn] = {
     "approved_scope_scan": job_approved_scope_scan,
     "universe_update": job_universe_update,
+    "agents_daily": job_agents_daily,
 }
 
 
@@ -425,6 +446,14 @@ def default_job_specs() -> list[JobSpec]:
             job_catch_up,
             30,
             "Run the EOD update if it is owed for the last completed session (missed/slept)",
+        ),
+        JobSpec(
+            "agents_daily",
+            job_agents_daily,
+            24 * 60,
+            "Bounded research agents: read-only reports (config-gated OFF)",
+            cron_hour=18,
+            cron_minute=45,
         ),
         JobSpec("paper_mtm", job_paper_mtm, 12 * 60, "Mark paper positions to market"),
         JobSpec("feed_probe", job_feed_probe, 60, "Warn on stale data feeds"),

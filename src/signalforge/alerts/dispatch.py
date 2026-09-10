@@ -19,6 +19,7 @@ Default policy:
 from __future__ import annotations
 
 import hashlib
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from datetime import timedelta as _td
@@ -234,7 +235,7 @@ def plan_alerts(session: Session, now: datetime) -> list[PlannedAlert]:
     # exact dataset-scope match (research.approval_scope) -- Strategy.status
     # alone says a strategy passed promotion on SOME dataset; it says nothing
     # about whether THIS scan used that exact dataset.
-    probation_enabled = bool(get_setting(session, "paper_probation_enabled", False))
+    probation_enabled = bool(_setting(session, "paper_probation_enabled", False))
     cfg = effective_research_config(session)
     for h in cfg.enabled_horizons:
         if h is Horizon.INTRADAY:
@@ -330,8 +331,37 @@ ALERT_TYPE_SETTING_KEYS: dict[AlertType, str] = {
 }
 
 
+# Dry-run overlay: a dict of setting overrides consulted BEFORE the database
+# so an operator can see what a cycle WOULD do with settings that are not yet
+# enabled — without changing a setting, logging an alert, or sending anything.
+_ASSUMED: ContextVar[dict[str, Any] | None] = ContextVar("assumed_settings", default=None)
+
+
+def _setting(session: Session, key: str, default: Any) -> Any:
+    """Setting read that honours the dry-run overlay. ONLY for ``plan_alerts``
+    and ``dry_run_cycle``; the real cycle reads ``get_setting`` directly."""
+    assumed = _ASSUMED.get()
+    if assumed is not None and key in assumed:
+        return assumed[key]
+    return get_setting(session, key, default)
+
+
+def _assert_no_assumed_settings() -> None:
+    """Fail fast if the real send path ever runs under a dry-run overlay."""
+    if _ASSUMED.get() is not None:
+        raise RuntimeError(
+            "run_alert_cycle called inside a dry-run settings overlay — refusing to dispatch"
+        )
+
+
 def alert_type_enabled(session: Session, alert_type: AlertType) -> bool:
+    """Persisted per-type switch (never the dry-run overlay)."""
     return bool(get_setting(session, ALERT_TYPE_SETTING_KEYS[alert_type], False))
+
+
+def _assumed_alert_type_enabled(session: Session, alert_type: AlertType) -> bool:
+    """Per-type switch as the dry run assumes it."""
+    return bool(_setting(session, ALERT_TYPE_SETTING_KEYS[alert_type], False))
 
 
 def alert_type_states(session: Session) -> dict[str, bool]:
@@ -340,7 +370,9 @@ def alert_type_states(session: Session) -> dict[str, bool]:
 
 def run_alert_cycle(session: Session, now: datetime | None = None) -> AlertCycleResult:
     ensure_not_engaged()
+    _assert_no_assumed_settings()
     now = now or utcnow()
+    # Persisted settings ONLY — the dry-run overlay must never gate a real send.
     enabled = bool(get_setting(session, "alerts_enabled", False))
     result = AlertCycleResult(enabled=enabled)
     planned = plan_alerts(session, now)
@@ -423,3 +455,96 @@ def run_alert_cycle(session: Session, now: datetime | None = None) -> AlertCycle
             result.sent += 1
     _log.info("alerts.cycle", planned=result.planned, sent=result.sent, enabled=enabled)
     return result
+
+
+@dataclass(slots=True)
+class DryRunAlert:
+    alert_type: str
+    subject: str
+    dedupe_key: str
+    would_send: bool
+    reason: str
+    candidate_id: int | None
+
+
+@dataclass(slots=True)
+class DryRunResult:
+    now: str
+    assumed_settings: dict[str, Any]
+    channels: list[str]
+    quiet_hours: bool
+    already_sent_today: int
+    planned: list[DryRunAlert] = field(default_factory=list)
+
+    @property
+    def would_send(self) -> int:
+        return sum(1 for p in self.planned if p.would_send)
+
+
+def dry_run_cycle(
+    session: Session,
+    *,
+    assume: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> DryRunResult:
+    """What ``run_alert_cycle`` WOULD do under ``assume`` (setting overrides),
+    with NO side effects: nothing is written to alert_log or app_setting, no
+    watermark is advanced, and no channel is contacted. Every gate that the
+    real cycle applies is evaluated: per-candidate approval-scope match,
+    probation flag, per-type switch, quiet hours, the daily candidate cap,
+    the once-per-day briefing, and dedupe against alerts already logged."""
+    now = now or utcnow()
+    assumed = dict(assume or {})
+    token = _ASSUMED.set(assumed)
+    try:
+        enabled = bool(_setting(session, "alerts_enabled", False))
+        planned = plan_alerts(session, now)
+        max_candidate = int(
+            _setting(session, "max_alerts_per_day", None)
+            or effective_research_config(session).max_high_priority_alerts_per_day
+        )
+        quiet = _in_quiet_hours(session, now)
+        sent_today = _sent_today(session, AlertType.CANDIDATE, now)
+        result = DryRunResult(
+            now=now.isoformat(),
+            assumed_settings=assumed,
+            channels=[ch.channel.value for ch in available_channels()],
+            quiet_hours=quiet,
+            already_sent_today=sent_today,
+        )
+        budget = max(0, max_candidate - sent_today)
+        for pa in planned:
+            reason: str | None = None
+            if not enabled:
+                reason = "alerts_enabled is off"
+            elif _already_logged(session, pa.dedupe_key):
+                reason = "already logged (dedupe)"
+            elif pa.force_suppress_reason:
+                reason = pa.force_suppress_reason
+            elif not _assumed_alert_type_enabled(session, pa.alert_type):
+                reason = f"alert type {pa.alert_type.value} is off in Settings"
+            elif quiet and not pa.overnight_ok:
+                reason = "quiet hours"
+            elif pa.alert_type is AlertType.CANDIDATE and budget <= 0:
+                reason = f"daily candidate-alert cap ({max_candidate}) reached"
+            elif (
+                pa.alert_type is AlertType.DAILY_BRIEFING
+                and _sent_today(session, AlertType.DAILY_BRIEFING, now) >= 1
+            ):
+                reason = "briefing already sent today"
+            would = reason is None
+            if would and pa.alert_type is AlertType.CANDIDATE:
+                budget -= 1
+            result.planned.append(
+                DryRunAlert(
+                    alert_type=pa.alert_type.value,
+                    subject=pa.subject,
+                    dedupe_key=pa.dedupe_key,
+                    would_send=would,
+                    reason=reason or "would send",
+                    candidate_id=(pa.payload or {}).get("candidate_id"),
+                )
+            )
+        return result
+    finally:
+        _ASSUMED.reset(token)

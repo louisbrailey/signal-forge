@@ -8,11 +8,13 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Float,
     ForeignKey,
     Index,
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy import (
@@ -100,6 +102,29 @@ class AuditLog(Base, IntPK):
     request_id: Mapped[str] = mapped_column(String(48), default="")
     before_json: Mapped[Any] = mapped_column(JSON, default=None)
     after_json: Mapped[Any] = mapped_column(JSON, default=None)
+
+
+class AgentReport(Base, IntPK):
+    """One run of a bounded research agent: deterministic summary + evidence
+    (with per-item sources/timestamps), an optional LLM narrative stored
+    SEPARATELY and labelled, citations, and explicit missing-data disclosures.
+    The only table an agent may write."""
+
+    __tablename__ = "agent_report"
+    __table_args__ = (Index("ix_agent_report_agent_created", "agent", "created_at"),)
+
+    agent: Mapped[str] = mapped_column(String(40), index=True)
+    role: Mapped[str] = mapped_column(String(120), default="")
+    as_of: Mapped[datetime] = mapped_column(UTCDateTime)
+    status: Mapped[str] = mapped_column(String(12), default="ok")  # ok | failed
+    summary: Mapped[str] = mapped_column(Text, default="")
+    narrative: Mapped[str | None] = mapped_column(Text, default=None)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    citations_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    missing_data_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    duration_s: Mapped[float] = mapped_column(Float, default=0.0)
+    error: Mapped[str] = mapped_column(String(300), default="")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
 
 
 class WorkerHeartbeat(Base, IntPK):

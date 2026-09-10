@@ -38,6 +38,8 @@ __all__ = [
     "ImmutablePaperTradeError",
     "AcceptResult",
     "auto_simulate_enabled",
+    "assert_auto_simulate_allowed",
+    "AutoSimulateForbidden",
     "accept_candidate",
     "record_decision",
     "mark_to_market",
@@ -357,20 +359,146 @@ def _plan(cand: Candidate) -> dict[str, object]:
 
 
 def _candidate_snapshot(session: Session, cand: Candidate) -> dict[str, object]:
+    """The COMPLETE, immutable evidence snapshot stored on every paper trade
+    (``paper_trade`` rows cannot be updated or deleted — invariant S9): the
+    candidate's full deterministic record, its failure rationale, the exact
+    scan scope it came from, whether that scope matched the strategy's
+    approval, the strategy version/parameter hash, and the code version."""
+    from signalforge.db.models import ScanRun, StrategyVersion
+    from signalforge.gitinfo import git_sha
+    from signalforge.research.approval_scope import (
+        approved_scopes,
+        current_spec_json_hash,
+        scan_scope_matches,
+    )
+
     inst = session.get(Instrument, cand.instrument_id)
+    run = session.get(ScanRun, cand.scan_run_id)
+    ver = session.get(StrategyVersion, cand.strategy_version_id)
+    scopes = approved_scopes(session, cand.strategy_version_id)
+    spec_hash = current_spec_json_hash(session, cand.strategy_version_id)
+    scope_ok = bool(
+        run is not None
+        and scan_scope_matches(
+            scopes,
+            dataset_snapshot_id=run.dataset_snapshot_id,
+            config_hash=run.config_hash,
+            spec_json_hash=spec_hash or "",
+            source=run.source,
+        )
+    )
     return {
         "candidate_id": cand.id,
         "symbol": inst.symbol if inst else None,
+        "instrument_type": inst.instrument_type if inst else None,
         "horizon": cand.horizon.value,
         "direction": cand.direction.value,
+        "entry_zone": [cand.entry_zone_low, cand.entry_zone_high],
+        "invalidation_level": cand.invalidation_level,
+        "target_level": cand.target_level,
+        "target_logic": cand.target_logic,
+        "time_stop_days": cand.time_stop_days,
         "reward_risk_estimate": cand.reward_risk_estimate,
+        "probability_calibrated": cand.probability_calibrated,
+        "calibration_ref": cand.calibration_ref,
         "risk_dollars": cand.risk_dollars,
         "risk_pct_of_account": cand.risk_pct_of_account,
+        "liquidity": cand.liquidity_json,
+        "slippage_assumption": cand.slippage_assumption_json,
+        "event_risk": cand.event_risk_json,
+        "portfolio_context": cand.portfolio_context_json,
+        "data_freshness": cand.data_freshness_json,
+        "ranking": cand.ranking_json,
+        "rank_in_horizon": cand.rank_in_horizon,
         "quality_gate_status": cand.quality_gate_status.value,
         "failed_gates": cand.failed_gates,
         "reasons_qualify": cand.reasons_qualify,
         "reasons_fail": cand.reasons_fail,
-        "data_freshness": cand.data_freshness_json,
-        "ranking": cand.ranking_json,
         "was_no_trade": cand.quality_gate_status is not QualityGate.PASSED,
+        "scan": (
+            {
+                "scan_run_id": run.id,
+                "started_at": run.started_at.isoformat(),
+                "source": run.source,
+                "dataset_snapshot_id": run.dataset_snapshot_id,
+                "config_hash": run.config_hash,
+                "universe_size": len(run.universe_json or []),
+            }
+            if run is not None
+            else None
+        ),
+        "strategy": (
+            {
+                "strategy_version_id": ver.id,
+                "version": ver.version,
+                "status": ver.status.value,
+                "spec_json_hash": spec_hash,
+            }
+            if ver is not None
+            else None
+        ),
+        "approval_scope": {
+            "matched": scope_ok,
+            "approved_scopes": [
+                {
+                    "evaluation_id": sc.evaluation_id,
+                    "dataset_snapshot_id": sc.dataset_snapshot_id,
+                    "config_hash": sc.config_hash,
+                    "spec_json_hash": sc.spec_json_hash,
+                    "sources": sorted(sc.sources),
+                }
+                for sc in scopes
+            ],
+        },
+        "code_version": git_sha(),
+        "notice": "Research signal only — no order was placed.",
     }
+
+
+class AutoSimulateForbidden(RuntimeError):
+    """Automatic paper acceptance was requested for a candidate that is not
+    eligible. There is deliberately NO scheduled caller of automatic
+    acceptance; this guard exists so any future caller cannot bypass the
+    rules below."""
+
+
+def assert_auto_simulate_allowed(session: Session, cand: Candidate) -> None:
+    """Every condition an automatic (non-manual) paper acceptance would need:
+
+    * the setting ``auto_simulate_qualified_signals`` is ON;
+    * the candidate PASSED every quality gate;
+    * the instrument is a U.S. stock/ETF (never an option, future, or currency);
+    * the strategy version is PAPER_APPROVED;
+    * the candidate's scan matches the strategy's exact approved scope (dataset
+      snapshot, source, config hash, live parameter hash).
+    Raises :class:`AutoSimulateForbidden` naming the first failed condition."""
+    from signalforge.db.models import ScanRun, StrategyVersion
+    from signalforge.domain import StrategyStatus
+    from signalforge.research.approval_scope import (
+        approved_scopes,
+        current_spec_json_hash,
+        scan_scope_matches,
+    )
+
+    if not auto_simulate_enabled(session):
+        raise AutoSimulateForbidden("auto_simulate_qualified_signals is off")
+    if cand.quality_gate_status is not QualityGate.PASSED:
+        raise AutoSimulateForbidden("candidate did not pass every quality gate")
+    inst = session.get(Instrument, cand.instrument_id)
+    if inst is None or inst.instrument_type not in ("stock", "etf"):
+        raise AutoSimulateForbidden(
+            f"instrument type {inst.instrument_type if inst else None!r} is not a U.S. stock/ETF"
+        )
+    ver = session.get(StrategyVersion, cand.strategy_version_id)
+    if ver is None or ver.status is not StrategyStatus.PAPER_APPROVED:
+        raise AutoSimulateForbidden("strategy version is not PAPER_APPROVED")
+    run = session.get(ScanRun, cand.scan_run_id)
+    scopes = approved_scopes(session, ver.id)
+    if run is None or not scan_scope_matches(
+        scopes,
+        dataset_snapshot_id=run.dataset_snapshot_id,
+        config_hash=run.config_hash,
+        spec_json_hash=current_spec_json_hash(session, ver.id) or "",
+        source=run.source,
+    ):
+        raise AutoSimulateForbidden("scan scope does not match the strategy's approved scope")

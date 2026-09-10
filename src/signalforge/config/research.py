@@ -174,6 +174,17 @@ class UniversePipelineConfig(BaseModel):
     )
 
 
+class AgentsConfig(BaseModel):
+    """Bounded research agents (read-only reporters). The scheduled daily run
+    is OFF by default; agents can always be run by hand with
+    `signalforge agents run`."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    enabled: bool = False
+    llm_narratives: bool = False  # even when the LLM layer is configured, narratives are opt-in
+
+
 class OptionsConfig(BaseModel):
     """Options coverage (education / simulation only). Deliberately narrow —
     a small liquid ETF + large-cap set, bounded expirations and strikes."""
@@ -300,6 +311,7 @@ class ResearchConfig(BaseModel):
     health_monitor: HealthMonitorConfig = Field(default_factory=HealthMonitorConfig)
     universe_filters: UniverseFilters = Field(default_factory=UniverseFilters)
     universe_pipeline: UniversePipelineConfig = Field(default_factory=UniversePipelineConfig)
+    agents: AgentsConfig = Field(default_factory=AgentsConfig)
     options: OptionsConfig = Field(default_factory=OptionsConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
 

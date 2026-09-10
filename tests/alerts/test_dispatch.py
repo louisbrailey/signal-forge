@@ -18,7 +18,7 @@ from signalforge.db.models import AlertLog, DataFeedStatus, PaperAccount
 from signalforge.db.types import utcnow
 from signalforge.domain import AlertStatus, AlertType
 from signalforge.killswitch import KillSwitchEngaged, get_kill_switch
-from signalforge.settings_store import set_setting
+from signalforge.settings_store import get_setting, set_setting
 
 NOON = datetime(2024, 6, 30, 16, 0, tzinfo=UTC)  # 16:00 UTC ~ daytime in most zones
 
@@ -336,3 +336,22 @@ def test_enabling_one_alert_type_lets_only_that_type_through(session: Session) -
     r = run_alert_cycle(session, now=NOON)
     sent = [row for row in session.scalars(select(AlertLog)) if row.status is AlertStatus.SENT]
     assert r.sent >= 1 and {row.alert_type for row in sent} == {AlertType.DAILY_BRIEFING}
+
+
+def test_real_alert_cycle_refuses_to_run_under_a_dry_run_overlay(session: Session) -> None:
+    """The dry-run settings overlay can never gate a real send: run_alert_cycle
+    fails fast if it is ever entered while an overlay is active, and its own
+    gating reads come from the persisted settings only."""
+    from signalforge.alerts import dispatch as d
+
+    token = d._ASSUMED.set({"alerts_enabled": True, "alert_type_enabled:candidate": True})
+    try:
+        with pytest.raises(RuntimeError, match="dry-run settings overlay"):
+            d.run_alert_cycle(session)
+        # Persisted view is untouched by the overlay.
+        assert d.alert_type_enabled(session, AlertType.CANDIDATE) is False
+        assert get_setting(session, "alerts_enabled", False) is False
+    finally:
+        d._ASSUMED.reset(token)
+    # Outside the overlay the real cycle runs and stays disabled.
+    assert d.run_alert_cycle(session).enabled is False

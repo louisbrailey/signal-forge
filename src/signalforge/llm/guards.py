@@ -12,6 +12,7 @@ Deterministic, no network — safe to unit test and to run inline on every call.
 from __future__ import annotations
 
 import re
+from datetime import date, datetime
 
 AI_FOOTER = "AI explanation, not a trading instruction."
 RESEARCH_ONLY_LINE = "Research signal only — no order was placed."
@@ -20,6 +21,14 @@ RESEARCH_ONLY_LINE = "Research signal only — no order was placed."
 _NUMERIC = re.compile(r"[-+]?\$?\d[\d,]*(?:\.\d+)?\s*(?:%|x)?", re.IGNORECASE)
 # Tokens we never treat as "claims" needing grounding.
 _TRIVIAL = {"0", "1", "2", "a", "one", "two"}
+# Evidence keys whose values are timestamps/dates, never quantities. A narrative
+# number is NOT grounded by coincidentally matching a digit run inside a
+# timestamp ("2026-09-10T18:45:00" must not ground "45%" or "18x").
+_TIMESTAMP_KEY_SUFFIXES = ("_at", "as_of", "_date", "date", "_ts", "ts", "timestamp", "time")
+# ISO-8601 date / datetime (with optional fractional seconds and offset).
+_ISO_TIMESTAMP = re.compile(
+    r"^\s*\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?\s*$"
+)
 
 
 class GuardViolation(RuntimeError):
@@ -46,12 +55,32 @@ def extract_numeric_tokens(text: str) -> set[str]:
     return out
 
 
+def _is_timestamp_key(key: object) -> bool:
+    return isinstance(key, str) and key.lower().endswith(_TIMESTAMP_KEY_SUFFIXES)
+
+
+def _is_timestamp_value(node: object) -> bool:
+    return isinstance(node, (datetime, date)) or (
+        isinstance(node, str) and bool(_ISO_TIMESTAMP.match(node))
+    )
+
+
 def _grounded_numbers(facts: object) -> set[str]:
+    """Numeric tokens a narrative may legitimately use.
+
+    Timestamps are skipped entirely — by key (``*_at``, ``as_of``, ``*_date``,
+    ...) and by shape (ISO-8601 strings, ``datetime``/``date`` objects) — so a
+    fabricated small number cannot be "grounded" by a date fragment.
+    """
     grounded: set[str] = set()
 
     def walk(node: object) -> None:
+        if _is_timestamp_value(node):
+            return
         if isinstance(node, dict):
-            for v in node.values():
+            for k, v in node.items():
+                if _is_timestamp_key(k):
+                    continue
                 walk(v)
         elif isinstance(node, (list, tuple, set)):
             for v in node:

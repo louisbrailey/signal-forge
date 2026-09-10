@@ -251,3 +251,27 @@ forbidden_modules = [
     "httpx",
     "requests",
 ]
+
+[[tool.importlinter.contracts]]
+name = "S14: research agents are read-only reporters — no trades, candidates, alerts, settings, promotion, or brokerage"
+type = "forbidden"
+source_modules = ["signalforge.agents"]
+forbidden_modules = [
+    "signalforge.paper.ledger",
+    "signalforge.alerts.dispatch",
+    "signalforge.alerts.channels",
+    "signalforge.research.scan",
+    "signalforge.research.candidates",
+    "signalforge.research.promotion",
+    "signalforge.research.persistence",
+    "signalforge.data.ingest",
+    "signalforge.data.adapters.massive",
+    "signalforge.data.adapters.massive_news",
+    "signalforge.data.adapters.massive_options",
+    "signalforge.data.adapters.stooq",
+    "signalforge.data.adapters.registry",
+    "signalforge.universe.pipeline",
+    "signalforge.killswitch",
+    "httpx",
+    "requests",
+]

@@ -113,6 +113,7 @@ PAGES = [
     "/news",
     "/ops",
     "/universe",
+    "/agents",
     "/settings",
 ]
 

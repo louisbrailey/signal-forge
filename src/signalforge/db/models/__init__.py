@@ -57,6 +57,7 @@ from signalforge.db.models.research import (
     WalkforwardWindow,
 )
 from signalforge.db.models.system import (
+    AgentReport,
     AlertLog,
     AlertSetting,
     AppSetting,
@@ -133,6 +134,7 @@ __all__ = [
     "AlertSetting",
     "AlertLog",
     "JobRun",
+    "AgentReport",
     "WorkerHeartbeat",
     "BulkFile",
     "UniverseMember",

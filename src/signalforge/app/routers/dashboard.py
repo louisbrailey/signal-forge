@@ -19,6 +19,7 @@ from starlette.status import HTTP_303_SEE_OTHER, HTTP_400_BAD_REQUEST
 from signalforge.app.deps import require_not_killed
 from signalforge.app.templating import templates
 from signalforge.app.views import (
+    agents_context,
     candidate_context,
     journal_context,
     ops_status_context,
@@ -223,6 +224,12 @@ def ops_status_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
 def universe_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
     """Liquid-universe coverage — read-only; research only."""
     return _page(request, user, "universe.html", universe_context(db))
+
+
+@router.get("/agents", response_class=HTMLResponse)
+def agents_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
+    """Research agents — read-only reports; no actions."""
+    return _page(request, user, "agents.html", agents_context(db))
 
 
 @router.get("/settings", response_class=HTMLResponse)

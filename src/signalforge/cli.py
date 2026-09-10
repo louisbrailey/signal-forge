@@ -1833,6 +1833,273 @@ def universe_status_cmd() -> None:
     typer.echo(_json.dumps(st, indent=2, default=str))
 
 
+agents_app = typer.Typer(help="Bounded research agents — read-only reports (contract S14).")
+app.add_typer(agents_app, name="agents")
+
+
+@agents_app.command("run")
+def agents_run_cmd(
+    agent: Annotated[str, typer.Option(help="Agent name, or 'all'.")] = "all",
+) -> None:
+    """Run one or every agent now; each writes ONE agent_report row + an audit
+    event and nothing else. Never creates a candidate, trade, alert, or setting."""
+    ensure_not_engaged()
+    from signalforge.agents import all_agents, run_all_agents
+    from signalforge.db.session import session_scope
+
+    names = None if agent == "all" else [agent]
+    known = {a.name for a in all_agents()}
+    if names and names[0] not in known:
+        typer.secho(f"unknown agent {agent!r}; known: {sorted(known)}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    with session_scope(write=True) as session:
+        results = run_all_agents(session, names)
+    for r in results:
+        colour = typer.colors.GREEN if r.status == "ok" else typer.colors.RED
+        typer.secho(
+            f"\n[{r.agent}] {r.status} ({r.duration_s}s) report #{r.report_id}",
+            fg=colour,
+            bold=True,
+        )
+        typer.echo(r.summary)
+        if r.missing_data:
+            typer.echo(f"missing data: {', '.join(r.missing_data)}")
+        if r.narrative:
+            typer.echo(r.narrative)
+
+
+@agents_app.command("roles")
+def agents_roles_cmd() -> None:
+    """Print every agent's role contract (inputs, outputs, prohibitions, write
+    policy) as Markdown — generated from the code, so docs cannot drift."""
+    from signalforge.agents import all_agents
+
+    typer.echo(
+        "| Agent | Role | Allowed inputs | Outputs | Prohibited | May write | LLM narrative |"
+    )
+    typer.echo("|---|---|---|---|---|---|---|")
+    for a in all_agents():
+        typer.echo(
+            f"| `{a.name}` | {a.role} | {'; '.join(a.allowed_inputs)} | {'; '.join(a.outputs)} | "
+            f"{'; '.join(a.prohibited)} | {a.may_write} | "
+            f"{'opt-in, explanatory only' if a.llm_narrative else 'never'} |"
+        )
+
+
+@agents_app.command("status")
+def agents_status_cmd() -> None:
+    """Latest report per agent."""
+    from sqlalchemy import select
+
+    from signalforge.agents import all_agents
+    from signalforge.db.models import AgentReport
+    from signalforge.db.session import session_scope
+
+    with session_scope() as session:
+        for a in all_agents():
+            row = session.scalar(
+                select(AgentReport)
+                .where(AgentReport.agent == a.name)
+                .order_by(AgentReport.created_at.desc())
+                .limit(1)
+            )
+            if row is None:
+                typer.echo(f"{a.name:22} never run")
+            else:
+                typer.echo(
+                    f"{a.name:22} {row.status:6} {row.created_at.isoformat()[:16]} "
+                    f"missing={len(row.missing_data_json)} "
+                    f"narrative={'yes' if row.narrative else 'no'}"
+                )
+    typer.echo("Research signal only — no order was placed.")
+
+
+ACTIVATION_SETTINGS: dict[str, object] = {
+    "alerts_enabled": True,
+    "paper_probation_enabled": True,
+    "alert_type_enabled:candidate": True,
+    "max_alerts_per_day": 2,
+}
+
+
+def _activation_preconditions() -> list[tuple[str, bool, str]]:
+    """Every fact that must hold before the limited paper-only trial may be
+    switched on. Read-only."""
+    from sqlalchemy import select
+
+    from signalforge.alerts.channels.discord import DiscordChannel
+    from signalforge.alerts.dispatch import alert_type_states
+    from signalforge.app.views import ops_status_context
+    from signalforge.db.models import Strategy, StrategyVersion
+    from signalforge.db.session import session_scope
+    from signalforge.domain import StrategyStatus
+    from signalforge.research.approval_scope import approved_scopes
+    from signalforge.settings_store import get_setting
+
+    checks: list[tuple[str, bool, str]] = []
+    with session_scope() as session:
+        approved = session.execute(
+            select(Strategy, StrategyVersion)
+            .join(StrategyVersion, StrategyVersion.strategy_id == Strategy.id)
+            .where(
+                Strategy.status == StrategyStatus.PAPER_APPROVED,
+                StrategyVersion.status == StrategyStatus.PAPER_APPROVED,
+            )
+        ).all()
+        names = [f"{s.name} v{v.version}" for s, v in approved]
+        checks.append(
+            ("exactly two PAPER_APPROVED strategy versions", len(approved) == 2, ", ".join(names))
+        )
+        scoped = all(approved_scopes(session, v.id) for _s, v in approved)
+        checks.append(
+            ("every approved version has an exact approved scope", bool(approved) and scoped, "")
+        )
+        types = alert_type_states(session)
+        others_off = not any(v for k, v in types.items() if k != "candidate")
+        checks.append(("every non-candidate alert type is OFF", others_off, str(types)))
+        checks.append(
+            (
+                "auto-simulation is OFF",
+                not bool(get_setting(session, "auto_simulate_qualified_signals", False)),
+                "",
+            )
+        )
+        checks.append(
+            (
+                "Discord webhook configured (URL never shown)",
+                DiscordChannel.from_settings() is not None,
+                "",
+            )
+        )
+        ops = ops_status_context(session)
+        checks.append(
+            (
+                "worker running (heartbeat)",
+                bool(ops["worker"]["running"]),
+                ops["worker"].get("detail", ""),
+            )
+        )
+        checks.append(
+            ("kill switch released", not ops["kill_switch"].active, ops["kill_switch"].reason)
+        )
+        checks.append(
+            (
+                "daily bars current for last completed session",
+                bool(ops["freshness"]["current"]),
+                f"newest {ops['freshness']['newest_bar']} vs "
+                f"{ops['freshness']['expected_session']}",
+            )
+        )
+        checks.append(
+            (
+                "approved-scope scan data readiness",
+                bool(ops["readiness"]["ready"]),
+                ops["readiness"]["reason"],
+            )
+        )
+    return checks
+
+
+@app.command("paper-probation-activate")
+def paper_probation_activate_cmd(
+    yes: Annotated[bool, typer.Option("--yes", help="Actually apply the settings.")] = False,
+) -> None:
+    """THE single activation action for the limited paper-only U.S. equity trial.
+
+    Verifies every precondition, then — only with --yes — applies exactly:
+    alerts_enabled=True, paper_probation_enabled=True,
+    alert_type_enabled:candidate=True, max_alerts_per_day=2, in one audited
+    transaction. Every other alert type stays OFF, auto-simulation stays OFF,
+    paper acceptance stays manual. Refuses if any precondition fails.
+    Nothing here places an order: candidates are research signals only.
+    """
+    ensure_not_engaged()
+    from signalforge.db.session import session_scope
+    from signalforge.settings_store import get_setting, set_setting
+
+    checks = _activation_preconditions()
+    ok_all = True
+    for label, ok, note in checks:
+        typer.secho(
+            f"  {'OK  ' if ok else 'FAIL'} {label} {note[:80]}",
+            fg=typer.colors.GREEN if ok else typer.colors.RED,
+        )
+        ok_all = ok_all and ok
+    if not ok_all:
+        typer.secho("preconditions not met — nothing changed", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(code=2)
+    typer.echo(f"pending settings: {ACTIVATION_SETTINGS}")
+    if not yes:
+        typer.secho("dry pass only — re-run with --yes to apply", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=0)
+    with session_scope(write=True) as session:
+        before = {k: get_setting(session, k) for k in ACTIVATION_SETTINGS}
+        for key, value in ACTIVATION_SETTINGS.items():
+            set_setting(session, key, value, actor="paper-probation-activate")
+    record(
+        "paper_probation.activated",
+        actor="cli",
+        entity="limited_equity_trial",
+        before=before,
+        after=ACTIVATION_SETTINGS,
+    )
+    typer.secho(
+        "ACTIVATED: candidate-only alerts for the two approved strategies (max 2/day)",
+        fg=typer.colors.GREEN,
+        bold=True,
+    )
+    typer.echo("Research signal only — no order was placed.")
+
+
+@app.command("paper-probation-deactivate")
+def paper_probation_deactivate_cmd() -> None:
+    """Reverse the activation: alerts OFF, paper probation OFF, candidate type OFF."""
+    from signalforge.db.session import session_scope
+    from signalforge.settings_store import set_setting
+
+    with session_scope(write=True) as session:
+        for key in ("alerts_enabled", "paper_probation_enabled", "alert_type_enabled:candidate"):
+            set_setting(session, key, False, actor="paper-probation-deactivate")
+    record("paper_probation.deactivated", actor="cli", entity="limited_equity_trial")
+    typer.secho(
+        "DEACTIVATED: alerts OFF, paper probation OFF, candidate alerts OFF",
+        fg=typer.colors.YELLOW,
+        bold=True,
+    )
+
+
+@app.command("paper-probation-dry-run")
+def paper_probation_dry_run_cmd() -> None:
+    """Show exactly what the alert cycle WOULD do if paper probation and
+    candidate alerts were enabled — with no side effects: no setting is
+    changed, nothing is logged to alert_log, no channel is contacted."""
+    from signalforge.alerts.dispatch import ALERT_TYPE_SETTING_KEYS, dry_run_cycle
+    from signalforge.db.session import session_scope
+    from signalforge.domain import AlertType
+
+    assume = {
+        "alerts_enabled": True,
+        "paper_probation_enabled": True,
+        ALERT_TYPE_SETTING_KEYS[AlertType.CANDIDATE]: True,
+        "max_alerts_per_day": 2,
+    }
+    with session_scope() as session:
+        res = dry_run_cycle(session, assume=assume)
+    typer.secho("DRY RUN — nothing was changed, logged, or sent", bold=True)
+    typer.echo(f"assumed settings: {res.assumed_settings}")
+    typer.echo(
+        f"channels configured: {res.channels or ['none']} · quiet hours now: {res.quiet_hours} · "
+        f"candidate alerts already sent today: {res.already_sent_today}"
+    )
+    if not res.planned:
+        typer.echo("planned alerts: none (no qualified candidate on the latest research scans)")
+    for p in res.planned:
+        mark = "WOULD SEND" if p.would_send else "blocked   "
+        typer.echo(f"  {mark} {p.alert_type:14} {p.subject[:60]!r} — {p.reason}")
+    typer.echo(f"would send: {res.would_send}")
+    typer.echo("Research signal only — no order was placed.")
+
+
 notify_app = typer.Typer(help="Notification-channel checks (never creates a paper trade).")
 app.add_typer(notify_app, name="notify")
 
@@ -1942,7 +2209,7 @@ def run_job(
         str,
         typer.Argument(
             help="daily_eod_update | paper_mtm | feed_probe | health_check | news_poll | "
-            "daily_briefing | alerts | strategy_health | approved_scope_scan"
+            "daily_briefing | alerts | strategy_health | approved_scope_scan | agents_daily"
         ),
     ],
 ) -> None:
