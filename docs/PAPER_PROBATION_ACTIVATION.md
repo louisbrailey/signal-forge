@@ -118,3 +118,40 @@ It re-checks every precondition, refuses on any failure, and otherwise applies t
 four pending settings in one audited transaction (`AppSettingHistory` +
 `AuditLog paper_probation.activated`). Reverse with
 `uv run signalforge paper-probation-deactivate`. Not run.
+
+
+## Operator authorization — 2026-09-10 (supersedes the "kept OFF" statements above)
+
+The operator authorized, in chat: alerts ON, Discord delivery ON, the paper
+probation lifted (activation to proceed), and **automatic SIMULATED paper
+acceptance ("auto-simulation")**. Paper only, as before: no brokerage
+integration, no order placement, no LLM decisions.
+
+| Item | State | How |
+|---|---|---|
+| Discord webhook | verified — one test message delivered (HTTP 204) | `signalforge notify test-discord --yes`, audited `notify.discord_test` |
+| `auto_simulate_qualified_signals` | **ON** | audited `auto_simulation.authorized` (AppSettingHistory + AuditLog + file audit) |
+| `auto_simulate_max_per_day` | 2 | same change |
+| Activation (`alerts_enabled`, `paper_probation_enabled`, candidate alerts, cap 2) | **queued**: `paper-probation-activate --yes` runs as soon as tonight's 17:30 ET EOD run makes the daily bars current (the only failing precondition) | the "auto-simulation is OFF" precondition became informational |
+| Options / forex | **not possible yet** — no options or forex candidate pipeline, strategy, risk model, or forex data adapter exists; the guard still refuses anything that is not a U.S. stock/ETF | requires a separate build phase |
+
+### How auto-simulation works (`paper/auto_simulate.py`)
+
+Runs only inside `job_approved_scope_scan`, right after the approved-scope scan,
+on that scan's own gate-PASSED candidates. Each candidate must pass
+`assert_auto_simulate_allowed` (setting ON, every quality gate PASSED, U.S.
+stock/ETF, PAPER_APPROVED version, exact five-part approved scope), then:
+
+- kill switch engaged → nothing runs;
+- candidate already has any PaperTrade decision → skipped (idempotent on retry);
+- open paper position on the instrument → REJECTED with that reason;
+- daily cap reached (all ACCEPTED trades today, manual included) → WATCH;
+- guard refusal → REJECTED with the exact refusal reason frozen into the evidence;
+- otherwise `accept_candidate` (same ledger call, fill model, and immutable
+  evidence snapshot as a manual acceptance) + `AuditLog paper.auto_simulated`.
+  Each decision commits on its own.
+
+Tests: `tests/paper/test_auto_simulate.py` (inert unless ON; single accepted
+trade with full evidence + audit; idempotent; guard refusal recorded immutably;
+scope mismatch refused; daily cap and one-open-position rule; kill switch) and
+`test_automatic_acceptance_has_exactly_one_guarded_entry_point`.

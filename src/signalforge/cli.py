@@ -1957,11 +1957,12 @@ def _activation_preconditions() -> list[tuple[str, bool, str]]:
         types = alert_type_states(session)
         others_off = not any(v for k, v in types.items() if k != "candidate")
         checks.append(("every non-candidate alert type is OFF", others_off, str(types)))
+        auto_sim = bool(get_setting(session, "auto_simulate_qualified_signals", False))
         checks.append(
             (
-                "auto-simulation is OFF",
-                not bool(get_setting(session, "auto_simulate_qualified_signals", False)),
-                "",
+                "auto-simulation state (operator-authorized either way; guard-gated)",
+                True,
+                "ON" if auto_sim else "OFF",
             )
         )
         checks.append(

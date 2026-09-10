@@ -1090,7 +1090,12 @@ def ops_status_context(session: Session) -> dict[str, Any]:
             not switches["paper_probation_enabled"],
             "paper_probation_enabled",
         ),
-        ("Auto-simulation OFF", not switches["auto_simulate"], "auto_simulate_qualified_signals"),
+        (
+            "Auto-simulation "
+            + ("ON (operator-authorized 2026-09-10)" if switches["auto_simulate"] else "OFF"),
+            True,
+            "auto_simulate_qualified_signals",
+        ),
     ]
 
     return {

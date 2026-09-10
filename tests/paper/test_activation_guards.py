@@ -146,15 +146,31 @@ def test_auto_simulation_refuses_scope_mismatch_even_when_approved(session: Sess
         assert_auto_simulate_allowed(session, cand)
 
 
-def test_nothing_in_the_scheduler_calls_automatic_acceptance() -> None:
+def test_automatic_acceptance_has_exactly_one_guarded_entry_point() -> None:
+    """Operator-authorized 2026-09-10: automatic SIMULATED acceptance exists, but
+    ONLY in ``paper/auto_simulate.py`` (which runs the full guard first), and it
+    is wired ONLY into the approved-scope scan job. Nothing else in the tree may
+    call ``accept_candidate`` or ``auto_simulate_scan_runs``."""
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2] / "src" / "signalforge"
+    manual_ok = {"ledger.py", "cli.py"}
     for p in root.rglob("*.py"):
         text = p.read_text()
-        if p.name in ("ledger.py",) or "/app/routers/" in str(p) or p.name == "cli.py":
-            continue
-        assert "accept_candidate(" not in text, f"{p} must not accept paper trades automatically"
+        rel = str(p.relative_to(root))
+        if "accept_candidate(" in text:
+            assert (
+                p.name in manual_ok or "app/routers/" in rel or rel == "paper/auto_simulate.py"
+            ), f"{rel} must not accept paper trades automatically"
+        if "auto_simulate_scan_runs(" in text and rel != "paper/auto_simulate.py":
+            assert rel == "scheduler.py", f"{rel} may not invoke auto-simulation"
+    sched = (root / "scheduler.py").read_text()
+    assert "accept_candidate(" not in sched
+    assert sched.count("auto_simulate_scan_runs(") == 1  # only job_approved_scope_scan
+    auto = (root / "paper" / "auto_simulate.py").read_text()
+    assert auto.index("assert_auto_simulate_allowed(session, cand)") < auto.index(
+        "accept_candidate(session, cand.id"
+    )
 
 
 def test_alert_dry_run_has_no_side_effects(session: Session) -> None:

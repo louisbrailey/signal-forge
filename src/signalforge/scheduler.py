@@ -282,13 +282,29 @@ def job_approved_scope_scan() -> None:
     approval-scope match at alert time. Hard-gated on fresh, complete data
     (``research.approved_scope_scan.data_readiness``) — a stale feed, a
     non-ok ingestion, or missing bars for the latest session blocks it and
-    records why. Never intraday, never options, never an alert or a paper
-    trade."""
+    records why. Never intraday, never options, never an alert.
+
+    When the operator setting ``auto_simulate_qualified_signals`` is ON, the
+    scan's own gate-PASSED candidates are then offered to
+    ``paper.auto_simulate`` — SIMULATED paper acceptance only, through the same
+    deterministic guard and ledger as a manual acceptance."""
     from signalforge.db.session import session_scope
+    from signalforge.paper.auto_simulate import auto_simulate_scan_runs
     from signalforge.research.approved_scope_scan import run_approved_scope_scan
 
     with session_scope(write=True) as session:
         report = run_approved_scope_scan(session)
+        if report.ran and report.runs:
+            sim = auto_simulate_scan_runs(session, [int(r["scan_run_id"]) for r in report.runs])
+            _log.info(
+                "auto_simulate.done",
+                enabled=sim.enabled,
+                considered=sim.considered,
+                accepted=len(sim.accepted),
+                rejected=len(sim.rejected),
+                watched=len(sim.watched),
+                skipped=len(sim.skipped),
+            )
     if not report.ran:
         _log.warning("approved_scope_scan.not_run", reason=report.blocked_reason)
 

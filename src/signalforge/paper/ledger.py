@@ -96,8 +96,12 @@ def record_decision(
     *,
     account_name: str = "default",
     note: str = "",
+    actor: str = "local-user",
 ) -> int:
-    """Record REJECTED / IGNORED / WATCH against a candidate (no position)."""
+    """Record REJECTED / IGNORED / WATCH against a candidate (no position).
+
+    ``note``/``actor`` are frozen into the evidence snapshot (``decision`` key)
+    so the failure rationale is as immutable as the rest of the trade."""
     ensure_not_engaged()
     if decision is PaperDecision.ACCEPTED:
         raise ValueError("use accept_candidate() for ACCEPTED")
@@ -109,7 +113,8 @@ def record_decision(
         account_id=acct.id,
         candidate_id=cand.id,
         decision=decision,
-        signal_snapshot_json=_candidate_snapshot(session, cand),
+        signal_snapshot_json=_candidate_snapshot(session, cand)
+        | {"decision": {"actor": actor, "note": note, "automatic": actor == "auto_simulate"}},
         plan_json=_plan(cand),
         why_qualified="; ".join(cand.reasons_qualify),
         why_might_fail="; ".join(cand.reasons_fail),
@@ -128,6 +133,8 @@ def accept_candidate(
     account_name: str = "default",
     slippage_bps: float | None = None,
     as_of: date | None = None,
+    actor: str = "local-user",
+    note: str = "",
 ) -> AcceptResult:
     ensure_not_engaged()
     cand = session.get(Candidate, candidate_id)
@@ -218,7 +225,8 @@ def accept_candidate(
         candidate_id=cand.id,
         position_id=position.id,
         decision=PaperDecision.ACCEPTED,
-        signal_snapshot_json=_candidate_snapshot(session, cand),
+        signal_snapshot_json=_candidate_snapshot(session, cand)
+        | {"decision": {"actor": actor, "note": note, "automatic": actor == "auto_simulate"}},
         plan_json=_plan(cand) | {"shares": shares, "fill_price": round(fill_price, 4)},
         why_qualified="; ".join(cand.reasons_qualify),
         why_might_fail="; ".join(cand.reasons_fail),

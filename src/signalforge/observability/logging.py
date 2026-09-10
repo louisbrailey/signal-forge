@@ -79,6 +79,10 @@ def configure_logging(*, level: str = "INFO", json_output: bool = False) -> None
         stream=sys.stderr,
         level=logging.getLevelNamesMapping().get(level.upper(), logging.INFO),
     )
+    # httpx logs every request URL at INFO — for a Discord webhook that URL IS
+    # the secret. Never let it reach the console or a log file.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
