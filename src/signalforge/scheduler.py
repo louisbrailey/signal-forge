@@ -12,6 +12,7 @@ job bodies do not change.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -292,6 +293,11 @@ def job_approved_scope_scan() -> None:
         _log.warning("approved_scope_scan.not_run", reason=report.blocked_reason)
 
 
+# daily_eod_update (cron) and catch_up (interval) are different APScheduler
+# jobs, so max_instances=1 does not stop them overlapping — this lock does.
+_EOD_UPDATE_LOCK = threading.Lock()
+
+
 def job_daily_eod_update() -> None:
     """The single post-close update: fetch the day's completed bars, rescan,
     then run the approved-scope scan on the freshly completed data.
@@ -302,12 +308,18 @@ def job_daily_eod_update() -> None:
     Ordering is guaranteed by running the three steps sequentially in one job:
     an ingest failure raises before either scan starts.
     """
-    job_ingest()
-    job_scan_all()
-    # Nested guard so the approved-scope step leaves its OWN JobRun row (the
-    # Operational Status page shows it by name) — a failure still propagates
-    # and also marks daily_eod_update failed.
-    guarded("approved_scope_scan", job_approved_scope_scan)()
+    if not _EOD_UPDATE_LOCK.acquire(blocking=False):
+        _log.warning("daily_eod_update.already_running", detail="skipping overlapping run")
+        return
+    try:
+        job_ingest()
+        job_scan_all()
+        # Nested guard so the approved-scope step leaves its OWN JobRun row (the
+        # Operational Status page shows it by name) — a failure still propagates
+        # and also marks daily_eod_update failed.
+        guarded("approved_scope_scan", job_approved_scope_scan)()
+    finally:
+        _EOD_UPDATE_LOCK.release()
 
 
 def job_universe_update() -> None:
@@ -611,6 +623,9 @@ def job_catch_up() -> None:
     """Every 30 min: if the EOD update is owed for the last completed session
     (missed cron while the Mac slept, worker restarted, provider outage),
     run it now. Idempotent — a successful update clears the pending state."""
+    if _EOD_UPDATE_LOCK.locked():
+        _log.info("catch_up.skipped", reason="an EOD update is running right now")
+        return
     pending, reason = catch_up_pending()
     if not pending:
         _log.info("catch_up.not_pending", reason=reason)

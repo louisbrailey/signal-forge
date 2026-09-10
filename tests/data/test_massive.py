@@ -64,3 +64,21 @@ def test_no_key_and_kill_switch():
     get_kill_switch().engage("test")
     with pytest.raises(KillSwitchEngaged):
         adapter().fetch_daily_bars("SPY", START, START)
+
+
+def test_completed_session_cutoff_includes_today_only_after_the_eod_cutoff() -> None:
+    """Before 17:30 ET the current session's bar is not requested (it may be
+    incomplete); from 17:30 ET the closed bar for today IS requested, so the
+    17:30 EOD job makes /ops "daily bars current" true the same day."""
+    from datetime import UTC, datetime
+    from zoneinfo import ZoneInfo
+
+    from signalforge.data.adapters.massive import completed_session_cutoff
+
+    et = ZoneInfo("America/New_York")
+    before = datetime(2026, 9, 9, 17, 29, tzinfo=et)
+    after = datetime(2026, 9, 9, 17, 30, tzinfo=et)
+    assert completed_session_cutoff(before) == date(2026, 9, 8)
+    assert completed_session_cutoff(after) == date(2026, 9, 9)
+    # UTC input is converted (22:00 UTC on 09-09 is 18:00 ET)
+    assert completed_session_cutoff(datetime(2026, 9, 9, 22, 0, tzinfo=UTC)) == date(2026, 9, 9)

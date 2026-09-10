@@ -46,6 +46,19 @@ _BACKOFF_BASE_S = 1.5
 _BACKOFF_CAP_S = 30.0
 
 
+# Daily bars for session D are requested only from this ET wall-clock time on
+# D — the same time the scheduler's EOD job fires — so a run at 17:30 ET picks
+# up D's closed bar and /ops "daily bars current" means what it says.
+COMPLETED_SESSION_CUTOFF_ET = (17, 30)
+
+
+def completed_session_cutoff(now: datetime | None = None) -> date:
+    n = (now or datetime.now(ZoneInfo("America/New_York"))).astimezone(ZoneInfo("America/New_York"))
+    if (n.hour, n.minute) >= COMPLETED_SESSION_CUTOFF_ET:
+        return n.date()
+    return n.date() - timedelta(days=1)
+
+
 class MassiveAdapter:
     """Implements :class:`~signalforge.data.adapters.base.MarketDataAdapter`."""
 
@@ -154,9 +167,10 @@ class MassiveAdapter:
             raise ValueError("Invalid symbol or date range")
         self._raw.pop((symbol, start, end), None)
 
-        # Never persist an incomplete current-session bar: cap at yesterday (ET).
-        cutoff = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
-        stop = min(end, cutoff)
+        # Never persist an incomplete current-session bar: today's bar is only
+        # requested once the session has closed and settled (EOD cutoff, ET);
+        # before that, cap at yesterday.
+        stop = min(end, completed_session_cutoff())
         if stop < start:
             return ()
 

@@ -309,3 +309,28 @@ def test_ops_page_stale_heartbeat_is_seen_but_not_running(ops_client) -> None:
         ctx = ops_status_context(session)
     assert ctx["worker"]["running"] is False
     assert ctx["worker"]["seen"] is True
+
+
+def test_eod_update_and_catch_up_never_overlap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """They are different APScheduler jobs (cron vs interval), so max_instances
+    cannot serialize them; the module lock must."""
+    import signalforge.scheduler as sched
+
+    calls: list[str] = []
+    monkeypatch.setattr(sched, "job_ingest", lambda: calls.append("ingest"))
+    monkeypatch.setattr(sched, "job_scan_all", lambda: calls.append("scan"))
+    monkeypatch.setattr(sched, "job_approved_scope_scan", lambda: calls.append("approved"))
+    monkeypatch.setattr(sched, "catch_up_pending", lambda now=None: (True, "owed"))
+    monkeypatch.setattr(sched, "guarded", lambda name, fn: fn)  # keep the nested guard out of it
+
+    assert sched._EOD_UPDATE_LOCK.acquire(blocking=False)  # simulate a running EOD update
+    try:
+        sched.job_catch_up()  # must not start a second update
+        sched.job_daily_eod_update()  # a second cron firing must skip, not stack
+        assert calls == []
+    finally:
+        sched._EOD_UPDATE_LOCK.release()
+
+    sched.job_catch_up()  # once free, catch-up runs the full update exactly once
+    assert calls == ["ingest", "scan", "approved"]
+    assert not sched._EOD_UPDATE_LOCK.locked()  # released after the run

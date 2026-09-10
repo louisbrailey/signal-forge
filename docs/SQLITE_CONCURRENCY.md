@@ -33,7 +33,10 @@
    **failed** with `database lock contention: … after 3 attempts`. The alert cycle commits
    each `AlertLog` right after its send, so a retried cycle can never re-send an alert. Heartbeat and
    job-record writes retry briefly and log a WARNING if they still fail — they never raise.
-6. **One worker per database** — `worker_lock.py` takes an exclusive `flock` on
+6. **EOD update and catch-up never overlap** — they are different APScheduler jobs
+   (cron vs interval), so `max_instances=1` cannot serialize them; a module lock
+   (`scheduler._EOD_UPDATE_LOCK`) makes a second firing skip instead of stacking.
+7. **One worker per database** — `worker_lock.py` takes an exclusive `flock` on
    `<data_dir>/worker.lock`; a second `run-scheduler` exits with code 1 naming the holder,
    and a live heartbeat from another pid/host is also refused.
 

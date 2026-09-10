@@ -215,7 +215,10 @@ first (a `--reload` child can outlive Ctrl-C — `pkill -f "uvicorn signalforge"
    releases `data/worker.lock`), then Ctrl-C the API. `/ops` will then show the worker
    as *STALE — process gone* after 90 s, which is correct.
 
-Only after all six pass, install the launchd agents below.
+Only after all six pass, install the launchd agents below — and **stop the
+smoke-test worker and API first** (Ctrl-C both): the launchd worker refuses to
+start while another worker's heartbeat is fresh, and `KeepAlive` would keep
+retrying every 30 s until the old one exits.
 
 ### `launchd` LaunchAgents
 
