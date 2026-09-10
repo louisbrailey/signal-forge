@@ -132,7 +132,7 @@ integration, no order placement, no LLM decisions.
 | Discord webhook | verified — one test message delivered (HTTP 204) | `signalforge notify test-discord --yes`, audited `notify.discord_test` |
 | `auto_simulate_qualified_signals` | **ON** | audited `auto_simulation.authorized` (AppSettingHistory + AuditLog + file audit) |
 | `auto_simulate_max_per_day` | 2 | same change |
-| Activation (`alerts_enabled`, `paper_probation_enabled`, candidate alerts, cap 2) | **queued**: `paper-probation-activate --yes` runs as soon as tonight's 17:30 ET EOD run makes the daily bars current (the only failing precondition) | the "auto-simulation is OFF" precondition became informational |
+| Activation (`alerts_enabled`, `paper_probation_enabled`, candidate alerts, cap 2) | **DONE 2026-09-10 20:00 UTC** — `paper-probation-activate --yes`, all nine preconditions OK after the restarted worker's startup catch-up ingested the 9/9 bars | audited `paper_probation.activated`; the "auto-simulation is OFF" precondition became informational |
 | Options / forex | **not possible yet** — no options or forex candidate pipeline, strategy, risk model, or forex data adapter exists; the guard still refuses anything that is not a U.S. stock/ETF | requires a separate build phase |
 
 ### How auto-simulation works (`paper/auto_simulate.py`)
