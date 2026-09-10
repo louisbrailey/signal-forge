@@ -1125,7 +1125,7 @@ def scan(
 
 @paper_app.command("init")
 def paper_init(
-    cash: Annotated[float, typer.Option(help="Starting paper cash.")] = 10_000.0,
+    cash: Annotated[float, typer.Option(help="Starting paper cash.")] = 30_000.0,
     name: Annotated[str, typer.Option(help="Account name.")] = "default",
 ) -> None:
     """Create the paper account if it does not exist (no fixture data, no orders)."""
