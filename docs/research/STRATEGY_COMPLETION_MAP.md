@@ -66,10 +66,11 @@ the **25-symbol** set (`META`, or `META_CONT` in snap 4); snapshot 3 is the same
 **minus META**. Every cross-snapshot sealed difference in the table above is
 therefore exactly the META contribution.
 
-**Consequence for R2: the baseline look count is k = 5, not k = 2.** A v0.2.0 that
-seals against snapshot 3 is the **fifth** look at that sealed calendar year for that
-strategy family, not the second. Every strategy report must state k=5 as the
-starting count and increment from there.
+**Consequence for R2: the baseline look count is k = 5, not k = 2.** k counts the
+existing `StrategySealedTest` rows for the strategy family (all versions, all
+snapshots); the next sealed evaluation is look k+1. A v0.2.0 that seals against
+snapshot 3 is therefore **look 6**, not the second and not the fifth. Every
+strategy report must state k=5 as the starting count and increment from there.
 
 **Why snapshot 3 is nonetheless the right headline (FACT, and this rebuts the
 "snapshot selection" charge).** Gate 8 `data_quality_and_leakage` **fails on
@@ -337,9 +338,11 @@ FACT: the implicit look count is reconstructable as the number of distinct
 the append-only `StrategyPromotionEvaluation` rows (42, promotion.py:926-943). Nothing
 computes or surfaces either.
 Therefore each strategy's final report **must state explicitly**: the four existing
-sealed draws with their ids and results (the §0.1 table), and then the new one. **A
-v0.2.0 sealing against snapshot 3 is look 5**; a v0.3.0 would be look 6. A pass on
-look *k* must be reported as "passed on look k", never as an unqualified pass.
+sealed draws with their ids and results (the §0.1 table), and then the new one. k is
+the count of existing `StrategySealedTest` rows for the strategy family (all
+versions, all snapshots); the next sealed evaluation is look k+1. **A v0.2.0 sealing
+against snapshot 3 is look 6** (today k=5); a v0.3.0 would be look 7. A pass on
+look *k+1* must be reported as "passed on look k+1", never as an unqualified pass.
 Evaluating even an *unchanged* v0.1.0 against a new snapshot also creates a fresh
 sealed test — see §3(a).
 
@@ -1309,20 +1312,21 @@ sealed contamination), expected gate impact, robustness, and cost.
      **11.0 bps** (`engine.py:94, 143`) and §0.4 gives the baseline figures
      (0.022R–0.042R);
    - the **turnover delta** and the resulting cost delta in R;
-   - for any run on an **expanded snapshot**, the result at **2× and 5× the modelled
-     spread** (26 and 66 bps round trip). The flat 5 bps in `engine.py:90` is
-     universe-independent and optimistic for anything outside the current
-     mega-cap/ETF set (`backtest_runner.py:205-206` never overrides it).
+   - for any run on an **expanded snapshot**, the result at **26 and 66 bps round
+     trip** (≈4× and ≈12× the modelled 5 bps quoted spread). The flat 5 bps in
+     `engine.py:90` is universe-independent and optimistic for anything outside the
+     current mega-cap/ETF set (`backtest_runner.py:205-206` never overrides it).
 9. **Variant budget.** How many variants this angle intends to try, and the stopping
    rule. Total per strategy across all three angles should be small and stated up
    front; it goes in the final report verbatim (R5).
 10. **Sealed-look accounting.** State explicitly that implementing this creates a new
     `StrategyVersion` and therefore a new sealed test on the target snapshot — and
-    that **the baseline count is k = 5** (four existing locked sealed tests per
-    version, §0.1), so a first v0.2.0 sealing on snapshot 3 is **look 6**, and a
-    v0.2.0 evaluated on both snapshot 3 and a new expanded snapshot is looks 6 **and**
-    7. Reproduce the §0.1 table. Also state, per R1, **which snapshot the report will
-    lead with and why**, pre-registered before the run.
+    that **the baseline count is k = 5** (the existing `StrategySealedTest` rows for
+    the strategy family, all versions, all snapshots, §0.1; the next sealed
+    evaluation is look k+1), so a first v0.2.0 sealing on snapshot 3 is **look 6**,
+    and a v0.2.0 evaluated on both snapshot 3 and a new expanded snapshot is looks 6
+    **and** 7. Reproduce the §0.1 table. Also state, per R1, **which snapshot the
+    report will lead with and why**, pre-registered before the run.
 11. **Null option.** What happens if this fails: which documented "does not pass"
     would be written, and what evidence it would carry. A program in which no
     strategy is allowed to fail is a program that will manufacture a pass. For v3 the
