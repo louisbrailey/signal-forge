@@ -556,3 +556,454 @@ def test_gate7_uses_all_pre_sealed_trades_not_only_oos(session: Session) -> None
     # the out-of-sample slice gates 2/3/4 read.
     assert full.out_of_sample.n_trades < len(full.trades)
     assert gate7.evidence["strategy"]["n_trades"] != full.out_of_sample.n_trades
+
+
+# ---- item 1: gate 6 never drops a trade in silence -------------------------
+def _legacy_bucket_counts(trades, regimes) -> dict[str, int]:
+    """The pre-hardening gate-6 loop, verbatim, as a golden reference."""
+    counts = {"bull": 0, "bear": 0, "range": 0}
+    for t in trades:
+        lbl = regimes.get(t.entry_date, "warmup")
+        if lbl == "range_bound":
+            counts["range"] += 1
+        elif lbl.startswith("bull"):
+            counts["bull"] += 1
+        elif lbl.startswith("bear"):
+            counts["bear"] += 1
+    return counts
+
+
+def test_gate6_reports_warmup_trades_and_never_drops_one(session: Session) -> None:
+    """Trades inside the proxy's 200-session warmup used to be counted in no
+    bucket and mentioned nowhere. They must now be reported, and the census
+    must close: bucketed + unbucketed == every trade considered."""
+    _seed(session)
+    cfg = _permissive_config(session)
+    result = evaluate_promotion(
+        session, MeanReversion(), symbols=UNIVERSE, start=START, end=END, config=cfg
+    )
+    gate6 = next(g for g in result.gates if g.number == 6)
+    ub = gate6.evidence["unbucketed"]
+    buckets = gate6.evidence["trades_per_regime"]
+
+    assert ub["census_closes"] is True
+    assert (
+        sum(buckets.values()) + ub["warmup"] + ub["no_proxy_bar"] + ub["unlabelled"]
+        == gate6.evidence["n_trades_considered"]
+    )
+    assert ub["total"] == ub["warmup"] + ub["no_proxy_bar"] + ub["unlabelled"]
+    assert ub["trend_lookback_sessions"] == 200
+    assert ub["warmup"] > 0  # this fixture really does trade inside the warmup
+    assert "unbucketed:" in gate6.detail
+    assert "with no proxy bar" in gate6.detail
+    assert f"{ub['warmup']} inside the 200-session proxy warmup" in gate6.detail
+
+
+def test_gate6_distinguishes_warmup_from_a_missing_proxy_bar() -> None:
+    """The old ``regimes.get(date, "warmup")`` default made a genuine data
+    defect (a trade on a session the proxy has no bar for) indistinguishable
+    from the labeller's own warmup. They are now separate counters."""
+    from signalforge.research.promotion import _regime_census
+
+    class _T:
+        def __init__(self, d: date) -> None:
+            self.entry_date = d
+
+    d0, d1, d2, d3 = (date(2020, 1, i) for i in (6, 7, 8, 9))
+    regimes = {d0: "warmup", d1: "bull_lowvol", d2: "range_bound"}
+    trades = [_T(d0), _T(d1), _T(d2), _T(d3)]  # d3 has no proxy bar at all
+
+    census = _regime_census(trades, regimes)
+    assert census.buckets == {"bull": 1, "bear": 0, "range": 1}
+    assert census.warmup == 1
+    assert census.no_proxy_bar == 1
+    assert census.unlabelled == 0
+    assert census.unbucketed == 2
+    assert census.closes is True
+
+    # removing the proxy bar for a bucketed trade moves exactly one trade from
+    # its bucket to no_proxy_bar — the warmup count is untouched
+    without = _regime_census(trades, {d0: "warmup", d2: "range_bound"})
+    assert without.buckets == {"bull": 0, "bear": 0, "range": 1}
+    assert without.no_proxy_bar == 2
+    assert without.warmup == 1
+
+
+def test_gate6_census_reports_a_discrepancy_instead_of_hiding_it() -> None:
+    """If the accounting ever fails to close, the detail string says so — a
+    trade must never vanish quietly."""
+    from signalforge.research.promotion import _RegimeCensus, _unbucketed_detail
+
+    broken = _RegimeCensus(
+        buckets={"bull": 5, "bear": 1, "range": 2},
+        warmup=1,
+        no_proxy_bar=0,
+        unlabelled=0,
+        n_trades=20,
+    )
+    assert broken.closes is False
+    detail = _unbucketed_detail(broken, {"warmup_last_date": "2017-08-02", "share_of_trades": 0.05})
+    assert "CENSUS DOES NOT CLOSE" in detail
+    assert "8 bucketed + 1 unbucketed != 20 trades" in detail
+
+
+def test_gate6_bucket_counts_are_unchanged_by_the_reporting_change(session: Session) -> None:
+    """The scoring-neutrality guarantee: the decomposition changed what is
+    REPORTED, never what is counted. Buckets and the pass verdict must equal
+    the pre-hardening loop's output on the same trades and labels."""
+    from signalforge.backtest.costs import CostModel
+    from signalforge.backtest.regime import label_regimes
+    from signalforge.research.backtest_runner import run_strategy_over_universe
+
+    _seed(session)
+    cfg = _permissive_config(session)
+    strict = cfg.model_copy(
+        update={
+            "promotion": cfg.promotion.model_copy(
+                update={"min_regimes_covered": 3, "min_trades_per_regime": 10}
+            )
+        }
+    )
+    result = evaluate_promotion(
+        session, MeanReversion(), symbols=UNIVERSE, start=START, end=END, config=strict
+    )
+    gate6 = next(g for g in result.gates if g.number == 6)
+
+    sealed_start = END - timedelta(days=strict.promotion.sealed_window_days)
+    pre_sealed_end = sealed_start - timedelta(days=1)
+    full = run_strategy_over_universe(
+        session,
+        MeanReversion(),
+        UNIVERSE,
+        START,
+        pre_sealed_end,
+        cost_model=CostModel(
+            commission_per_share=strict.commission_per_share,
+            commission_min_per_order=strict.commission_min_per_order,
+            slippage_bps=strict.slippage_bps,
+            half_spread_fill_penalty=strict.half_spread_fill_penalty,
+        ),
+    )
+    regimes = label_regimes(PriceSeries.load(session, "SPY", START, pre_sealed_end))
+    legacy = _legacy_bucket_counts(full.trades, regimes)
+
+    assert gate6.evidence["trades_per_regime"] == legacy
+    covered = sum(1 for c in legacy.values() if c >= 10)
+    assert gate6.passed is bool(covered >= 3)
+
+
+def test_gate6_extended_proxy_labelling_is_diagnostic_only(session: Session) -> None:
+    """Change C: when pre-window proxy history exists, the extended labelling
+    recovers warmup trades — and is reported as a diagnostic ONLY. The pass
+    verdict still follows the strict labelling, because moving trades into
+    buckets can only make gate 6 easier to clear (R4)."""
+    _seed(session)
+    cfg = _permissive_config(session)
+    later_start = START + timedelta(days=800)  # leaves real proxy history before `start`
+    result = evaluate_promotion(
+        session, MeanReversion(), symbols=UNIVERSE, start=later_start, end=END, config=cfg
+    )
+    gate6 = next(g for g in result.gates if g.number == 6)
+    ext = gate6.evidence["unbucketed"]["extended_labelling"]
+
+    assert ext["bars_gained"] > 0  # the extension really did find earlier bars
+    assert ext["used_for_scoring"] is False
+    assert ext["warmup"] < gate6.evidence["unbucketed"]["warmup"]  # labels recovered
+    assert sum(ext["trades_per_regime"].values()) >= sum(
+        gate6.evidence["trades_per_regime"].values()
+    )
+    # the scored buckets are the STRICT ones, not the extended ones
+    covered = sum(
+        1
+        for c in gate6.evidence["trades_per_regime"].values()
+        if c >= gate6.evidence["min_trades_per_regime"]
+    )
+    assert gate6.passed is bool(covered >= cfg.promotion.min_regimes_covered)
+
+
+def test_gate6_extension_is_a_noop_when_no_earlier_proxy_history_exists(session: Session) -> None:
+    """On a window that starts at (or before) the proxy's first bar — exactly
+    the live snapshot-3 case — the extension gains nothing and the diagnostic
+    says so explicitly rather than implying a fix happened."""
+    _seed(session)
+    cfg = _permissive_config(session)
+    result = evaluate_promotion(
+        session, MeanReversion(), symbols=UNIVERSE, start=START, end=END, config=cfg
+    )
+    ext = next(g for g in result.gates if g.number == 6).evidence["unbucketed"][
+        "extended_labelling"
+    ]
+    assert ext["bars_gained"] == 0
+    assert ext["identical_to_strict"] is True
+
+
+# ---- items 4 + 6: the sealed-look ledger and the staleness report ----------
+def _insert_sealed(
+    session: Session,
+    *,
+    strategy_name: str,
+    version: str,
+    snapshot_key: str,
+    evaluated_at,
+    n_trades: int = 12,
+    expectancy_r: float = 0.1,
+    passed: bool = True,
+) -> StrategySealedTest:
+    """A sealed test row, inserted directly — the ledger is a read-only
+    derivation, so it must be provable against hand-built history."""
+    from signalforge.domain import Horizon
+
+    strat = session.scalar(select(Strategy).where(Strategy.name == strategy_name))
+    if strat is None:
+        strat = Strategy(
+            name=strategy_name,
+            horizon=Horizon.SHORT_SWING,
+            permits_long=True,
+            permits_short=False,
+            status=StrategyStatus.EXPERIMENTAL,
+        )
+        session.add(strat)
+        session.flush()
+    ver = session.scalar(
+        select(StrategyVersion).where(
+            StrategyVersion.strategy_id == strat.id, StrategyVersion.version == version
+        )
+    )
+    if ver is None:
+        ver = StrategyVersion(
+            strategy_id=strat.id, version=version, git_sha="deadbeef", spec_json={}
+        )
+        session.add(ver)
+        session.flush()
+    snap = session.scalar(select(DataSnapshot).where(DataSnapshot.key == snapshot_key))
+    if snap is None:
+        snap = DataSnapshot(key=snapshot_key, symbols_json=list(UNIVERSE))
+        session.add(snap)
+        session.flush()
+    row = StrategySealedTest(
+        strategy_version_id=ver.id,
+        dataset_snapshot_id=snap.id,
+        window_start=date(2024, 1, 1),
+        window_end=date(2024, 12, 31),
+        universe_json=list(UNIVERSE),
+        data_provenance_json={},
+        metrics_json={"n_trades": n_trades, "expectancy_r": expectancy_r},
+        benchmark_metrics_json={},
+        passed=passed,
+        detail="seeded",
+        evaluated_at=evaluated_at,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def test_sealed_look_ledger_counts_every_snapshot_for_a_family(session: Session) -> None:
+    """k is a count over the whole family — every snapshot the family was ever
+    sealed against, not just the one in front of you."""
+    from datetime import UTC, datetime
+
+    from signalforge.research.promotion import count_sealed_looks, sealed_look_ledger
+
+    for i in range(3):
+        _insert_sealed(
+            session,
+            strategy_name="fake_family.short_swing",
+            version="0.1.0",
+            snapshot_key=f"snap_{i}",
+            evaluated_at=datetime(2024, 1, i + 1, tzinfo=UTC),
+        )
+
+    assert count_sealed_looks(session, "fake_family.short_swing") == 3
+    ledger = sealed_look_ledger(session, "fake_family.short_swing", k_prior=3)
+    assert ledger["k_prior"] == 3
+    assert [x["index"] for x in ledger["looks"]] == [1, 2, 3]
+    assert len({x["dataset_snapshot_id"] for x in ledger["looks"]}) == 3
+    # a fourth evaluation that seals would be look 4
+    fourth = _insert_sealed(
+        session,
+        strategy_name="fake_family.short_swing",
+        version="0.1.0",
+        snapshot_key="snap_3",
+        evaluated_at=datetime(2024, 1, 9, tzinfo=UTC),
+    )
+    after = sealed_look_ledger(
+        session, "fake_family.short_swing", k_prior=3, this_run_sealed_test_id=fourth.id
+    )
+    assert after["this_look"] == 4
+    assert after["reused_this_run"] is False
+    assert "look 4 of this strategy family (3 prior sealed tests: ids " in _look_line(after)
+
+
+def _look_line(ledger) -> str:
+    from signalforge.research.promotion import format_sealed_look_line
+
+    return format_sealed_look_line(ledger)
+
+
+def test_sealed_look_ledger_spans_versions_within_a_family(session: Session) -> None:
+    """A v0.2.0 does not reset the multiple-testing budget its v0.1.0 spent:
+    k counts every version of the same Strategy.name."""
+    from datetime import UTC, datetime
+
+    from signalforge.research.promotion import count_sealed_looks, sealed_look_ledger
+
+    for i in range(4):
+        _insert_sealed(
+            session,
+            strategy_name="fake_family.short_swing",
+            version="0.1.0",
+            snapshot_key=f"snap_{i}",
+            evaluated_at=datetime(2024, 1, i + 1, tzinfo=UTC),
+        )
+    assert count_sealed_looks(session, "fake_family.short_swing") == 4
+
+    new = _insert_sealed(
+        session,
+        strategy_name="fake_family.short_swing",
+        version="0.2.0",
+        snapshot_key="snap_0",
+        evaluated_at=datetime(2024, 2, 1, tzinfo=UTC),
+    )
+    ledger = sealed_look_ledger(
+        session, "fake_family.short_swing", k_prior=4, this_run_sealed_test_id=new.id
+    )
+    assert ledger["k_prior"] == 4
+    assert ledger["this_look"] == 5
+    assert {x["version"] for x in ledger["looks"]} == {"0.1.0", "0.2.0"}
+    assert [x["is_this_run"] for x in ledger["looks"]] == [False, False, False, False, True]
+
+
+def test_sealed_look_ledger_ordering_is_deterministic(session: Session) -> None:
+    """Ordered by (evaluated_at, id) — including when timestamps tie, which is
+    exactly when 'whatever SQLite returns' would otherwise decide."""
+    from datetime import UTC, datetime
+
+    from signalforge.research.promotion import sealed_look_ledger
+
+    same = datetime(2024, 3, 1, tzinfo=UTC)
+    ids = [
+        _insert_sealed(
+            session,
+            strategy_name="fake_family.short_swing",
+            version="0.1.0",
+            snapshot_key=f"snap_tie_{i}",
+            evaluated_at=same,
+        ).id
+        for i in range(3)
+    ]
+    a = sealed_look_ledger(session, "fake_family.short_swing")
+    b = sealed_look_ledger(session, "fake_family.short_swing")
+    assert a == b
+    assert [x["sealed_test_id"] for x in a["looks"]] == sorted(ids)
+
+
+def test_sealed_look_index_does_not_advance_on_a_reused_sealed_test(session: Session) -> None:
+    """Re-running the same (version, snapshot) replays a locked row. That is
+    not a new look and must never be reported as one."""
+    _seed(session)
+    cfg = _permissive_config(session)
+    strat = TrendContinuation()
+
+    first = evaluate_promotion(session, strat, symbols=UNIVERSE, start=START, end=END, config=cfg)
+    second = evaluate_promotion(session, strat, symbols=UNIVERSE, start=START, end=END, config=cfg)
+
+    assert first.sealed_test_reused is False
+    assert first.sealed_look_prior == 0
+    assert first.sealed_look_index == 1
+
+    assert second.sealed_test_reused is True
+    assert second.sealed_test_id == first.sealed_test_id
+    assert second.sealed_look_index == 1  # the replayed row's own index, not 2
+    g9 = next(g for g in second.gates if g.number == 9)
+    assert g9.evidence["sealed_look_ledger"]["reused_this_run"] is True
+    assert "no new look taken" in g9.detail
+
+
+def test_sealed_look_ledger_is_reported_on_a_failing_evaluation(session: Session) -> None:
+    """An undisclosed FAILED look is exactly the multiple-testing leak the
+    counter exists to close, so it is reported on failures too."""
+    _seed(session)
+    cfg = effective_research_config(session)  # strict: this will not pass
+    result = evaluate_promotion(
+        session, MeanReversion(), symbols=UNIVERSE, start=START, end=END, config=cfg
+    )
+    assert result.passed is False
+    g9 = next(g for g in result.gates if g.number == 9)
+    assert g9.evidence["sealed_look_ledger"]["this_look"] == 1
+    assert "look 1 of this strategy family" in g9.detail
+    assert result.sealed_look_index == 1
+    assert result.to_dict()["sealed_look_index"] == 1
+
+
+def test_gate9_reports_a_locked_replay_with_its_id_and_evaluated_at(session: Session) -> None:
+    """Item 6: the sealed row a run READ is either created by that run or
+    explicitly reported as a LOCKED replay, with id and timestamp, in the
+    evidence — no automated check should have to parse prose."""
+    _seed(session)
+    cfg = _permissive_config(session)
+    strat = TrendContinuation()
+
+    first = evaluate_promotion(session, strat, symbols=UNIVERSE, start=START, end=END, config=cfg)
+    g9a = next(g for g in first.gates if g.number == 9)
+    assert g9a.evidence["reused"] is False
+    assert g9a.evidence["created_by_this_run"] is True
+    assert g9a.evidence["sealed_evaluated_at"] is not None
+
+    second = evaluate_promotion(session, strat, symbols=UNIVERSE, start=START, end=END, config=cfg)
+    g9b = next(g for g in second.gates if g.number == 9)
+    assert g9b.evidence["reused"] is True
+    assert g9b.evidence["created_by_this_run"] is False
+    assert g9b.evidence["sealed_evaluated_at"] == g9a.evidence["sealed_evaluated_at"]
+    assert second.sealed_test_evaluated_at == g9a.evidence["sealed_evaluated_at"]
+    assert f"LOCKED REPLAY of sealed test {g9a.evidence['sealed_test_id']}" in g9b.detail
+    assert "NOT created by this run" in g9b.detail
+
+
+def test_a_new_version_never_silently_reuses_the_previous_versions_sealed_row(
+    session: Session,
+) -> None:
+    """The R3 trap: a v0.2.0 must seal its own row. Sealed tests are keyed on
+    (strategy_version_id, dataset_snapshot_id), so verify that the row gate 9
+    read really belongs to the version being evaluated."""
+    from dataclasses import replace as _dc_replace
+
+    _seed(session)
+    cfg = _permissive_config(session)
+    snap = get_or_create_dataset_snapshot(session, key="shared_snap", symbols=list(UNIVERSE))
+
+    class _BumpedVersion(TrendContinuation):
+        def spec(self):  # type: ignore[override]
+            return _dc_replace(super().spec(), version="0.2.0")
+
+    v1 = evaluate_promotion(
+        session,
+        TrendContinuation(),
+        symbols=UNIVERSE,
+        start=START,
+        end=END,
+        config=cfg,
+        dataset_snapshot=snap,
+    )
+    v2 = evaluate_promotion(
+        session,
+        _BumpedVersion(),
+        symbols=UNIVERSE,
+        start=START,
+        end=END,
+        config=cfg,
+        dataset_snapshot=snap,
+    )
+
+    assert v2.version == "0.2.0"
+    assert v2.strategy_version_id != v1.strategy_version_id
+    assert v2.sealed_test_id != v1.sealed_test_id
+    assert v2.sealed_test_reused is False  # it sealed its own row, on the same snapshot
+
+    g9 = next(g for g in v2.gates if g.number == 9)
+    assert g9.evidence["sealed_strategy_version_id"] == v2.strategy_version_id
+    assert g9.evidence["evaluated_strategy_version_id"] == v2.strategy_version_id
+    # and the family ledger counts the v0.1.0 look the v0.2.0 inherited
+    assert v2.sealed_look_prior == 1
+    assert v2.sealed_look_index == 2
+    assert {x["version"] for x in g9.evidence["sealed_look_ledger"]["looks"]} == {"0.1.0", "0.2.0"}

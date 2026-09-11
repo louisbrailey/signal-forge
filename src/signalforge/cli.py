@@ -1279,6 +1279,23 @@ def strategy_health() -> None:
     typer.echo("Research signal only — no order was placed.")
 
 
+def _sealed_look_summary(result: Any) -> str:
+    """The sealed-look disclosure line for one promotion result. Derived from
+    the gate-9 ledger when gate 9 ran, so the CLI can never state a different
+    count from the stored evidence."""
+    gate9 = next((g for g in result.gates if g.number == 9), None)
+    ledger = gate9.evidence.get("sealed_look_ledger") if gate9 is not None else None
+    if not ledger:
+        return (
+            f"no sealed look taken by this evaluation "
+            f"({result.sealed_look_prior} prior sealed tests for {result.strategy_key})"
+        )
+    from signalforge.research.promotion import format_sealed_look_line
+
+    line = format_sealed_look_line(ledger)
+    return f"this is {line} [{result.strategy_key}]"
+
+
 @app.command("evaluate-promotion")
 def evaluate_promotion_cmd(
     strategy: Annotated[
@@ -1399,6 +1416,10 @@ def evaluate_promotion_cmd(
                 mark = "PASS" if g.passed else "FAIL"
                 mark_colour = typer.colors.GREEN if g.passed else typer.colors.RED
                 typer.secho(f"  [{mark}] {g.number}. {g.name}: {g.detail}", fg=mark_colour)
+            # Multiple-testing disclosure (R2) — printed for FAILING
+            # evaluations too: an undisclosed failed look is exactly the leak
+            # this counter exists to close.
+            typer.echo(f"  sealed looks: {_sealed_look_summary(result)}")
 
         if not any_passed:
             typer.echo()

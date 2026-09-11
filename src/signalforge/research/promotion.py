@@ -55,7 +55,7 @@ from datetime import date, timedelta
 from typing import Any
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -137,6 +137,14 @@ class PromotionResult:
     sealed_test_id: int | None
     dataset_snapshot_id: int | None = None
     already_approved_via_pipeline: bool = False
+    # multiple-testing disclosure (R2): how many sealed looks this strategy
+    # FAMILY had already taken before this run, and which look this one is.
+    sealed_look_prior: int = 0
+    sealed_look_index: int = 0
+    # gate-9 provenance: True when gate 9 replayed a sealed row locked by an
+    # EARLIER run rather than sealing one now.
+    sealed_test_reused: bool = False
+    sealed_test_evaluated_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -155,6 +163,10 @@ class PromotionResult:
             "verdict": self.verdict,
             "sealed_test_id": self.sealed_test_id,
             "dataset_snapshot_id": self.dataset_snapshot_id,
+            "sealed_look_prior": self.sealed_look_prior,
+            "sealed_look_index": self.sealed_look_index,
+            "sealed_test_reused": self.sealed_test_reused,
+            "sealed_test_evaluated_at": self.sealed_test_evaluated_at,
         }
 
 
@@ -247,6 +259,147 @@ def _benchmark_metrics(proxy: PriceSeries, lo: date, hi: date) -> dict[str, floa
         "sharpe": round(sharpe, 3),
         "max_drawdown_pct": round(abs(max_dd) * 100, 2),
     }
+
+
+# --------------------------------------------------------------------------- #
+# gate 6 — the regime census: every trade is counted somewhere, or reported
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class _RegimeCensus:
+    """A complete accounting of a trade population against the proxy's regime
+    labels. ``buckets`` feeds gate 6's pass computation exactly as before; the
+    other three counters are the trades that fall in no bucket and used to be
+    dropped without a trace."""
+
+    buckets: dict[str, int]
+    warmup: int
+    no_proxy_bar: int
+    unlabelled: int
+    n_trades: int
+
+    @property
+    def unbucketed(self) -> int:
+        return self.warmup + self.no_proxy_bar + self.unlabelled
+
+    @property
+    def closes(self) -> bool:
+        """True when every trade was counted exactly once — a trade must never
+        vanish between the census and the trade list it was built from."""
+        return sum(self.buckets.values()) + self.unbucketed == self.n_trades
+
+
+def _regime_census(trades: list[Any], regimes: Mapping[date, str]) -> _RegimeCensus:
+    """Classify each trade's entry date three ways instead of conflating them:
+    a real bull/bear/range label, the proxy's ``TREND_LOOKBACK`` warmup, or no
+    proxy bar at all (a genuine data defect, not a coverage question)."""
+    buckets = {"bull": 0, "bear": 0, "range": 0}
+    warmup = no_proxy_bar = unlabelled = 0
+    for t in trades:
+        lbl = regimes.get(t.entry_date)
+        if lbl is None:
+            no_proxy_bar += 1
+        elif lbl == "warmup":
+            warmup += 1
+        elif lbl == "range_bound":
+            buckets["range"] += 1
+        elif lbl.startswith("bull"):
+            buckets["bull"] += 1
+        elif lbl.startswith("bear"):
+            buckets["bear"] += 1
+        else:  # a label regime.py does not currently emit — never silent
+            unlabelled += 1
+    return _RegimeCensus(
+        buckets=buckets,
+        warmup=warmup,
+        no_proxy_bar=no_proxy_bar,
+        unlabelled=unlabelled,
+        n_trades=len(trades),
+    )
+
+
+def _last_warmup_date(regimes: Mapping[date, str]) -> date | None:
+    warm = [d for d, lbl in regimes.items() if lbl == "warmup"]
+    return max(warm) if warm else None
+
+
+def _unbucketed_evidence(
+    session: Session,
+    census: _RegimeCensus,
+    *,
+    regimes: Mapping[date, str],
+    proxy: PriceSeries,
+    proxy_symbol: str,
+    trades: list[Any],
+    start: date,
+    pre_sealed_end: date,
+    source: SourceFilter,
+) -> dict[str, Any]:
+    """Gate 6's unbucketed-trade report, including the forward-proofing
+    diagnostic: what the buckets WOULD be if the proxy were loaded early
+    enough for its 200-session warmup to be consumed by pre-window bars.
+
+    The diagnostic never feeds the pass computation. Moving warmup trades into
+    buckets can only raise bucket counts, and gate 6's condition is
+    ``count >= min_trades_per_regime`` — so adopting the extended labelling
+    for scoring would make the gate monotonically EASIER to pass. That is a
+    weakening (R4) however it is motivated, and promoting it is an operator
+    decision, not a code decision."""
+    last_warmup = _last_warmup_date(regimes)
+    ext_lo = start - timedelta(days=MIN_PRESEALED_DAYS)
+    proxy_ext = PriceSeries.load(session, proxy_symbol, ext_lo, pre_sealed_end, source=source)
+    bars_gained = len(proxy_ext) - len(proxy)
+    if bars_gained > 0:
+        ext_census = _regime_census(trades, label_regimes(proxy_ext))
+    else:
+        # identical series ⇒ identical labelling; do not pay for a second pass
+        ext_census = census
+    extended = {
+        "requested_from": ext_lo.isoformat(),
+        "proxy_bars": len(proxy_ext),
+        "proxy_first_bar": proxy_ext.dates[0].isoformat() if len(proxy_ext) else None,
+        "bars_gained": bars_gained,
+        "trades_per_regime": dict(ext_census.buckets),
+        "warmup": ext_census.warmup,
+        "no_proxy_bar": ext_census.no_proxy_bar,
+        "identical_to_strict": ext_census.buckets == census.buckets
+        and ext_census.warmup == census.warmup,
+        "used_for_scoring": False,
+    }
+    return {
+        "warmup": census.warmup,
+        "no_proxy_bar": census.no_proxy_bar,
+        "unlabelled": census.unlabelled,
+        "total": census.unbucketed,
+        "share_of_trades": (
+            round(census.unbucketed / census.n_trades, 4) if census.n_trades else 0.0
+        ),
+        "warmup_last_date": last_warmup.isoformat() if last_warmup else None,
+        "proxy_first_bar": proxy.dates[0].isoformat() if len(proxy) else None,
+        "proxy_bars": len(proxy),
+        "trend_lookback_sessions": TREND_LOOKBACK,
+        "census_closes": census.closes,
+        "extended_labelling": extended,
+    }
+
+
+def _unbucketed_detail(census: _RegimeCensus, unbucketed: Mapping[str, Any]) -> str:
+    """The clause appended to gate 6's detail string. Unbucketed trades are
+    never silently dropped — if the census does not close, that discrepancy is
+    stated too."""
+    last = unbucketed.get("warmup_last_date") or "n/a"
+    out = (
+        f"; unbucketed: {census.warmup} inside the {TREND_LOOKBACK}-session proxy warmup "
+        f"(ends {last}), {census.no_proxy_bar} with no proxy bar, "
+        f"{census.unlabelled} with an unrecognised label — "
+        f"{census.unbucketed} of {census.n_trades} trades "
+        f"({unbucketed['share_of_trades']:.2%}) are in no regime bucket"
+    )
+    if not census.closes:
+        out += (
+            f" — CENSUS DOES NOT CLOSE: {sum(census.buckets.values())} bucketed + "
+            f"{census.unbucketed} unbucketed != {census.n_trades} trades"
+        )
+    return out
 
 
 def _leakage_self_check(
@@ -349,6 +502,115 @@ def get_or_create_dataset_snapshot(
     session.flush()
     _log.info("promotion.dataset_snapshot_created", key=snap.key, n_symbols=len(symbols))
     return snap
+
+
+# --------------------------------------------------------------------------- #
+# the sealed-look ledger — multiple-testing disclosure, derived, never stored
+# --------------------------------------------------------------------------- #
+def count_sealed_looks(session: Session, strategy_name: str) -> int:
+    """How many sealed tests already exist for a strategy FAMILY — every
+    version of ``Strategy.name``, on every dataset snapshot. Read-only.
+
+    This is ``k``: the next sealed evaluation of that family is look ``k+1``.
+    Counting per family (not per version) is the point — a v0.2.0 does not
+    reset the multiple-testing budget its v0.1.0 already spent."""
+    return int(
+        session.scalar(
+            select(func.count())
+            .select_from(StrategySealedTest)
+            .join(StrategyVersion, StrategyVersion.id == StrategySealedTest.strategy_version_id)
+            .join(Strategy, Strategy.id == StrategyVersion.strategy_id)
+            .where(Strategy.name == strategy_name)
+        )
+        or 0
+    )
+
+
+def sealed_look_ledger(
+    session: Session,
+    strategy_name: str,
+    *,
+    k_prior: int | None = None,
+    this_run_sealed_test_id: int | None = None,
+    reused_this_run: bool = False,
+) -> dict[str, Any]:
+    """Every sealed test ever locked for a strategy FAMILY (all its versions,
+    all snapshots), oldest first. Read-only: it derives the look count from
+    ``strategy_sealed_test`` itself, so it cannot drift from reality the way a
+    hand-maintained count does.
+
+    ``k_prior`` is the count captured BEFORE this run sealed anything; pass it
+    so ``this_look`` is unambiguous. When this run merely replayed an existing
+    locked row (``reused_this_run``), ``this_look`` is that row's own index in
+    the ledger — a replay takes no new look and must never be reported as
+    though it did."""
+    rows = session.execute(
+        select(StrategySealedTest, StrategyVersion, DataSnapshot)
+        .join(StrategyVersion, StrategyVersion.id == StrategySealedTest.strategy_version_id)
+        .join(Strategy, Strategy.id == StrategyVersion.strategy_id)
+        .outerjoin(DataSnapshot, DataSnapshot.id == StrategySealedTest.dataset_snapshot_id)
+        .where(Strategy.name == strategy_name)
+        .order_by(StrategySealedTest.evaluated_at, StrategySealedTest.id)
+    ).all()
+
+    looks: list[dict[str, Any]] = []
+    this_index = 0
+    for i, (sealed, ver, snap) in enumerate(rows, start=1):
+        is_this_run = this_run_sealed_test_id is not None and sealed.id == this_run_sealed_test_id
+        if is_this_run:
+            this_index = i
+        metrics = sealed.metrics_json or {}
+        looks.append(
+            {
+                "index": i,
+                "sealed_test_id": sealed.id,
+                "strategy_version_id": sealed.strategy_version_id,
+                "version": ver.version,
+                "dataset_snapshot_id": sealed.dataset_snapshot_id,
+                "dataset_snapshot_key": snap.key if snap is not None else None,
+                "window": f"{sealed.window_start}..{sealed.window_end}",
+                "n_trades": metrics.get("n_trades"),
+                "expectancy_r": metrics.get("expectancy_r"),
+                "passed": sealed.passed,
+                "evaluated_at": sealed.evaluated_at.isoformat() if sealed.evaluated_at else None,
+                "is_this_run": is_this_run,
+            }
+        )
+
+    prior = len(rows) - (0 if reused_this_run or this_run_sealed_test_id is None else 1)
+    if k_prior is not None:
+        prior = k_prior
+    if this_run_sealed_test_id is None:
+        this_look = 0  # no sealed look was taken by this evaluation
+    elif reused_this_run:
+        this_look = this_index
+    else:
+        this_look = prior + 1
+    return {
+        "strategy_key": strategy_name,
+        "k_prior": prior,
+        "this_look": this_look,
+        "reused_this_run": reused_this_run,
+        "total_sealed_tests": len(rows),
+        "looks": looks,
+    }
+
+
+def format_sealed_look_line(ledger: Mapping[str, Any]) -> str:
+    """One human-readable disclosure line, shared by gate 9's detail and the
+    CLI, so the two can never disagree."""
+    ids = ", ".join(str(x["sealed_test_id"]) for x in ledger["looks"] if not x["is_this_run"])
+    prior = f"{ledger['k_prior']} prior sealed test{'s' if ledger['k_prior'] != 1 else ''}"
+    if ids:
+        prior += f": ids {ids}"
+    if ledger["this_look"] == 0:
+        return f"no sealed look taken by this evaluation ({prior})"
+    if ledger["reused_this_run"]:
+        return (
+            f"replay of look {ledger['this_look']} of this strategy family — no new look "
+            f"taken ({prior})"
+        )
+    return f"look {ledger['this_look']} of this strategy family ({prior})"
 
 
 # --------------------------------------------------------------------------- #
@@ -509,6 +771,9 @@ def evaluate_promotion(
 
     spec = strategy.spec()
     version = upsert_strategy_version(session, spec)
+    # Captured BEFORE gate 9 can seal anything, so "k prior looks" is
+    # unambiguous even when this run locks a new sealed test (R2 disclosure).
+    k_prior = count_sealed_looks(session, spec.name)
     gates: list[Gate] = []
     sealed_row: StrategySealedTest | None = None
 
@@ -534,6 +799,7 @@ def evaluate_promotion(
             None,
             {},
             dataset_snapshot.id,
+            sealed_look_prior=k_prior,
         )
 
     # Pin the sealed window to any already-locked sealed test for this exact
@@ -583,6 +849,7 @@ def evaluate_promotion(
             None,
             {},
             dataset_snapshot.id,
+            sealed_look_prior=k_prior,
         )
 
     # ---- shared evidence over the PRE-SEALED span (gates 1-8) -------------
@@ -739,20 +1006,28 @@ def evaluate_promotion(
             )
         )
 
-    # Gate 6: bull / bear / range-bound coverage.
+    # Gate 6: bull / bear / range-bound coverage. Trades the proxy cannot
+    # label (inside regime.py's TREND_LOOKBACK warmup, or entered on a session
+    # the proxy has no bar for) land in NO bucket — they used to be dropped in
+    # silence, conflated by a `.get(..., "warmup")` default. They are now
+    # decomposed and REPORTED; the pass computation below is unchanged.
     proxy_full = PriceSeries.load(session, proxy_symbol, start, pre_sealed_end, source=source)
     regimes = label_regimes(proxy_full) if len(proxy_full) else {}
-    bucket_counts = {"bull": 0, "bear": 0, "range": 0}
-    for t in full.trades:
-        lbl = regimes.get(t.entry_date, "warmup")
-        if lbl == "range_bound":
-            bucket_counts["range"] += 1
-        elif lbl.startswith("bull"):
-            bucket_counts["bull"] += 1
-        elif lbl.startswith("bear"):
-            bucket_counts["bear"] += 1
+    census = _regime_census(full.trades, regimes)
+    bucket_counts = census.buckets
     covered = sum(1 for c in bucket_counts.values() if c >= th.min_trades_per_regime)
     gate6_pass = bool(covered >= th.min_regimes_covered)
+    unbucketed = _unbucketed_evidence(
+        session,
+        census,
+        regimes=regimes,
+        proxy=proxy_full,
+        proxy_symbol=proxy_symbol,
+        trades=full.trades,
+        start=start,
+        pre_sealed_end=pre_sealed_end,
+        source=source,
+    )
     gates.append(
         Gate(
             6,
@@ -760,8 +1035,14 @@ def evaluate_promotion(
             gate6_pass,
             f"trades per regime — bull {bucket_counts['bull']}, bear {bucket_counts['bear']}, "
             f"range {bucket_counts['range']} (need >= {th.min_trades_per_regime} each in "
-            f"{th.min_regimes_covered} of 3 regimes; {covered}/3 met)",
-            {"trades_per_regime": bucket_counts, "min_trades_per_regime": th.min_trades_per_regime},
+            f"{th.min_regimes_covered} of 3 regimes; {covered}/3 met)"
+            + _unbucketed_detail(census, unbucketed),
+            {
+                "trades_per_regime": bucket_counts,
+                "min_trades_per_regime": th.min_trades_per_regime,
+                "n_trades_considered": census.n_trades,
+                "unbucketed": unbucketed,
+            },
         )
     )
 
@@ -855,20 +1136,49 @@ def evaluate_promotion(
         th=th,
         dataset_snapshot_id=dataset_snapshot.id,
     )
-    seal_note = "reused, locked on a prior evaluation" if sealed_reused else "evaluated now, locked"
+    # A sealed row is either created by THIS run, or it is a LOCKED REPLAY of
+    # a row an earlier run locked — and a replay is stated as one, with the
+    # row's id and its original evaluated_at, so no automated check ever has
+    # to parse English prose to find out which happened. (Rows are keyed on
+    # (strategy_version_id, dataset_snapshot_id), so a v0.2.0 can never pick
+    # up a v0.1.0's sealed row; the version id is reported to make that
+    # verifiable rather than merely true.)
+    sealed_evaluated_at = (
+        sealed_row.evaluated_at.isoformat() if sealed_row.evaluated_at is not None else None
+    )
+    seal_note = (
+        f"LOCKED REPLAY of sealed test {sealed_row.id} locked at {sealed_evaluated_at} — "
+        f"NOT created by this run"
+        if sealed_reused
+        else "evaluated now, locked by this run"
+    )
+    ledger = sealed_look_ledger(
+        session,
+        spec.name,
+        k_prior=k_prior,
+        this_run_sealed_test_id=sealed_row.id,
+        reused_this_run=sealed_reused,
+    )
     gates.append(
         Gate(
             9,
             "sealed_final_test",
             sealed_row.passed,
             f"sealed window {sealed_row.window_start}..{sealed_row.window_end} ({seal_note}; "
-            f"never recomputed once locked): {sealed_row.detail}",
+            f"never recomputed once locked): {sealed_row.detail}"
+            f"; {format_sealed_look_line(ledger)}",
             {
                 "sealed_test_id": sealed_row.id,
                 "window": f"{sealed_row.window_start}..{sealed_row.window_end}",
                 "metrics": sealed_row.metrics_json,
                 "benchmark": sealed_row.benchmark_metrics_json,
                 "dataset_snapshot": {"id": dataset_snapshot.id, "key": dataset_snapshot.key},
+                "reused": sealed_reused,
+                "created_by_this_run": not sealed_reused,
+                "sealed_evaluated_at": sealed_evaluated_at,
+                "sealed_strategy_version_id": sealed_row.strategy_version_id,
+                "evaluated_strategy_version_id": version.id,
+                "sealed_look_ledger": ledger,
             },
         )
     )
@@ -909,6 +1219,10 @@ def evaluate_promotion(
         sealed_row.id,
         data_provenance,
         dataset_snapshot.id,
+        sealed_look_prior=int(ledger["k_prior"]),
+        sealed_look_index=int(ledger["this_look"]),
+        sealed_test_reused=sealed_reused,
+        sealed_test_evaluated_at=sealed_evaluated_at,
     )
 
 
@@ -924,6 +1238,11 @@ def _finalize(
     sealed_test_id: int | None,
     data_provenance: dict[str, Any],
     dataset_snapshot_id: int | None = None,
+    *,
+    sealed_look_prior: int = 0,
+    sealed_look_index: int = 0,
+    sealed_test_reused: bool = False,
+    sealed_test_evaluated_at: str | None = None,
 ) -> PromotionResult:
     spec = strategy.spec()
     passed = bool(gates) and all(g.passed for g in gates)
@@ -1008,6 +1327,10 @@ def _finalize(
         verdict=verdict,
         sealed_test_id=sealed_test_id,
         dataset_snapshot_id=dataset_snapshot_id,
+        sealed_look_prior=sealed_look_prior,
+        sealed_look_index=sealed_look_index,
+        sealed_test_reused=sealed_test_reused,
+        sealed_test_evaluated_at=sealed_test_evaluated_at,
     )
 
 
