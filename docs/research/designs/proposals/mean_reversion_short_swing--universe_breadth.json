@@ -1,0 +1,529 @@
+{
+  "document": "docs/research/designs/proposals/mean_reversion_short_swing--universe_breadth.md",
+  "strategy": "mean_reversion.short_swing",
+  "strategy_version_id": 4,
+  "baseline_version": "0.1.0",
+  "angle": "universe_breadth",
+  "hypothesis": "H7",
+  "compliance": {
+    "writes_to_live_db": 0,
+    "provider_calls": 0,
+    "src_or_tests_modified": 0,
+    "sealed_looks_consumed": 0,
+    "baseline_sealed_look_count_k": 5,
+    "pre_sealed_span_snap234": "2016-09-10..2025-09-07",
+    "pre_sealed_span_snap1": "2016-09-10..2025-09-06"
+  },
+  "reproduction_check_snapshot3": {
+    "pre_sealed_trades": {
+      "stored": 984,
+      "recomputed": 984
+    },
+    "oos_trades": {
+      "stored": 309,
+      "recomputed": 309
+    },
+    "oos_expectancy_r": {
+      "stored": -0.0837,
+      "recomputed": -0.0837
+    },
+    "gate6": {
+      "stored": {
+        "bull": 618,
+        "bear": 46,
+        "range": 260,
+        "unbucketed": 60
+      },
+      "recomputed": {
+        "bull": 618,
+        "bear": 46,
+        "range": 260,
+        "unbucketed": 60
+      }
+    },
+    "gate7_sharpe": {
+      "stored": -0.749,
+      "recomputed": -0.749,
+      "spy": 0.719
+    },
+    "distinct_signal_dates": {
+      "prior_diagnostic": 352,
+      "recomputed": 352
+    }
+  },
+  "breadth_definition": {
+    "statistic": "fraction of run symbols with zscore_last_return(20) <= -2.0 on the signal bar",
+    "extreme_z": -2.0,
+    "z_lookback": 20,
+    "denominator": "symbols with a defined z on that session"
+  },
+  "snapshot3_pre_sealed_buckets": {
+    "k_eq_1": {
+      "n": 151,
+      "expectancy_r": -0.035,
+      "sd": 0.7793,
+      "se_iid": 0.0634,
+      "se_clustered": 0.0634,
+      "clusters": 151
+    },
+    "k_2_3": {
+      "n": 161,
+      "expectancy_r": 0.0421,
+      "sd": 0.7972,
+      "se_iid": 0.0628,
+      "se_clustered": 0.0818,
+      "clusters": 91
+    },
+    "k_4_7": {
+      "n": 192,
+      "expectancy_r": -0.0276,
+      "sd": 0.8348,
+      "se_iid": 0.0602,
+      "se_clustered": 0.0909,
+      "clusters": 57
+    },
+    "k_ge_8": {
+      "n": 480,
+      "expectancy_r": -0.1193,
+      "sd": 0.9349,
+      "se_iid": 0.0427,
+      "se_clustered": 0.1119,
+      "clusters": 53
+    }
+  },
+  "snapshot3_threshold_sweep": {
+    "frac_le_1_of_24": {
+      "pre_sealed": {
+        "n": 151,
+        "expectancy_r": -0.035,
+        "sd": 0.7793,
+        "se_iid": 0.0634
+      },
+      "oos": {
+        "n": 75,
+        "expectancy_r": -0.0636,
+        "sd": 0.7918,
+        "se_iid": 0.0914,
+        "se_clustered": 0.0914
+      }
+    },
+    "frac_le_2_of_24": {
+      "pre_sealed": {
+        "n": 264,
+        "expectancy_r": -0.043,
+        "sd": 0.7757,
+        "se_iid": 0.0477
+      },
+      "oos": {
+        "n": 124,
+        "expectancy_r": -0.0497,
+        "sd": 0.8216,
+        "se_iid": 0.0738,
+        "se_clustered": 0.0779
+      }
+    },
+    "frac_le_3_of_24": {
+      "pre_sealed": {
+        "n": 312,
+        "expectancy_r": 0.0048,
+        "sd": 0.7883,
+        "se_iid": 0.0446
+      },
+      "oos": {
+        "n": 142,
+        "expectancy_r": -0.0335,
+        "sd": 0.8156,
+        "se_iid": 0.0684,
+        "se_clustered": 0.0766
+      }
+    },
+    "frac_le_4_of_24": {
+      "pre_sealed": {
+        "n": 365,
+        "expectancy_r": 0.0075,
+        "sd": 0.7818,
+        "se_iid": 0.0409
+      },
+      "oos": {
+        "n": 178,
+        "expectancy_r": -0.041,
+        "sd": 0.806,
+        "se_iid": 0.0604,
+        "se_clustered": 0.0731
+      }
+    },
+    "frac_le_5_of_24": {
+      "pre_sealed": {
+        "n": 420,
+        "expectancy_r": 0.0062,
+        "sd": 0.8093,
+        "se_iid": 0.0395
+      },
+      "oos": {
+        "n": 204,
+        "expectancy_r": -0.0387,
+        "sd": 0.8168,
+        "se_iid": 0.0572,
+        "se_clustered": 0.0659
+      }
+    }
+  },
+  "four_snapshot_gradient": {
+    "universe_25_baseline_legacy": {
+      "pre_sealed_n": 999,
+      "k_le_3": {
+        "n": 319,
+        "exp": 0.0091,
+        "se_iid": 0.0438
+      },
+      "k_ge_4": {
+        "n": 680,
+        "exp": -0.0957,
+        "se_iid": 0.0347
+      },
+      "diff": 0.1048,
+      "se_iid": 0.0559,
+      "t_iid": 1.88,
+      "se_clustered": 0.0979,
+      "t_clustered": 1.07
+    },
+    "universe_25_baseline": {
+      "pre_sealed_n": 999,
+      "k_le_3": {
+        "n": 319,
+        "exp": 0.0091,
+        "se_iid": 0.0438
+      },
+      "k_ge_4": {
+        "n": 680,
+        "exp": -0.0957,
+        "se_iid": 0.0347
+      },
+      "diff": 0.1048,
+      "se_iid": 0.0559,
+      "t_iid": 1.88,
+      "se_clustered": 0.0979,
+      "t_clustered": 1.07
+    },
+    "universe_24_ex_meta": {
+      "pre_sealed_n": 984,
+      "k_le_3": {
+        "n": 312,
+        "exp": 0.0048,
+        "se_iid": 0.0446
+      },
+      "k_ge_4": {
+        "n": 672,
+        "exp": -0.0931,
+        "se_iid": 0.035
+      },
+      "diff": 0.0979,
+      "se_iid": 0.0567,
+      "t_iid": 1.73,
+      "se_clustered": 0.099,
+      "t_clustered": 0.99
+    },
+    "universe_25_meta_continuity_corrected": {
+      "note": "META_CONT carries source continuity_bridge:1 and loads 0 bars under source=massive; reproduces snapshot 3 exactly",
+      "pre_sealed_n": 984,
+      "diff": 0.0979,
+      "se_iid": 0.0567,
+      "t_iid": 1.73,
+      "se_clustered": 0.099,
+      "t_clustered": 0.99
+    }
+  },
+  "snapshot3_folds_filtered_k_le_3": {
+    "F1": {
+      "n": 78,
+      "exp": -0.041
+    },
+    "F2": {
+      "n": 54,
+      "exp": 0.1848
+    },
+    "F3": {
+      "n": 69,
+      "exp": -0.093
+    },
+    "F4": {
+      "n": 111,
+      "exp": 0.0102
+    },
+    "folds_clearing": 2,
+    "threshold": "2 of 4 with n>=15 and exp>0"
+  },
+  "snapshot3_folds_neighbours": {
+    "k_le_2": 1,
+    "k_le_4": 1,
+    "k_le_5": 1,
+    "note": "gate 1 flips to 1 of 4 at both adjacent grid values"
+  },
+  "snapshot3_gate6_and_gate7": {
+    "baseline": {
+      "n": 984,
+      "bull": 618,
+      "bear": 46,
+      "range": 260,
+      "unbucketed": 60,
+      "sharpe": -0.749,
+      "cagr_pct": -3.48,
+      "ann_vol_pct": 4.59,
+      "max_dd_pct": 37.93,
+      "turnover_per_year": 110.8,
+      "exposure": 1.0
+    },
+    "k_le_3": {
+      "n": 312,
+      "bull": 202,
+      "bear": 5,
+      "range": 73,
+      "unbucketed": 32,
+      "sharpe": 0.036,
+      "cagr_pct": 0.06,
+      "ann_vol_pct": 2.33,
+      "max_dd_pct": 6.93,
+      "turnover_per_year": 35.1,
+      "exposure": 0.427
+    },
+    "k_le_4": {
+      "n": 365,
+      "bull": 243,
+      "bear": 5,
+      "range": 85,
+      "unbucketed": 32,
+      "sharpe": 0.061,
+      "cagr_pct": 0.12,
+      "ann_vol_pct": 2.5,
+      "max_dd_pct": 8.04,
+      "turnover_per_year": 41.1,
+      "exposure": 0.493
+    },
+    "k_le_5": {
+      "n": 420,
+      "bull": 294,
+      "bear": 5,
+      "range": 88,
+      "unbucketed": 33,
+      "sharpe": 0.053,
+      "cagr_pct": 0.11,
+      "ann_vol_pct": 2.78,
+      "max_dd_pct": 8.69,
+      "turnover_per_year": 47.3,
+      "exposure": 0.547
+    },
+    "spy_benchmark_sharpe": 0.719
+  },
+  "snapshot3_monotonicity_by_single_name_count": {
+    "0": {
+      "n": 152,
+      "expectancy_r": 0.0121,
+      "sd": 0.715,
+      "se_iid": 0.058
+    },
+    "1": {
+      "n": 269,
+      "expectancy_r": -0.0883,
+      "sd": 0.8574,
+      "se_iid": 0.0523
+    },
+    "2": {
+      "n": 151,
+      "expectancy_r": 0.0947,
+      "sd": 0.7852,
+      "se_iid": 0.0639
+    },
+    "3": {
+      "n": 109,
+      "expectancy_r": -0.0788,
+      "sd": 0.6557,
+      "se_iid": 0.0628
+    },
+    "4": {
+      "n": 93,
+      "expectancy_r": 0.2655,
+      "sd": 0.6847,
+      "se_iid": 0.071
+    },
+    "5": {
+      "n": 95,
+      "expectancy_r": -0.2279,
+      "sd": 0.7986,
+      "se_iid": 0.0819
+    },
+    "6": {
+      "n": 58,
+      "expectancy_r": -0.5717,
+      "sd": 1.3947,
+      "se_iid": 0.1831
+    },
+    "7": {
+      "n": 7,
+      "expectancy_r": 1.872,
+      "sd": 2.3147,
+      "se_iid": 0.8749
+    },
+    "8": {
+      "n": 34,
+      "expectancy_r": -0.764,
+      "sd": 0.6298,
+      "se_iid": 0.108
+    },
+    "9": {
+      "n": 16,
+      "expectancy_r": -0.117,
+      "sd": 0.1848,
+      "se_iid": 0.0462
+    }
+  },
+  "snapshot3_degeneracy": {
+    "sessions_with_z_panel": 2214,
+    "denominator_min": 23,
+    "denominator_median": 24,
+    "denominator_max": 24,
+    "share_sessions_k_ge_8": 0.0257,
+    "share_sessions_k_ge_4": 0.056,
+    "share_sessions_k_le_3": 0.944,
+    "mean_k_on_days_SPY_z_le_-2": 10.9,
+    "n_days_SPY_z_le_-2": 81,
+    "mean_k_other_days": 0.36,
+    "n_other_days": 2133,
+    "corr_etf_breadth_vs_cs_breadth": 0.752,
+    "trades_on_k_ge_8_dates": 480,
+    "share_of_trades": 0.488,
+    "distinct_k_ge_8_dates": 53,
+    "share_of_sessions": 0.0239
+  },
+  "gate4_arithmetic": {
+    "formula": "n > (1.96*sd/(exp-0.02))**2",
+    "filtered_oos_sd": 0.815,
+    "filtered_oos_exp": -0.0335,
+    "required_n_now": "never (point estimate below +0.02R)",
+    "forecast_oos_n_at_150_symbols": 890,
+    "bar_at_that_n_iid": 0.0736,
+    "gap_r": 0.1071,
+    "gap_in_SE_at_that_n": 3.9,
+    "clustered_deff_v4_oos": 1.87,
+    "effective_n": 254,
+    "bar_at_effective_n": 0.1202
+  },
+  "cost_model": {
+    "frozen": true,
+    "round_trip_bps": 11.0,
+    "stop_atr": 2.0,
+    "atr_over_price_reference": 0.02,
+    "cost_per_trade_r": 0.028,
+    "cost_per_trade_r_change_vs_v010": 0.0,
+    "turnover_per_year": {
+      "v010": 110.8,
+      "v020": 35.1
+    },
+    "exposure": {
+      "v010": 1.0,
+      "v020": 0.427
+    },
+    "spread_sensitivity_oos_expectancy_from_-0.0335": {
+      "11.0bps": -0.0335,
+      "16.0bps_2x": -0.0455,
+      "26.0bps": -0.0705,
+      "31.0bps_5x": -0.0835,
+      "66.0bps": -0.1705
+    }
+  },
+  "falsifiers": {
+    "F1": {
+      "test": "clustered gradient < 2 SE, or < 2 SE ex-fold-F2",
+      "value_today": "0.99 SE clustered",
+      "fires_today": true
+    },
+    "F2": {
+      "test": "filtered OOS expectancy <= 0",
+      "value_today": -0.0335,
+      "fires_today": true
+    },
+    "F3": {
+      "test": "gate 6 bear bucket < 10 under the filter",
+      "value_today": 5,
+      "fires_today": true
+    },
+    "F4": {
+      "test": "expectancy not weakly monotone decreasing across four pre-registered breadth quartiles",
+      "value_today": "non-monotone; k=1 (-0.0350) worse than k=2-3 (+0.0421); k_cs 4 (+0.2655) vs 5 (-0.2279)",
+      "fires_today": true
+    }
+  },
+  "sensitivity_grid": {
+    "before": {
+      "z_entry": [
+        -2.5,
+        -2.0,
+        -1.5
+      ],
+      "stop_atr": [
+        1.5,
+        2.0,
+        2.5
+      ],
+      "points": 9
+    },
+    "after": {
+      "z_entry": [
+        -2.5,
+        -2.0,
+        -1.5
+      ],
+      "stop_atr": [
+        1.5,
+        2.0,
+        2.5
+      ],
+      "breadth_max_frac": [
+        0.08,
+        0.125,
+        0.2
+      ],
+      "points": 27
+    },
+    "max_grid_points": 120,
+    "param_coverage": {
+      "before": "2 of 6",
+      "after": "3 of 7"
+    },
+    "no_op_check_snapshot3": {
+      "pre_sealed_trades": {
+        "0.08": 151,
+        "0.125": 312,
+        "0.20": 365
+      },
+      "oos_trades": {
+        "0.08": 75,
+        "0.125": 142,
+        "0.20": 178
+      },
+      "oos_expectancy": {
+        "0.08": -0.0636,
+        "0.125": -0.0335,
+        "0.20": -0.041
+      },
+      "distinct": true
+    }
+  },
+  "sealed_look_accounting": {
+    "baseline_k": 5,
+    "this_document": 5,
+    "read_only_W1_battery": 5,
+    "v020_on_expanded_snapshot": 6,
+    "v020_also_on_snapshot3": "6 and 7 (not planned)",
+    "headline_snapshot_preregistered": "research_150_massive_10y_2026-09-08 for the v0.2.0; universe_24_ex_meta for v0.1.0 comparisons",
+    "prohibited": "versions 2 and 5 must not be evaluated on the expanded snapshot (R7b / W1 section 9.4)"
+  },
+  "variant_budget": {
+    "cap": 2,
+    "variants": [
+      "V-U1 hard filter breadth_max_frac=0.125",
+      "V-U2 breadth-modulated z_entry (only if all of F1-F4 survive V-U1)"
+    ],
+    "disclosed_exploration": "one mechanism, five thresholds, two conditioning variables, four snapshots; zero versions, zero sealed tests",
+    "baseline_selection_disclosure": "0.125 chosen after seeing the five-point pre-sealed sweep; the baseline grid point is selection-contaminated and the neighbour fraction is the primary robustness statistic"
+  }
+}

@@ -1,0 +1,647 @@
+{
+  "provenance": {
+    "generated_for": "docs/research/diagnostics/pipeline_hardening_spec.md",
+    "database": "data/signalforge.sqlite (READ-ONLY; no add/flush/commit; sessions rolled back)",
+    "dataset_snapshot_id": 3,
+    "dataset_snapshot_key": "universe_24_ex_meta",
+    "source": "massive",
+    "evaluations": [
+      31,
+      32,
+      33,
+      34,
+      35,
+      36
+    ],
+    "pre_sealed_span": [
+      "2016-09-10",
+      "2025-09-07"
+    ],
+    "sealed_window": [
+      "2025-09-08",
+      "2026-09-08"
+    ],
+    "cost_model": {
+      "commission_per_share": 0.0,
+      "commission_min_per_order": 0.0,
+      "slippage_bps": 3.0,
+      "half_spread_fill_penalty": true,
+      "round_trip_bps": 11.0,
+      "unchanged": true
+    }
+  },
+  "proxy": {
+    "proxy_now_first": "2016-10-17",
+    "proxy_now_last": "2025-09-05",
+    "proxy_now_n": 2234,
+    "proxy_ext_first": "2016-10-17",
+    "proxy_ext_n": 2234,
+    "warmup_last_date_now": "2017-08-02",
+    "warmup_last_date_ext": "2017-08-02",
+    "bars_gained_by_extension": 0,
+    "cost_model": [
+      0.0,
+      0.0,
+      3.0,
+      true
+    ]
+  },
+  "gate6_recomputation": {
+    "trend_continuation.short_swing": {
+      "version_id": 2,
+      "n_trades_full": 1169,
+      "n_oos": 341,
+      "first_entry": "2016-12-28",
+      "buckets_current_code": {
+        "bull": 939,
+        "bear": 22,
+        "range": 75
+      },
+      "warmup_trades": 133,
+      "no_proxy_bar_trades": 0,
+      "unbucketed_total": 133,
+      "buckets_extended_proxy": {
+        "bull": 939,
+        "bear": 22,
+        "range": 75
+      },
+      "warmup_trades_extended": 133,
+      "no_proxy_bar_extended": 0,
+      "covered_now": 3,
+      "covered_ext": 3
+    },
+    "trend_continuation.medium_swing": {
+      "version_id": 3,
+      "n_trades_full": 1071,
+      "n_oos": 319,
+      "first_entry": "2016-12-28",
+      "buckets_current_code": {
+        "bull": 857,
+        "bear": 22,
+        "range": 69
+      },
+      "warmup_trades": 123,
+      "no_proxy_bar_trades": 0,
+      "unbucketed_total": 123,
+      "buckets_extended_proxy": {
+        "bull": 857,
+        "bear": 22,
+        "range": 69
+      },
+      "warmup_trades_extended": 123,
+      "no_proxy_bar_extended": 0,
+      "covered_now": 3,
+      "covered_ext": 3
+    },
+    "mean_reversion.short_swing": {
+      "version_id": 4,
+      "n_trades_full": 984,
+      "n_oos": 309,
+      "first_entry": "2017-01-18",
+      "buckets_current_code": {
+        "bull": 618,
+        "bear": 46,
+        "range": 260
+      },
+      "warmup_trades": 60,
+      "no_proxy_bar_trades": 0,
+      "unbucketed_total": 60,
+      "buckets_extended_proxy": {
+        "bull": 618,
+        "bear": 46,
+        "range": 260
+      },
+      "warmup_trades_extended": 60,
+      "no_proxy_bar_extended": 0,
+      "covered_now": 3,
+      "covered_ext": 3
+    },
+    "relative_strength.medium_swing": {
+      "version_id": 5,
+      "n_trades_full": 566,
+      "n_oos": 197,
+      "first_entry": "2017-08-03",
+      "buckets_current_code": {
+        "bull": 466,
+        "bear": 11,
+        "range": 89
+      },
+      "warmup_trades": 0,
+      "no_proxy_bar_trades": 0,
+      "unbucketed_total": 0,
+      "buckets_extended_proxy": {
+        "bull": 466,
+        "bear": 11,
+        "range": 89
+      },
+      "warmup_trades_extended": 0,
+      "no_proxy_bar_extended": 0,
+      "covered_now": 3,
+      "covered_ext": 3
+    },
+    "volatility_breakout.short_swing": {
+      "version_id": 6,
+      "n_trades_full": 211,
+      "n_oos": 51,
+      "first_entry": "2017-01-05",
+      "buckets_current_code": {
+        "bull": 167,
+        "bear": 0,
+        "range": 30
+      },
+      "warmup_trades": 14,
+      "no_proxy_bar_trades": 0,
+      "unbucketed_total": 14,
+      "buckets_extended_proxy": {
+        "bull": 167,
+        "bear": 0,
+        "range": 30
+      },
+      "warmup_trades_extended": 14,
+      "no_proxy_bar_extended": 0,
+      "covered_now": 2,
+      "covered_ext": 2
+    }
+  },
+  "gate6_counterfactual_expanding_labels": {
+    "trend_continuation.short_swing": {
+      "current": {
+        "bull": 939,
+        "bear": 22,
+        "range": 75
+      },
+      "current_warmup": 133,
+      "expanding": {
+        "bull": 1058,
+        "bear": 22,
+        "range": 89
+      },
+      "expanding_warmup": 0,
+      "delta": {
+        "bull": 119,
+        "bear": 0,
+        "range": 14
+      },
+      "covered_current": 3,
+      "covered_expanding": 3
+    },
+    "trend_continuation.medium_swing": {
+      "current": {
+        "bull": 857,
+        "bear": 22,
+        "range": 69
+      },
+      "current_warmup": 123,
+      "expanding": {
+        "bull": 964,
+        "bear": 22,
+        "range": 85
+      },
+      "expanding_warmup": 0,
+      "delta": {
+        "bull": 107,
+        "bear": 0,
+        "range": 16
+      },
+      "covered_current": 3,
+      "covered_expanding": 3
+    },
+    "mean_reversion.short_swing": {
+      "current": {
+        "bull": 618,
+        "bear": 46,
+        "range": 260
+      },
+      "current_warmup": 60,
+      "expanding": {
+        "bull": 669,
+        "bear": 46,
+        "range": 269
+      },
+      "expanding_warmup": 0,
+      "delta": {
+        "bull": 51,
+        "bear": 0,
+        "range": 9
+      },
+      "covered_current": 3,
+      "covered_expanding": 3
+    },
+    "relative_strength.medium_swing": {
+      "current": {
+        "bull": 466,
+        "bear": 11,
+        "range": 89
+      },
+      "current_warmup": 0,
+      "expanding": {
+        "bull": 466,
+        "bear": 11,
+        "range": 89
+      },
+      "expanding_warmup": 0,
+      "delta": {
+        "bull": 0,
+        "bear": 0,
+        "range": 0
+      },
+      "covered_current": 3,
+      "covered_expanding": 3
+    },
+    "volatility_breakout.short_swing": {
+      "current": {
+        "bull": 167,
+        "bear": 0,
+        "range": 30
+      },
+      "current_warmup": 14,
+      "expanding": {
+        "bull": 179,
+        "bear": 0,
+        "range": 32
+      },
+      "expanding_warmup": 0,
+      "delta": {
+        "bull": 12,
+        "bear": 0,
+        "range": 2
+      },
+      "covered_current": 2,
+      "covered_expanding": 2
+    }
+  },
+  "warmup_vs_bucketed_expectancy": {
+    "trend_continuation.short_swing": {
+      "warmup": {
+        "n": 133,
+        "mean": -0.0198,
+        "sd": 1.3048,
+        "se": 0.1131
+      },
+      "bucketed": {
+        "n": 1036,
+        "mean": 0.1152,
+        "sd": 1.4345,
+        "se": 0.0446
+      },
+      "diff_R": -0.135,
+      "se_diff": 0.1216,
+      "abs_z": 1.11
+    },
+    "trend_continuation.medium_swing": {
+      "warmup": {
+        "n": 123,
+        "mean": 0.142,
+        "sd": 1.4978,
+        "se": 0.135
+      },
+      "bucketed": {
+        "n": 948,
+        "mean": 0.1699,
+        "sd": 1.5954,
+        "se": 0.0518
+      },
+      "diff_R": -0.0279,
+      "se_diff": 0.1446,
+      "abs_z": 0.19
+    },
+    "mean_reversion.short_swing": {
+      "warmup": {
+        "n": 60,
+        "mean": 0.2494,
+        "sd": 0.758,
+        "se": 0.0979
+      },
+      "bucketed": {
+        "n": 924,
+        "mean": -0.0823,
+        "sd": 0.8759,
+        "se": 0.0288
+      },
+      "diff_R": 0.3317,
+      "se_diff": 0.102,
+      "abs_z": 3.25
+    },
+    "relative_strength.medium_swing": {
+      "warmup": {
+        "n": 0,
+        "mean": null,
+        "sd": null,
+        "se": null
+      },
+      "bucketed": {
+        "n": 566,
+        "mean": 0.2081,
+        "sd": 1.419,
+        "se": 0.0596
+      },
+      "diff_R": null,
+      "se_diff": null,
+      "abs_z": null
+    },
+    "volatility_breakout.short_swing": {
+      "warmup": {
+        "n": 14,
+        "mean": -0.0201,
+        "sd": 1.0008,
+        "se": 0.2675
+      },
+      "bucketed": {
+        "n": 197,
+        "mean": 0.1782,
+        "sd": 1.2243,
+        "se": 0.0872
+      },
+      "diff_R": -0.1983,
+      "se_diff": 0.2814,
+      "abs_z": 0.7
+    }
+  },
+  "oos_reproduction_check": {
+    "trend_continuation.short_swing": {
+      "oos_n": 341,
+      "oos_exp": 0.2648,
+      "full_n": 1169,
+      "map_sd_from_ci": 1.42,
+      "oos_ci": {
+        "low": 0.1128771564310641,
+        "point": 0.2648267109289499,
+        "high": 0.4142840774194478
+      }
+    },
+    "trend_continuation.medium_swing": {
+      "oos_n": 319,
+      "oos_exp": 0.3064,
+      "full_n": 1071,
+      "map_sd_from_ci": 1.741,
+      "oos_ci": {
+        "low": 0.12046549922044647,
+        "point": 0.3063923166058501,
+        "high": 0.5026805560596083
+      }
+    },
+    "mean_reversion.short_swing": {
+      "oos_n": 309,
+      "oos_exp": -0.0837,
+      "full_n": 984,
+      "map_sd_from_ci": 0.807,
+      "oos_ci": {
+        "low": -0.17388080049145924,
+        "point": -0.08373905344046272,
+        "high": 0.00606639632960741
+      }
+    },
+    "relative_strength.medium_swing": {
+      "oos_n": 197,
+      "oos_exp": 0.3004,
+      "full_n": 566,
+      "map_sd_from_ci": 1.484,
+      "oos_ci": {
+        "low": 0.09013732389283698,
+        "point": 0.3004072804949827,
+        "high": 0.5045817820186078
+      }
+    },
+    "volatility_breakout.short_swing": {
+      "oos_n": 51,
+      "oos_exp": 0.0613,
+      "full_n": 211,
+      "map_sd_from_ci": 1.554,
+      "oos_ci": {
+        "low": -0.3552611586362562,
+        "point": 0.06134873883329147,
+        "high": 0.4978781048045014
+      }
+    }
+  },
+  "gate5_axis_inertness_from_stored_evidence": {
+    "eval_32_v2_trend_short": {
+      "sma_fast": {
+        "points": [
+          [
+            15,
+            329,
+            0.2409
+          ],
+          [
+            25,
+            354,
+            0.2526
+          ]
+        ],
+        "inert": false
+      },
+      "stop_atr": {
+        "points": [
+          [
+            1.2,
+            349,
+            0.1484
+          ],
+          [
+            1.8,
+            331,
+            0.2287
+          ]
+        ],
+        "inert": false
+      },
+      "fragile": false,
+      "positive_fraction": 1.0,
+      "neighbour_positive_fraction": 1.0
+    },
+    "eval_35_v5_relstr_med": {
+      "excess_return_min": {
+        "points": [
+          [
+            0.03,
+            247,
+            0.2967
+          ],
+          [
+            0.07,
+            155,
+            0.3877
+          ]
+        ],
+        "inert": false
+      },
+      "lookback": {
+        "points": [
+          [
+            42,
+            188,
+            0.288
+          ],
+          [
+            84,
+            277,
+            0.2154
+          ]
+        ],
+        "inert": false
+      },
+      "fragile": false,
+      "positive_fraction": 1.0,
+      "neighbour_positive_fraction": 1.0
+    },
+    "eval_33_v3": {
+      "fragile": false,
+      "positive_fraction": 1.0,
+      "neighbour_positive_fraction": 1.0,
+      "any_inert": false
+    },
+    "eval_34_v4": {
+      "fragile": true,
+      "positive_fraction": 0.0,
+      "neighbour_positive_fraction": 0.0,
+      "any_inert": false
+    },
+    "eval_36_v6": {
+      "fragile": false,
+      "positive_fraction": 0.667,
+      "neighbour_positive_fraction": 0.75,
+      "any_inert": false
+    }
+  },
+  "approval_scope": {
+    "approved_scopes": {
+      "v2": [
+        {
+          "evaluation_id": 20,
+          "dataset_snapshot_id": 3,
+          "sources": [
+            "massive"
+          ],
+          "universe_size": 24
+        },
+        {
+          "evaluation_id": 32,
+          "dataset_snapshot_id": 3,
+          "sources": [
+            "massive"
+          ],
+          "universe_size": 24
+        }
+      ],
+      "v5": [
+        {
+          "evaluation_id": 23,
+          "dataset_snapshot_id": 3,
+          "sources": [
+            "massive"
+          ],
+          "universe_size": 24
+        },
+        {
+          "evaluation_id": 35,
+          "dataset_snapshot_id": 3,
+          "sources": [
+            "massive"
+          ],
+          "universe_size": 24
+        }
+      ]
+    },
+    "live_spec_json_hash": {
+      "v2": "2ed9743170bd3bbdb450ea03a004a7ffaeb64ccbbe6075db312ffd544072f382",
+      "v5": "dfe696b662dd02b8fa3a02ce5b987c6eade84a40d88c1a2d8d52e206cb6f6c32"
+    },
+    "approved_config_hash": "11b54aee64dbc265c15dbc09759efdc67a654c733b55d615e63b9d7032ce6b17",
+    "live_effective_config_hash": "76500f3c44e761b64528562e0e16d828e790d864bc715f5dc62105454ffc96a3",
+    "latest_scan_run": {
+      "id": 33,
+      "dataset_snapshot_id": 3,
+      "source": "massive",
+      "universe_size": 24
+    },
+    "scan_scope_matches_today": {
+      "v2": false,
+      "v5": false,
+      "reason": "config_hash mismatch (pre-existing, not caused by any item in this spec)"
+    },
+    "universe_set_equal_to_every_approved_scope": {
+      "v2": true,
+      "v5": true
+    },
+    "spec_hash_if_a_field_were_added_to_StrategySpec": {
+      "v2": "6e35dbe53a4469e0...",
+      "v5": "3138ed57bd19b510...",
+      "changed": true
+    }
+  },
+  "sealed_look_ledger_today": {
+    "definition": "k_prior = existing StrategySealedTest rows for the strategy family; this_look = k_prior + 1",
+    "trend_continuation.short_swing": {
+      "k_prior": 4,
+      "sealed_test_ids": [
+        1,
+        6,
+        11,
+        16
+      ],
+      "snapshots": 4,
+      "versions": 1
+    },
+    "trend_continuation.medium_swing": {
+      "k_prior": 4,
+      "sealed_test_ids": [
+        2,
+        7,
+        12,
+        17
+      ],
+      "snapshots": 4,
+      "versions": 1
+    },
+    "mean_reversion.short_swing": {
+      "k_prior": 4,
+      "sealed_test_ids": [
+        3,
+        8,
+        13,
+        18
+      ],
+      "snapshots": 4,
+      "versions": 1
+    },
+    "relative_strength.medium_swing": {
+      "k_prior": 4,
+      "sealed_test_ids": [
+        4,
+        9,
+        14,
+        19
+      ],
+      "snapshots": 4,
+      "versions": 1
+    },
+    "volatility_breakout.short_swing": {
+      "k_prior": 4,
+      "sealed_test_ids": [
+        5,
+        10,
+        15,
+        20
+      ],
+      "snapshots": 4,
+      "versions": 1
+    }
+  },
+  "sealed_test_se_snapshot3": {
+    "v2": {
+      "n": 109,
+      "expectancy_r": 0.2982,
+      "per_trade_sd_measured": 1.4345,
+      "se": 0.1374,
+      "z": 2.17
+    },
+    "v5": {
+      "n": 16,
+      "expectancy_r": 0.2935,
+      "per_trade_sd_measured": 1.419,
+      "se": 0.3548,
+      "z": 0.83
+    }
+  }
+}
