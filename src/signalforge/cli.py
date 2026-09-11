@@ -1655,7 +1655,7 @@ def paper_probation_status_cmd() -> None:
     from signalforge.db.session import session_scope
     from signalforge.domain import StrategyStatus
     from signalforge.research.approval_scope import approved_scopes
-    from signalforge.settings_store import get_setting
+    from signalforge.settings_store import effective_research_config, get_setting
 
     with session_scope() as session:
         enabled = bool(get_setting(session, "paper_probation_enabled", False))
@@ -1680,6 +1680,17 @@ def paper_probation_status_cmd() -> None:
                     f"config_hash={scope.config_hash[:12]}  spec_hash={scope.spec_json_hash[:12]}  "
                     f"sources={sorted(scope.sources)}  universe={len(scope.universe)} symbols"
                 )
+            live_hash = effective_research_config(session).config_hash
+            in_scope = any(sc.config_hash == live_hash for sc in approved_scopes(session, ver.id))
+            verdict = (
+                "MATCHES an approved scope"
+                if in_scope
+                else "matches NO approved scope — re-evaluate before a live scan can qualify"
+            )
+            typer.secho(
+                f"  live research config hash {live_hash[:12]} {verdict}",
+                fg=typer.colors.GREEN if in_scope else typer.colors.RED,
+            )
     typer.echo("\nResearch signal only — no order was placed.")
 
 
@@ -1955,7 +1966,7 @@ def _activation_preconditions() -> list[tuple[str, bool, str]]:
     from signalforge.db.session import session_scope
     from signalforge.domain import StrategyStatus
     from signalforge.research.approval_scope import approved_scopes
-    from signalforge.settings_store import get_setting
+    from signalforge.settings_store import effective_research_config, get_setting
 
     checks: list[tuple[str, bool, str]] = []
     with session_scope() as session:
@@ -1974,6 +1985,18 @@ def _activation_preconditions() -> list[tuple[str, bool, str]]:
         scoped = all(approved_scopes(session, v.id) for _s, v in approved)
         checks.append(
             ("every approved version has an exact approved scope", bool(approved) and scoped, "")
+        )
+        live_hash = effective_research_config(session).config_hash
+        hash_ok = bool(approved) and all(
+            any(sc.config_hash == live_hash for sc in approved_scopes(session, v.id))
+            for _s, v in approved
+        )
+        checks.append(
+            (
+                "live research config hash matches an approved scope for every approved version",
+                hash_ok,
+                live_hash[:12],
+            )
         )
         types = alert_type_states(session)
         others_off = not any(v for k, v in types.items() if k != "candidate")

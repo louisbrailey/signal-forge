@@ -9,6 +9,8 @@ Defaults ship conservative.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from pydantic import BaseModel, Field, NonNegativeFloat, PositiveFloat, PositiveInt
 
 from signalforge.config.hashing import config_hash
@@ -332,7 +334,40 @@ class ResearchConfig(BaseModel):
         """De-duplicated, sorted union of the watchlist and ETF universe."""
         return tuple(sorted({*self.watchlist, *self.etf_universe}))
 
+    # The sections that shape WHICH signals a scan or backtest produces. The
+    # approval scope (research/approval_scope.py) hashes these and ONLY these,
+    # so adding or changing an unrelated section — agents, news, options, the
+    # universe pipeline, the health monitor, the alert cap, or promotion
+    # thresholds (which every evaluation records per gate in gates_json) — can
+    # never silently un-scope a live PAPER_APPROVED strategy. Adding a field
+    # that DOES change signals means adding it here, and that is a deliberate
+    # re-approval event.
+    SCOPE_HASH_FIELDS: ClassVar[tuple[str, ...]] = (
+        "schema_version",
+        "watchlist",
+        "etf_universe",
+        "allow_short_candidates",
+        "enabled_horizons",
+        "intraday_bar_size",
+        "liquidity",
+        "risk",
+        "events",
+        "data_quality",
+        "quality_gates",
+        "universe_filters",
+        "commission_per_share",
+        "commission_min_per_order",
+        "slippage_bps",
+        "half_spread_fill_penalty",
+    )
+
     @property
     def config_hash(self) -> str:
-        """Stable hash over every research-relevant value."""
+        """Stable hash over the signal-shaping sections only (``SCOPE_HASH_FIELDS``)."""
+        payload = self.model_dump(mode="json")
+        return config_hash({k: payload[k] for k in self.SCOPE_HASH_FIELDS if k in payload})
+
+    @property
+    def full_config_hash(self) -> str:
+        """Hash over EVERY section — for audit trails, never for scope matching."""
         return config_hash(self.model_dump(mode="json"))
