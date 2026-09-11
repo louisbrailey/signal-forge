@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from signalforge.backtest.engine import EntrySignal, SignalFn
 from signalforge.data.series import PriceSeries
@@ -24,6 +25,26 @@ class BaselineStrategy(Protocol):
     def spec(self) -> StrategySpec: ...
 
     def evaluate(self, series: PriceSeries, t: int, ctx: StrategyContext) -> EntrySignal | None: ...
+
+
+@runtime_checkable
+class DeclaresSensitivityAxes(Protocol):
+    """OPTIONAL, and deliberately separate from :class:`BaselineStrategy`.
+
+    A strategy may declare extra parameter axes for gate 5 to perturb, so a
+    version whose whole point is a new parameter cannot pass a sensitivity
+    gate that never varied it (MAP §0.5: the decisive new parameter of a
+    v0.2.0 is exactly the one gate 5 will not test unless it is added).
+    ``research.promotion._sensitivity_plan`` picks this up via ``getattr``
+    and merges it into the family grid.
+
+    It lives on the strategy CLASS and must NEVER become a ``StrategySpec``
+    field: ``persistence.spec_json_hash`` hashes every spec field except
+    git_sha/status/notes, so adding one would change the hash of every
+    strategy — including the two whose approvals are scoped by their current
+    hashes, which would put them permanently out of scope."""
+
+    def sensitivity_axes(self) -> Mapping[str, Sequence[float | int]]: ...
 
 
 def signal_fn_for(

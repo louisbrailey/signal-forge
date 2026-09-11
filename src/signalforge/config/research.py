@@ -108,9 +108,12 @@ class PromotionThresholds(BaseModel):
     # trade count (all three required, not "at least two of three").
     min_regimes_covered: PositiveInt = 3
     min_trades_per_regime: PositiveInt = 10
-    # Gate 7 — promoted only on a risk-adjusted benchmark comparison (OOS
-    # Sharpe vs SPY buy-and-hold Sharpe over the same span) — cumulative return
-    # alone never decides this.
+    # Gate 7 — promoted only on a risk-adjusted benchmark comparison (Sharpe
+    # over ALL pre-sealed trades, in-sample and out-of-sample together, vs SPY
+    # buy-and-hold Sharpe over the same matched span; see promotion.py's gate-7
+    # block, which passes `full.trades`) — cumulative return alone never
+    # decides this. NOT out-of-sample only: gates 2/3/4 read
+    # `full.out_of_sample`, gate 7 deliberately does not.
     require_beat_benchmark_sharpe: bool = True
     # Gate 8 — no unresolved data-quality/leakage finding may support the result.
     require_data_validation_pass: bool = True

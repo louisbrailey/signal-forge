@@ -57,6 +57,9 @@ class SensitivityReport:
     fragile: bool
     reasons: list[str] = field(default_factory=list)
     grid: list[GridPoint] = field(default_factory=list)
+    # per-axis no-op check: did perturbing this axis alone move anything?
+    axis_moved: dict[str, bool] = field(default_factory=dict)
+    inert_axes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +77,8 @@ class SensitivityReport:
             "worst_expectancy_r": round(self.worst_expectancy_r, 4),
             "fragile": self.fragile,
             "reasons": list(self.reasons),
+            "axis_moved": dict(self.axis_moved),
+            "inert_axes": list(self.inert_axes),
             "grid": [
                 {
                     "params": g.params,
@@ -110,6 +115,43 @@ def _is_neighbour(point: Mapping[str, Any], baseline: Mapping[str, Any], grid: P
     except ValueError:
         return False
     return abs(bi - pi) == 1
+
+
+def _axis_movement(
+    points: Sequence[GridPoint], baseline_point: GridPoint | None, axes: Sequence[str]
+) -> tuple[dict[str, bool], list[str]]:
+    """Per-axis no-op check: for each axis, do the grid points that differ
+    from the baseline **only on that axis** actually differ from the baseline
+    in OOS trade count or expectancy?
+
+    An axis that moves neither has tested nothing — the classic way a
+    retained-but-unused parameter makes every grid point identical and lets
+    gate 5 pass at 100% having perturbed nothing real. Expectancy is compared
+    at the 4 d.p. ``to_dict`` reports, so a difference too small to be
+    reported does not count as movement."""
+    moved: dict[str, bool] = {}
+    inert: list[str] = []
+    if baseline_point is None:
+        return moved, inert
+    base_exp = round(baseline_point.oos_expectancy_r, 4)
+    for axis in axes:
+        off = [
+            p
+            for p in points
+            if not p.is_baseline
+            and p.params.get(axis) != baseline_point.params.get(axis)
+            and all(p.params.get(o) == baseline_point.params.get(o) for o in axes if o != axis)
+        ]
+        if not off:
+            continue  # a single-valued axis was never perturbed; not a claim either way
+        did_move = any(
+            p.n_trades != baseline_point.n_trades or round(p.oos_expectancy_r, 4) != base_exp
+            for p in off
+        )
+        moved[axis] = did_move
+        if not did_move:
+            inert.append(axis)
+    return moved, inert
 
 
 def run_parameter_sensitivity(
@@ -183,7 +225,14 @@ def run_parameter_sensitivity(
     baseline_point = next((p for p in points if p.is_baseline), None)
     baseline_exp = baseline_point.oos_expectancy_r if baseline_point else 0.0
 
+    axis_moved, inert_axes = _axis_movement(points, baseline_point, axes)
+
     reasons: list[str] = []
+    for axis in inert_axes:
+        reasons.append(
+            f"axis {axis!r} does not change OOS trade count or expectancy — the grid tested "
+            f"nothing on it"
+        )
     if len(evaluable) < 3:
         reasons.append(f"only {len(evaluable)} grid points produced >= {min_trades} OOS trades")
     if evaluable and pos_frac < positive_fraction_min:
@@ -217,4 +266,6 @@ def run_parameter_sensitivity(
         fragile=bool(reasons),
         reasons=reasons,
         grid=points,
+        axis_moved=axis_moved,
+        inert_axes=inert_axes,
     )

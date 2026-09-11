@@ -46,11 +46,25 @@ def approved_scopes(session: Session, strategy_version_id: int) -> list[Approved
     """Every PASSING evaluation's exact scope for this strategy version — a
     strategy version can legitimately be approved on more than one
     independently-verified dataset; a live scan is in scope if it matches
-    ANY one of them."""
+    ANY one of them.
+
+    **Ordered newest passing evaluation first**, with the evaluation id as a
+    deterministic tiebreak when two share an ``evaluated_at``. The order is
+    part of the contract, not an accident of what SQLite happens to return:
+    ``research.paper_probation`` selects which sealed test to display via
+    ``scopes[0].dataset_snapshot_id``, so once a strategy has passing
+    evaluations on two different snapshots an unordered query would show an
+    arbitrary one. Ordering changes no membership, so ``scan_scope_matches``'s
+    ``any(...)`` verdict is unaffected by construction."""
     rows = session.scalars(
-        select(StrategyPromotionEvaluation).where(
+        select(StrategyPromotionEvaluation)
+        .where(
             StrategyPromotionEvaluation.strategy_version_id == strategy_version_id,
             StrategyPromotionEvaluation.passed.is_(True),
+        )
+        .order_by(
+            StrategyPromotionEvaluation.evaluated_at.desc(),
+            StrategyPromotionEvaluation.id.desc(),
         )
     )
     return [
@@ -73,23 +87,34 @@ def scan_scope_matches(
     config_hash: str,
     spec_json_hash: str,
     source: str,
+    universe: frozenset[str] | None,
 ) -> bool:
     """True iff a live scan's exact scope matches at least one approved
-    scope: dataset snapshot, config hash, live parameter hash, AND source.
+    scope: dataset snapshot, config hash, live parameter hash, source, AND
+    the exact symbol set the approval was granted over.
     ``dataset_snapshot_id=None`` (an unresolved/ad hoc scan — e.g. one whose
     universe doesn't correspond to any known DataSnapshot) can never match:
     two ``None``s are not treated as equal, since that would let an
     arbitrary scan bypass the check simply by using a universe nobody has
     ever named. An empty/unspecified ``source`` never matches either — it
     would trivially satisfy an approval carrying a real, non-empty source
-    set otherwise."""
-    if dataset_snapshot_id is None or not source:
+    set otherwise, and the same is true of an empty/unspecified ``universe``.
+
+    The approval is scoped to *this exact symbol set*: a scan over a subset
+    or a superset of the approved universe is OUT of scope even when it
+    resolves to the same ``DataSnapshot`` id, because the evidence that
+    earned the approval was measured over those symbols and no others.
+    Symbols are compared upper-cased on both sides, matching how
+    ``approved_scopes`` normalises them."""
+    if dataset_snapshot_id is None or not source or not universe:
         return False
+    scan_universe = frozenset(s.upper() for s in universe)
     return any(
         s.dataset_snapshot_id == dataset_snapshot_id
         and s.config_hash == config_hash
         and s.spec_json_hash == spec_json_hash
         and s.sources == frozenset({source})
+        and s.universe == scan_universe
         for s in scopes
     )
 

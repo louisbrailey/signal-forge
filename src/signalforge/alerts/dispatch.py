@@ -281,6 +281,7 @@ def plan_alerts(session: Session, now: datetime) -> list[PlannedAlert]:
                     config_hash=run.config_hash,
                     spec_json_hash=live_hash,
                     source=run.source,
+                    universe=frozenset(x.upper() for x in (run.universe_json or ())),
                 )
                 if not in_scope:
                     scope_reason = NO_TRADE_SCOPE_MISMATCH
