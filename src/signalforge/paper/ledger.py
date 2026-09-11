@@ -393,6 +393,7 @@ def _candidate_snapshot(session: Session, cand: Candidate) -> dict[str, object]:
             config_hash=run.config_hash,
             spec_json_hash=spec_hash or "",
             source=run.source,
+            universe=frozenset(x.upper() for x in (run.universe_json or ())),
         )
     )
     return {
@@ -508,5 +509,6 @@ def assert_auto_simulate_allowed(session: Session, cand: Candidate) -> None:
         config_hash=run.config_hash,
         spec_json_hash=current_spec_json_hash(session, ver.id) or "",
         source=run.source,
+        universe=frozenset(x.upper() for x in (run.universe_json or ())),
     ):
         raise AutoSimulateForbidden("scan scope does not match the strategy's approved scope")

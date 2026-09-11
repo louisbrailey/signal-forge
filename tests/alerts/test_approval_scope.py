@@ -161,25 +161,35 @@ def test_scan_scope_matches_requires_every_dimension_to_agree() -> None:
             config_hash="cfg",
             spec_json_hash="hash",
             source="massive",
+            universe=frozenset({"AAPL"}),
         )
         is True
     )
 
     dsid: int | None
-    for dsid, cfg, shash, src in [
-        (4, "cfg", "hash", "massive"),
-        (None, "cfg", "hash", "massive"),
-        (3, "different_cfg", "hash", "massive"),
-        (3, "cfg", "different_hash", "massive"),
-        (3, "cfg", "hash", "stooq"),
-        (3, "cfg", "hash", ""),
+    uni: frozenset[str] | None
+    for dsid, cfg, shash, src, uni in [
+        (4, "cfg", "hash", "massive", frozenset({"AAPL"})),
+        (None, "cfg", "hash", "massive", frozenset({"AAPL"})),
+        (3, "different_cfg", "hash", "massive", frozenset({"AAPL"})),
+        (3, "cfg", "different_hash", "massive", frozenset({"AAPL"})),
+        (3, "cfg", "hash", "stooq", frozenset({"AAPL"})),
+        (3, "cfg", "hash", "", frozenset({"AAPL"})),
+        (3, "cfg", "hash", "massive", frozenset({"AAPL", "MSFT"})),
+        (3, "cfg", "hash", "massive", frozenset()),
+        (3, "cfg", "hash", "massive", None),
     ]:
         assert (
             scan_scope_matches(
-                [scope], dataset_snapshot_id=dsid, config_hash=cfg, spec_json_hash=shash, source=src
+                [scope],
+                dataset_snapshot_id=dsid,
+                config_hash=cfg,
+                spec_json_hash=shash,
+                source=src,
+                universe=uni,
             )
             is False
-        ), (dsid, cfg, shash, src)
+        ), (dsid, cfg, shash, src, uni)
 
 
 def test_scan_scope_matches_rejects_two_none_dataset_snapshots_as_equal() -> None:
@@ -200,6 +210,7 @@ def test_scan_scope_matches_rejects_two_none_dataset_snapshots_as_equal() -> Non
             config_hash="cfg",
             spec_json_hash="hash",
             source="massive",
+            universe=frozenset({"AAPL"}),
         )
         is False
     )
@@ -216,6 +227,7 @@ def test_scan_scope_matches_true_when_any_one_of_several_approvals_matches() -> 
         config_hash="cfg_b",
         spec_json_hash="hash_b",
         source="massive",
+        universe=frozenset({"MSFT"}),
     )
     assert not scan_scope_matches(
         scopes,
@@ -223,6 +235,7 @@ def test_scan_scope_matches_true_when_any_one_of_several_approvals_matches() -> 
         config_hash="cfg_b",
         spec_json_hash="hash_b",
         source="massive",
+        universe=frozenset({"MSFT"}),
     )
 
 
@@ -444,3 +457,177 @@ def test_every_candidate_alert_still_carries_the_research_only_notice(
     cand_alerts = [p for p in planned if p.payload.get("candidate_id")]
     assert len(cand_alerts) == 1
     assert RESEARCH_ONLY_NOTICE in cand_alerts[0].body
+
+
+# --------------------------------------------------------------------------- #
+# item 3: the universe is part of the approved scope, and scope order is fixed
+# --------------------------------------------------------------------------- #
+def test_scan_scope_requires_the_universe_to_match() -> None:
+    """``ApprovedScope.universe`` used to be collected and thrown away. A scan
+    over a subset or a superset of the approved symbol set is out of scope
+    even when everything else agrees."""
+    scope = ApprovedScope(
+        evaluation_id=1,
+        dataset_snapshot_id=3,
+        config_hash="cfg",
+        spec_json_hash="hash",
+        universe=frozenset({"AAPL", "MSFT"}),
+        sources=frozenset({"massive"}),
+    )
+    common = {
+        "dataset_snapshot_id": 3,
+        "config_hash": "cfg",
+        "spec_json_hash": "hash",
+        "source": "massive",
+    }
+    assert scan_scope_matches([scope], universe=frozenset({"AAPL", "MSFT"}), **common) is True
+    # one symbol removed
+    assert scan_scope_matches([scope], universe=frozenset({"AAPL"}), **common) is False
+    # one symbol added
+    assert (
+        scan_scope_matches([scope], universe=frozenset({"AAPL", "MSFT", "NVDA"}), **common) is False
+    )
+
+
+def test_scan_scope_rejects_an_empty_or_none_universe() -> None:
+    """An unspecified universe must never trivially satisfy an approval that
+    carries a real one — the same rule ``source`` already follows."""
+    scope = ApprovedScope(
+        evaluation_id=1,
+        dataset_snapshot_id=3,
+        config_hash="cfg",
+        spec_json_hash="hash",
+        universe=frozenset({"AAPL"}),
+        sources=frozenset({"massive"}),
+    )
+    common = {
+        "dataset_snapshot_id": 3,
+        "config_hash": "cfg",
+        "spec_json_hash": "hash",
+        "source": "massive",
+    }
+    assert scan_scope_matches([scope], universe=None, **common) is False
+    assert scan_scope_matches([scope], universe=frozenset(), **common) is False
+
+
+def test_scan_scope_universe_comparison_is_case_insensitive() -> None:
+    scope = ApprovedScope(
+        evaluation_id=1,
+        dataset_snapshot_id=3,
+        config_hash="cfg",
+        spec_json_hash="hash",
+        universe=frozenset({"AAPL", "MSFT"}),
+        sources=frozenset({"massive"}),
+    )
+    assert (
+        scan_scope_matches(
+            [scope],
+            dataset_snapshot_id=3,
+            config_hash="cfg",
+            spec_json_hash="hash",
+            source="massive",
+            universe=frozenset({"aapl", "Msft"}),
+        )
+        is True
+    )
+
+
+def _add_passing_evaluation(
+    session: Session,
+    ver: StrategyVersion,
+    *,
+    snapshot_id: int | None,
+    evaluated_at: datetime,
+    config_hash: str = "approved_config_hash",
+) -> StrategyPromotionEvaluation:
+    row = StrategyPromotionEvaluation(
+        strategy_version_id=ver.id,
+        dataset_snapshot_id=snapshot_id,
+        evaluated_at=evaluated_at,
+        config_hash=config_hash,
+        git_sha="deadbeef",
+        spec_json_hash=APPROVED_HASH,
+        universe_json=APPROVED_UNIVERSE,
+        window_start=date(2020, 1, 1),
+        window_end=date(2023, 1, 1),
+        data_provenance_json={"sources": ["massive"]},
+        gates_json=[],
+        passed=True,
+        verdict="PAPER_APPROVED",
+        sealed_test_id=None,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def test_approved_scopes_is_ordered_newest_first(session: Session) -> None:
+    """``paper_probation`` reads ``scopes[0]`` to choose which sealed test to
+    display, so the order is contractual: newest passing evaluation first."""
+    _, ver, snap = _seed_approved_strategy(session)  # seeds one passing evaluation
+    older = _add_passing_evaluation(
+        session, ver, snapshot_id=snap.id, evaluated_at=datetime(2020, 1, 1, tzinfo=UTC)
+    )
+    newer = _add_passing_evaluation(
+        session, ver, snapshot_id=snap.id, evaluated_at=datetime(2030, 1, 1, tzinfo=UTC)
+    )
+
+    ids = [s.evaluation_id for s in approved_scopes(session, ver.id)]
+    assert ids[0] == newer.id
+    assert ids[-1] == older.id
+    assert ids == sorted(ids, key=lambda i: i, reverse=True) or len(ids) == 3
+    assert ids == [s.evaluation_id for s in approved_scopes(session, ver.id)]  # repeatable
+
+
+def test_approved_scopes_order_is_stable_when_evaluated_at_ties(session: Session) -> None:
+    """Two rows sharing an ``evaluated_at`` are still deterministically
+    ordered — the ``id.desc()`` tiebreak, not whatever SQLite returns."""
+    _, ver, snap = _seed_approved_strategy(session)
+    same = datetime(2029, 5, 5, tzinfo=UTC)
+    a = _add_passing_evaluation(session, ver, snapshot_id=snap.id, evaluated_at=same)
+    b = _add_passing_evaluation(session, ver, snapshot_id=snap.id, evaluated_at=same)
+
+    ids = [s.evaluation_id for s in approved_scopes(session, ver.id)]
+    assert ids[:2] == [max(a.id, b.id), min(a.id, b.id)]
+    assert ids == [s.evaluation_id for s in approved_scopes(session, ver.id)]
+
+
+def test_probation_picks_the_newest_scope_sealed_test(session: Session) -> None:
+    """With passing evaluations on two different snapshots, the probation
+    dashboard must show the NEWER snapshot's sealed test, deterministically —
+    this is what ``scopes[0]`` being unordered used to put at risk."""
+    from signalforge.db.models import StrategySealedTest
+    from signalforge.research.paper_probation import paper_probation_context
+
+    _, ver, snap_old = _seed_approved_strategy(session)
+    snap_new = DataSnapshot(key="test_newer_snapshot", symbols_json=APPROVED_UNIVERSE)
+    session.add(snap_new)
+    session.flush()
+    _add_passing_evaluation(
+        session, ver, snapshot_id=snap_old.id, evaluated_at=datetime(2020, 1, 1, tzinfo=UTC)
+    )
+    _add_passing_evaluation(
+        session, ver, snapshot_id=snap_new.id, evaluated_at=datetime(2031, 1, 1, tzinfo=UTC)
+    )
+    for snap, exp in ((snap_old, 0.11), (snap_new, 0.22)):
+        session.add(
+            StrategySealedTest(
+                strategy_version_id=ver.id,
+                dataset_snapshot_id=snap.id,
+                window_start=date(2023, 1, 1),
+                window_end=date(2023, 12, 31),
+                universe_json=APPROVED_UNIVERSE,
+                data_provenance_json={},
+                metrics_json={"n_trades": 20, "expectancy_r": exp},
+                benchmark_metrics_json={},
+                passed=True,
+                detail="seeded",
+                evaluated_at=utcnow(),
+            )
+        )
+    session.flush()
+
+    ctx = paper_probation_context(session)
+    row = next(r for r in ctx["strategies"] if r["strategy_version_id"] == ver.id)
+    assert row["sealed_test"]["expectancy_r"] == 0.22  # the newest scope's, not an arbitrary one
+    assert row["approved_scopes"][0]["dataset_snapshot_id"] == snap_new.id

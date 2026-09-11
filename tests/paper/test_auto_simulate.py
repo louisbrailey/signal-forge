@@ -106,6 +106,10 @@ def _seed(
         config_hash="cfg",
         source="massive",
         dataset_snapshot_id=snap.id,
+        # the scan's own symbol set is part of the approved scope now: an
+        # approval is granted over exactly these symbols and no others
+        universe_json=list(symbols),
+        universe_size=len(symbols),
     )
     session.add(run)
     session.flush()
