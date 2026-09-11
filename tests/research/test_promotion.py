@@ -508,3 +508,51 @@ def test_evaluate_promotion_without_a_dataset_snapshot_resolves_one_automaticall
     assert result.dataset_snapshot_id is not None
     snap = session.get(DataSnapshot, result.dataset_snapshot_id)
     assert sorted(snap.symbols_json) == sorted(UNIVERSE)
+
+
+# ---- item 5: gate 7's trade set is pinned so the comment can never drift ----
+def test_gate7_uses_all_pre_sealed_trades_not_only_oos(session: Session) -> None:
+    """Gate 7 measures ``full.trades`` — every pre-sealed trade, IS+OOS — not
+    ``full.out_of_sample``. ``config/research.py`` used to document it as "OOS
+    Sharpe"; the comment was corrected, the code deliberately was not. This
+    test pins the behaviour so the two can never silently diverge again."""
+    from signalforge.backtest.costs import CostModel
+    from signalforge.research.backtest_runner import run_strategy_over_universe
+    from signalforge.research.portfolio_metrics import compute_portfolio_metrics
+
+    _seed(session)
+    cfg = _permissive_config(session)
+    result = evaluate_promotion(
+        session, MeanReversion(), symbols=UNIVERSE, start=START, end=END, config=cfg
+    )
+    gate7 = next(g for g in result.gates if g.number == 7)
+
+    sealed_start = END - timedelta(days=cfg.promotion.sealed_window_days)
+    pre_sealed_end = sealed_start - timedelta(days=1)
+    cost_model = CostModel(
+        commission_per_share=cfg.commission_per_share,
+        commission_min_per_order=cfg.commission_min_per_order,
+        slippage_bps=cfg.slippage_bps,
+        half_spread_fill_penalty=cfg.half_spread_fill_penalty,
+    )
+    full = run_strategy_over_universe(
+        session,
+        MeanReversion(),
+        UNIVERSE,
+        START,
+        pre_sealed_end,
+        cost_model=cost_model,
+    )
+    proxy = PriceSeries.load(session, "SPY", START, pre_sealed_end)
+    span = [d for d in proxy.dates if START <= d <= pre_sealed_end]
+    lo, hi = (span[0], span[-1]) if span else (START, pre_sealed_end)
+
+    all_trades = compute_portfolio_metrics(full.trades, span_start=lo, span_end=hi)
+
+    assert gate7.evidence["strategy"] == all_trades.to_dict()
+    assert gate7.evidence["strategy"]["n_trades"] == len(full.trades)
+    # the two really are different populations on this fixture, so the
+    # assertion above is not vacuous: gate 7 sees strictly more trades than
+    # the out-of-sample slice gates 2/3/4 read.
+    assert full.out_of_sample.n_trades < len(full.trades)
+    assert gate7.evidence["strategy"]["n_trades"] != full.out_of_sample.n_trades

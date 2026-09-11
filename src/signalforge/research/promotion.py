@@ -19,8 +19,11 @@ passes, on genuine licensed data:
     ``research.sensitivity``) — a lucky, narrow parameter setting fails this.
  6. Evidence in bull, bear, *and* range-bound regimes, each with a minimum
     trade count.
- 7. A risk-adjusted benchmark comparison (Sharpe vs SPY buy-and-hold over the
-    same span) — cumulative return alone never decides this.
+ 7. A risk-adjusted benchmark comparison (Sharpe over ALL pre-sealed trades,
+    in-sample and out-of-sample together, vs SPY buy-and-hold over the same
+    matched span) — cumulative return alone never decides this. Gates 2/3/4
+    read the out-of-sample slice; gate 7 deliberately reads every pre-sealed
+    trade.
  8. No unresolved data-quality or leakage finding: a fresh ``validate_daily``
     pass, plus a live look-ahead self-check on the shared feature functions.
  9. A sealed final out-of-sample window, evaluated **once** and locked
@@ -762,7 +765,11 @@ def evaluate_promotion(
         )
     )
 
-    # Gate 7: risk-adjusted benchmark comparison. Annualise both sides over the
+    # Gate 7: risk-adjusted benchmark comparison over `full.trades` — EVERY
+    # pre-sealed trade, in-sample and out-of-sample together, not
+    # `full.out_of_sample` (which gates 2/3/4 use). Changing which trade set
+    # this gate measures would re-specify the gate, so the comment is what was
+    # corrected here, never the code. Annualise both sides over the
     # SAME actually-available span: if the proxy's real ingested history starts
     # later than `start` (a shorter data-provider entitlement than requested),
     # compute_portfolio_metrics would silently annualise the strategy's trades
