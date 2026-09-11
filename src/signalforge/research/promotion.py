@@ -64,6 +64,7 @@ from signalforge.backtest.costs import CostModel
 from signalforge.backtest.leakage import LookaheadDetected, assert_no_lookahead
 from signalforge.backtest.regime import TREND_LOOKBACK, label_regimes
 from signalforge.config.research import PromotionThresholds, ResearchConfig
+from signalforge.data.intraday_coverage import intraday_rth_coverage
 from signalforge.data.repository import SourceFilter
 from signalforge.data.series import PriceSeries
 from signalforge.data.validate import validate_daily
@@ -78,7 +79,7 @@ from signalforge.db.models import (
 from signalforge.db.types import utcnow
 from signalforge.domain import Horizon, StrategyStatus
 from signalforge.observability import get_logger
-from signalforge.research.backtest_runner import run_strategy_over_universe
+from signalforge.research.backtest_runner import _as_date, run_strategy_over_universe
 from signalforge.research.features.daily import (
     atr,
     atr_contraction,
@@ -409,7 +410,14 @@ def _regime_census(trades: list[Any], regimes: Mapping[date, str]) -> _RegimeCen
     buckets = {"bull": 0, "bear": 0, "range": 0}
     warmup = no_proxy_bar = unlabelled = 0
     for t in trades:
-        lbl = regimes.get(t.entry_date)
+        # `label_regimes` keys by DATE; an intraday trade's entry_date is a
+        # DATETIME, and a datetime key never matches one. Without this
+        # normalisation gate 6 would read 0/0/0 with 100% unbucketed for every
+        # intraday run whatever the data says — an un-passable gate, not a
+        # threshold (design B2). `run_strategy_over_universe` already applies
+        # the same `_as_date` at three other places; this was the one that
+        # forgot. No-op for daily trades.
+        lbl = regimes.get(_as_date(t.entry_date))
         if lbl is None:
             no_proxy_bar += 1
         elif lbl == "warmup":
@@ -765,6 +773,8 @@ def _get_or_create_sealed_test(
     cost_model: CostModel,
     th: PromotionThresholds,
     dataset_snapshot_id: int,
+    intraday: bool = False,
+    bar_size: str = "15m",
 ) -> tuple[StrategySealedTest, bool]:
     """Returns ``(row, reused)`` — ``reused=True`` means an existing locked row
     was returned as-is; nothing was recomputed.
@@ -793,6 +803,8 @@ def _get_or_create_sealed_test(
         proxy_symbol=proxy_symbol,
         source=source,
         cost_model=cost_model,
+        intraday=intraday,
+        bar_size=bar_size,
     )
     trades = result.trades  # every trade in the sealed window, evaluated once
     n = len(trades)
@@ -913,30 +925,8 @@ def evaluate_promotion(
     gates: list[Gate] = []
     sealed_row: StrategySealedTest | None = None
 
-    if spec.horizon is Horizon.INTRADAY:
-        gates.append(
-            Gate(
-                0,
-                "data_availability",
-                False,
-                "no intraday bar history is ingested for this horizon — evaluation not attempted "
-                "(not a fabricated pass on absent data)",
-            )
-        )
-        return _finalize(
-            session,
-            strategy,
-            version,
-            config,
-            symbols,
-            start,
-            end,
-            gates,
-            None,
-            {},
-            dataset_snapshot.id,
-            sealed_look_prior=k_prior,
-        )
+    intraday = spec.horizon is Horizon.INTRADAY
+    bar_size = config.intraday_bar_size
 
     # Pin the sealed window to any already-locked sealed test for this exact
     # strategy version. Without this, re-evaluating the same version after
@@ -988,7 +978,67 @@ def evaluate_promotion(
             sealed_look_prior=k_prior,
         )
 
+    # ---- gate 0 (INTRADAY only): is there actually an intraday history? ----
+    # Replaces the unconditional hard-coded failure this branch used to append.
+    # R4-permissible (MAP §1 carve-out 2, design §2.2): a real query can only
+    # ever be HARDER to satisfy than a hard-coded fail is to trip — it keeps
+    # failing for as long as no intraday data exists, and then keeps failing on
+    # partial, mis-sized, simulated, wrong-source or non-RTH data. The 100%
+    # coverage requirement is frozen: it may not be relaxed to obtain a pass.
+    #
+    # The pre-sealed span is the span checked. The sealed window is NOT
+    # inspected here (R1) — gate 9's own run is what discovers whether the
+    # sealed slice has bars, and a coverage query over it would be a look.
+    if intraday:
+        coverage = intraday_rth_coverage(
+            session,
+            symbols,
+            start=start,
+            end=pre_sealed_end,
+            bar_size=bar_size,
+            source=source,
+        )
+        if not coverage.complete:
+            gates.append(
+                Gate(
+                    0,
+                    "data_availability",
+                    False,
+                    coverage.detail(),
+                    {"intraday_coverage": coverage.to_dict()},
+                )
+            )
+            return _finalize(
+                session,
+                strategy,
+                version,
+                config,
+                symbols,
+                start,
+                end,
+                gates,
+                None,
+                {},
+                dataset_snapshot.id,
+                sealed_look_prior=k_prior,
+            )
+        gates.append(
+            Gate(
+                0,
+                "data_availability",
+                True,
+                coverage.detail(),
+                {"intraday_coverage": coverage.to_dict()},
+            )
+        )
+
     # ---- shared evidence over the PRE-SEALED span (gates 1-8) -------------
+    # ``intraday``/``bar_size`` are threaded through every run below (design
+    # B1). Without them the ladder would evaluate an INTRADAY strategy on
+    # DAILY bars, where `_session_date` makes `bars_since_open` identically 0,
+    # `opening_range` never completes and every gate reads 0 trades — a
+    # truthful gate-0 fail would have become five gate failures that read as
+    # strategy defects.
     full = run_strategy_over_universe(
         session,
         strategy,
@@ -999,6 +1049,8 @@ def evaluate_promotion(
         source=source,
         cost_model=cost_model,
         config_hash=config.config_hash,
+        intraday=intraday,
+        bar_size=bar_size,
     )
     data_provenance = {
         "sources": list(full.data.sources),
@@ -1123,6 +1175,8 @@ def evaluate_promotion(
             end=pre_sealed_end,
             source=source,
             cost_model=cost_model,
+            intraday=intraday,
+            bar_size=bar_size,
             min_trades=th.sensitivity_min_grid_trades,
             positive_fraction_min=th.sensitivity_positive_fraction_min,
             neighbour_fraction_min=th.sensitivity_neighbour_fraction_min,
@@ -1271,6 +1325,8 @@ def evaluate_promotion(
         cost_model=cost_model,
         th=th,
         dataset_snapshot_id=dataset_snapshot.id,
+        intraday=intraday,
+        bar_size=bar_size,
     )
     # A sealed row is either created by THIS run, or it is a LOCKED REPLAY of
     # a row an earlier run locked — and a replay is stated as one, with the
