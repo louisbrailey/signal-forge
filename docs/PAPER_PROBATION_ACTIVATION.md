@@ -155,3 +155,23 @@ Tests: `tests/paper/test_auto_simulate.py` (inert unless ON; single accepted
 trade with full evidence + audit; idempotent; guard refusal recorded immutably;
 scope mismatch refused; daily cap and one-open-position rule; kill switch) and
 `test_automatic_acceptance_has_exactly_one_guarded_entry_point`.
+
+
+## Incident 2026-09-11 — approval scope silently un-matched by a config addition (fixed)
+
+**What happened.** Adding the `agents` section to `ResearchConfig` on 2026-09-10 changed
+the full-config hash that the five-part approval scope compares. Every live
+approved-scope scan from that point (scan runs 34–39) carried config hash
+`76500f3c…` while both approvals were granted under `11b54aee…`, so no candidate could
+have matched an approved scope. It was masked because every scan produced 0 qualified
+candidates. Found 2026-09-11 01:50 ET while verifying the pipeline-hardening merge.
+
+**Fix (commit 0cc4cf4).** The scope hash now covers only the signal-shaping sections
+(`ResearchConfig.SCOPE_HASH_FIELDS`); `full_config_hash` remains for audit. Both
+approved versions were re-evaluated once with the worker stopped (05:53 UTC): both
+PAPER_APPROVED again, sealed tests replayed as LOCKED rows (20 sealed tests before and
+after; no new look), new scopes carry `fe365720…`, and `paper-probation-status` plus
+the activation preconditions now report whether the live hash matches an approved
+scope. Precondition list re-run: all OK.
+
+**Exposure.** No trade, alert, or decision was affected (0 candidates in the window).
