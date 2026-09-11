@@ -1041,7 +1041,15 @@ def test_declared_axes_extend_the_family_grid() -> None:
 
 
 def test_undeclared_strategies_keep_their_shipped_nine_point_grid() -> None:
-    """The R4 floor for this item: every v0.1.0 grid is unchanged."""
+    """The R4 floor for this item: every grid of a strategy that declares
+    nothing is unchanged.
+
+    ``volatility_breakout`` is no longer in this list: v0.2.0 declares
+    ``squeeze_lag`` and ``release_min`` (the parameters the version exists
+    for), so its plan is 4 axes / 81 points. Its two SHIPPED axes are still
+    asserted byte-for-byte below and in
+    ``tests/research/test_breakout_v020.py`` — a declaration may extend the
+    shipped grid, never shrink it."""
     import math as _math
 
     expected = {
@@ -1057,17 +1065,28 @@ def test_undeclared_strategies_keep_their_shipped_nine_point_grid() -> None:
             "z_entry": [-2.5, -2.0, -1.5],
             "stop_atr": [1.5, 2.0, 2.5],
         },
-        "volatility_breakout.short_swing": {
-            "contraction_max": [0.65, 0.75, 0.85],
-            "stop_atr": [1.5, 1.75, 2.0],
-        },
     }
-    for strat in (RelativeStrength(), TrendContinuation(), MeanReversion(), VolatilityBreakout()):
+    for strat in (RelativeStrength(), TrendContinuation(), MeanReversion()):
         plan = _sensitivity_plan(strat)
         assert plan is not None
         _f, grid = plan
         assert grid == expected[strat.key], strat.key
         assert _math.prod(len(v) for v in grid.values()) == 9
+
+
+def test_the_breakout_declaration_extends_but_never_edits_its_shipped_axes() -> None:
+    """The R4 floor for the one strategy that does declare: its shipped
+    ``contraction_max`` / ``stop_atr`` values are exactly the v0.1.0 ones,
+    and the declaration only adds axes on top."""
+    import math as _math
+
+    plan = _sensitivity_plan(VolatilityBreakout())
+    assert plan is not None
+    _f, grid = plan
+    assert grid["contraction_max"] == [0.65, 0.75, 0.85]
+    assert grid["stop_atr"] == [1.5, 1.75, 2.0]
+    assert set(grid) == {"contraction_max", "stop_atr", "squeeze_lag", "release_min"}
+    assert _math.prod(len(v) for v in grid.values()) == 81
 
 
 def test_declared_axis_not_on_params_raises_at_plan_time() -> None:
