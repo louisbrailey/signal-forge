@@ -1216,13 +1216,17 @@ def test_cli_sealed_look_summary_reads_the_gate9_ledger() -> None:
     assert "4 prior sealed tests: ids 1, 6, 11, 16" in line
 
     # a replay says so, and does not advance the count
-    ledger_replay = {**ledger, "this_look": 4, "reused_this_run": True}
+    ledger_replay = {**ledger, "this_look": 3, "reused_this_run": True}
+    ledger_replay["looks"] = [{"sealed_test_id": i, "is_this_run": i == 11} for i in (1, 6, 11, 16)]
     replay = SimpleNamespace(
         strategy_key="trend_continuation.short_swing",
         sealed_look_prior=4,
         gates=[Gate(9, "sealed_final_test", True, "", {"sealed_look_ledger": ledger_replay})],
     )
-    assert "no new look taken" in _sealed_look_summary(replay)
+    line_replay = _sealed_look_summary(replay)
+    assert "no new look taken" in line_replay
+    # the replayed row IS one of the prior looks, so it stays in the id list
+    assert "4 prior sealed tests: ids 1, 6, 11, 16; replayed id 11" in line_replay
 
     # a gate-0 short circuit takes no look at all and says that too
     early = SimpleNamespace(

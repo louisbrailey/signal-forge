@@ -703,17 +703,24 @@ def sealed_look_ledger(
 
 def format_sealed_look_line(ledger: Mapping[str, Any]) -> str:
     """One human-readable disclosure line, shared by gate 9's detail and the
-    CLI, so the two can never disagree."""
-    ids = ", ".join(str(x["sealed_test_id"]) for x in ledger["looks"] if not x["is_this_run"])
+    CLI, so the two can never disagree.
+
+    A replayed row is itself one of the prior looks, so it stays in the id
+    list and is named separately; a row sealed by THIS run is not prior and
+    is excluded from it."""
+    reused = bool(ledger["reused_this_run"])
+    prior_rows = [x for x in ledger["looks"] if reused or not x["is_this_run"]]
+    ids = ", ".join(str(x["sealed_test_id"]) for x in prior_rows)
     prior = f"{ledger['k_prior']} prior sealed test{'s' if ledger['k_prior'] != 1 else ''}"
     if ids:
         prior += f": ids {ids}"
     if ledger["this_look"] == 0:
         return f"no sealed look taken by this evaluation ({prior})"
-    if ledger["reused_this_run"]:
+    if reused:
+        replayed = next((x["sealed_test_id"] for x in ledger["looks"] if x["is_this_run"]), None)
         return (
             f"replay of look {ledger['this_look']} of this strategy family — no new look "
-            f"taken ({prior})"
+            f"taken ({prior}; replayed id {replayed})"
         )
     return f"look {ledger['this_look']} of this strategy family ({prior})"
 
