@@ -184,3 +184,15 @@ separate hardening item, not bundled with this disposition.
 *Read-only disposition. No strategy code, configuration, database row, or gate
 threshold was changed in producing this record. Source:
 `docs/research/designs/mean_reversion_short_swing.md` §§A–14 and Appendix.*
+
+
+## CONFIRMED — 2026-09-11 powered evaluation on the 150-symbol snapshot: DOES NOT PASS
+
+Pre-registered (docs/research/PREREGISTRATION_2026-09-11_snapshot11.md) and run
+unchanged (v0.1.0) on DataSnapshot 11 (evaluation 46, sealed test locked; family look
+6). With 2,057 OOS trades the point-estimate gates fail with power to spare: OOS
+expectancy −0.0191R, bootstrap CI low −0.0551R, sensitivity 22% of points / 25% of
+neighbours positive, Sharpe −0.75 (CAGR −15.1%, maxDD 88.3%). Gates 1, 2, 6, 8 pass;
+the sealed year alone is +0.0579R on 570 trades and does not rescue it. This closes
+the strategy as designed; the design document's candidate mechanisms were already
+refuted pre-sealed. Status stays EXPERIMENTAL. No further look on this snapshot.

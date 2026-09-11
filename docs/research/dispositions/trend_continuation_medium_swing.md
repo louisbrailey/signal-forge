@@ -196,3 +196,22 @@ eligible for Route A.
 
 *Read-only disposition. No strategy code, configuration, database row, or gate threshold
 was changed in producing this record. Source: `docs/research/designs/trend_continuation_medium_swing.md` §§0–14.*
+
+
+## SUPERSEDED — 2026-09-11 powered evaluation on the 150-symbol snapshot: PAPER_APPROVED
+
+Pre-registered in docs/research/PREREGISTRATION_2026-09-11_snapshot11.md and run
+unchanged (v0.1.0) on DataSnapshot 11 `research_150_massive_10y_presealed_sel`
+(evaluation 45, sealed test locked by that run; family look 6 — the hardened counter
+prints "look 5 of this family, 4 prior sealed tests" because it counts the replayed
+snapshot-3 row once). All ten gates PASS: 1,986 OOS trades, OOS expectancy +0.2209R,
+bootstrap CI low +0.1493R, sensitivity 9/9 positive, regimes bull 4,972 / bear 95 /
+range 415 (+673 warm-up, reported), sealed year +0.0385R on 602 trades.
+
+Disclosures that travel with this approval: (1) the sealed result is ≈ +0.5 SE above
+zero (sd ≈ 1.74 → SE ≈ 0.071R) — a sign-test pass, not strong evidence; (2) the
+benchmark gate (Sharpe +2.79, turnover 693/yr) is inflated by the √(trades/year)
+convention noted in STRATEGY_COMPLETION_MAP.md §4.3; (3) the approval scope is the
+150-symbol universe, which the live scan can only exercise once the per-strategy
+approved-universe scan ships; (4) the snapshot-3 "does not pass" above remains true
+on that snapshot and is not overwritten.
