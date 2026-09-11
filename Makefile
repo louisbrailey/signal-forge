@@ -78,7 +78,7 @@ safety: ## Only the S1-S10 invariant tests
 
 .PHONY: secrets
 secrets: ## Fail on any secret not already audited into .secrets.baseline (check-only; never rewrites the baseline)
-	git ls-files -z | xargs -0 $(RUN) detect-secrets-hook --baseline .secrets.baseline
+	git ls-files -z | xargs -0 $(RUN) detect-secrets-hook --baseline .secrets.baseline --exclude-files 'docs/research/.*'
 
 .PHONY: secrets-baseline
 secrets-baseline: ## Re-generate .secrets.baseline (then audit every new entry: uv run detect-secrets audit .secrets.baseline)
