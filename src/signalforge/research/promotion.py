@@ -299,6 +299,30 @@ def _sensitivity_plan(
             strategy, {"z_entry": [-2.5, -2.0, -1.5], "stop_atr": [1.5, 2.0, 2.5]}
         )
 
+    if key.startswith("intraday_orb"):
+        from signalforge.research.strategies.intraday_orb import IntradayORB
+
+        base = strategy.params  # type: ignore[attr-defined]
+
+        def factory(p: Mapping[str, Any]) -> BaselineStrategy:
+            return IntradayORB(_replace(base, **p))
+
+        # R4 carve-out 1 (MAP §1): registering the MISSING grid for a family
+        # that has none. Gate 5 hard-fails such a family today
+        # (``plan is None`` below), which is a permanent automatic failure
+        # rather than a measurement — adding the grid can only create new ways
+        # to fail. Pre-registered in docs/research/designs/intraday_orb.md §6
+        # BEFORE any intraday bar exists; ``or_bars`` is the definitional axis
+        # (it moves both the range and the entry-window guard) and
+        # ``target_range_mult`` sets the payoff ratio the break-even hit rate
+        # turns on. There is no ``stop_atr`` axis to pair with them: this
+        # family's stop is structural (the opposite OR edge). v0.2.0's own new
+        # parameter, ``regime_lag_sessions``, is merged on top from the
+        # strategy's ``sensitivity_axes()`` declaration.
+        return factory, _merge_declared_axes(
+            strategy, {"or_bars": [2, 3, 4], "target_range_mult": [1.25, 1.5, 1.75]}
+        )
+
     if key.startswith("volatility_breakout"):
         from signalforge.research.strategies.breakout import VolatilityBreakout
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -47,6 +48,48 @@ class DeclaresSensitivityAxes(Protocol):
     def sensitivity_axes(self) -> Mapping[str, Sequence[float | int]]: ...
 
 
+def declared_regime_lag_sessions(strategy: BaselineStrategy) -> int:
+    """How many completed daily sessions back a strategy's regime read must be
+    lagged. ``0`` (the default for every strategy that declares nothing) means
+    "the label of the session the bar belongs to".
+
+    Why this exists, and why it lives on the strategy CLASS rather than in the
+    plumbing: ``regime_lookup`` labels a session from **that session's own
+    daily bar**, whose close is not known while the session is still being
+    traded. For a DAILY strategy that is harmless — the signal fires at bar
+    *t*'s close and fills at *t+1*'s open, so the label is strictly past. For
+    an INTRADAY strategy trading inside session *D* it is a genuine lookahead:
+    a 10:15 entry would be gated on *D*'s 16:00 close.
+    ``backtest.leakage.assert_no_lookahead`` cannot see it, because it lives in
+    the ``regime_by_date`` plumbing and not in any feature function.
+
+    Reading it off the strategy (rather than switching on ``intraday=``
+    anywhere in the runner) keeps the fix tied to a strategy VERSION: the lag
+    is part of what ``intraday_orb`` v0.2.0 *is*, it shows up in its
+    ``StrategySpec``, and every other strategy's behaviour is byte-identical
+    because ``getattr`` returns the 0 default."""
+    return max(0, int(getattr(strategy, "regime_lag_sessions", 0) or 0))
+
+
+def lagged_regime(regimes: Mapping[date, RegimeState], as_of: date, lag: int) -> RegimeState:
+    """The regime label in force ``lag`` completed sessions before ``as_of``.
+
+    ``lag=0`` is ``regimes.get(as_of, NEUTRAL)`` — the same-session read.
+    ``lag=1`` is the label derived from the most recent daily close STRICTLY
+    BEFORE ``as_of``, which is the newest information an intraday entry inside
+    ``as_of`` could actually have had. ``as_of`` itself need not be present in
+    ``regimes`` (an intraday session whose daily bar is not ingested yet still
+    resolves to the previous session's label).
+
+    Falls back to ``NEUTRAL`` when the history does not reach back far enough —
+    the same fallback the unlagged path uses for an unlabelled date."""
+    if lag <= 0:
+        return regimes.get(as_of, NEUTRAL)
+    ordered = sorted(regimes)
+    i = bisect_left(ordered, as_of) - lag
+    return regimes[ordered[i]] if i >= 0 else NEUTRAL
+
+
 def signal_fn_for(
     strategy: BaselineStrategy,
     *,
@@ -55,11 +98,29 @@ def signal_fn_for(
 ) -> SignalFn:
     """Adapt a strategy to the engine's ``(series, t) -> EntrySignal | None`` shape."""
     regimes = regime_by_date or {}
+    lag = declared_regime_lag_sessions(strategy)
 
-    def _fn(series: PriceSeries, t: int) -> EntrySignal | None:
+    if lag == 0:
+
+        def _fn(series: PriceSeries, t: int) -> EntrySignal | None:
+            stamp = series.dates[t]
+            key = stamp.date() if isinstance(stamp, datetime) else stamp
+            regime = regimes.get(key, NEUTRAL)
+            return strategy.evaluate(
+                series, t, StrategyContext(regime=regime, allow_short=allow_short)
+            )
+
+        return _fn
+
+    # Sorted once per run, not per bar: the lookup is the hot path of an
+    # intraday backtest (tens of thousands of bars per symbol).
+    ordered = sorted(regimes)
+
+    def _lagged_fn(series: PriceSeries, t: int) -> EntrySignal | None:
         stamp = series.dates[t]
         key = stamp.date() if isinstance(stamp, datetime) else stamp
-        regime = regimes.get(key, NEUTRAL)
+        i = bisect_left(ordered, key) - lag
+        regime = regimes[ordered[i]] if i >= 0 else NEUTRAL
         return strategy.evaluate(series, t, StrategyContext(regime=regime, allow_short=allow_short))
 
-    return _fn
+    return _lagged_fn

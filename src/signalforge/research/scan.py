@@ -31,7 +31,11 @@ from signalforge.research.persistence import latest_oos_metric, upsert_strategy_
 from signalforge.research.regime import RegimeState, regime_from_proxy
 from signalforge.research.registry import StrategySpec
 from signalforge.research.strategies import default_strategies
-from signalforge.research.strategies.base import BaselineStrategy, StrategyContext
+from signalforge.research.strategies.base import (
+    BaselineStrategy,
+    StrategyContext,
+    declared_regime_lag_sessions,
+)
 from signalforge.risk.engine import OpenExposure, SizingRequest, size_position
 
 _MIN_HISTORY = 220
@@ -197,6 +201,16 @@ def run_scan(
     proxy = PriceSeries.load(session, proxy_symbol, start, end, source=source)
     regime = regime_from_proxy(proxy, len(proxy) - 1) if len(proxy) >= _MIN_HISTORY else None
 
+    # A strategy may declare that its regime read must be LAGGED by whole
+    # completed daily sessions (strategies.base.declared_regime_lag_sessions).
+    # Computed once per scan, not per symbol: the label is proxy-derived, so it
+    # is identical for every symbol in the universe.
+    regime_by_lag: dict[int, RegimeState | None] = {}
+    for _strat in strategies:
+        _lag = _lag_of(_strat)
+        if _lag not in regime_by_lag:
+            regime_by_lag[_lag] = regime if _lag == 0 else _regime_at_lag(proxy, end, _lag)
+
     intraday_window = (
         datetime.combine(end - timedelta(days=6), datetime.min.time(), tzinfo=UTC),
         datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=UTC),
@@ -266,14 +280,19 @@ def run_scan(
         result.scanned.append(sym)
         last = len(signal_series) - 1
         atr_val = atr(signal_series, last, 14)
-        ctx = StrategyContext(
-            regime=regime or _NEUTRAL_STATE(end),
-            allow_short=cfg.allow_short_candidates,
-        )
 
         triggered = False
         for strat in strategies:
             spec = strat.spec()
+            # Per STRATEGY, not per scan: a version that declares a regime lag
+            # (intraday_orb v0.2.0) must be handed the label from N completed
+            # sessions BEFORE the one being scanned, exactly as the promotion
+            # ladder hands it one — otherwise the ladder and the live scanner
+            # would disagree about what a promoted strategy actually trades.
+            ctx = StrategyContext(
+                regime=regime_by_lag.get(_lag_of(strat)) or _NEUTRAL_STATE(end),
+                allow_short=cfg.allow_short_candidates,
+            )
             sig = strat.evaluate(signal_series, last, ctx)
             if sig is None:
                 continue
@@ -341,6 +360,27 @@ def _NEUTRAL_STATE(as_of: date) -> RegimeState:
     from signalforge.research.regime import Trend, Vol
 
     return RegimeState(Trend.NEUTRAL, Vol.LOW, as_of)
+
+
+def _lag_of(strategy: BaselineStrategy) -> int:
+    return declared_regime_lag_sessions(strategy)
+
+
+def _regime_at_lag(proxy: PriceSeries, as_of: date, lag: int) -> RegimeState | None:
+    """The proxy's regime as of the ``lag``-th completed session STRICTLY
+    BEFORE ``as_of``.
+
+    The live mirror of ``strategies.base.lagged_regime``: an intraday scan
+    running at 10:15 on session D may only use a label derived from a daily
+    close that has already happened. Returns ``None`` when the proxy history
+    does not reach back that far or is too short to label at all — the caller
+    then falls back to NEUTRAL, exactly as the unlagged path does."""
+    from bisect import bisect_left
+
+    idx = bisect_left(proxy.dates, as_of) - lag
+    if idx < 0 or idx >= len(proxy) or idx + 1 < _MIN_HISTORY:
+        return None
+    return regime_from_proxy(proxy, idx)
 
 
 def _build_draft(
