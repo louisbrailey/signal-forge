@@ -40,6 +40,11 @@ from signalforge.research.strategies import (
 )
 from signalforge.settings_store import effective_research_config
 
+# The spec_json_hashes the LIVE approvals of strategy versions 2 and 5 are
+# recorded under (evals 20/32 and 23/35). Public content hashes, not secrets.
+HV2 = "2ed9743170bd3bbdb450ea03a004a7ffaeb64ccbbe6075db312ffd544072f382"  # pragma: allowlist secret
+HV5 = "dfe696b662dd02b8fa3a02ce5b987c6eade84a40d88c1a2d8d52e206cb6f6c32"  # pragma: allowlist secret
+
 UNIVERSE = ["SPY", "AAPL"]
 END = date(2024, 12, 31)
 START = END - timedelta(days=365 * 8)
@@ -1007,3 +1012,179 @@ def test_a_new_version_never_silently_reuses_the_previous_versions_sealed_row(
     assert v2.sealed_look_prior == 1
     assert v2.sealed_look_index == 2
     assert {x["version"] for x in g9.evidence["sealed_look_ledger"]["looks"]} == {"0.1.0", "0.2.0"}
+
+
+# ---- item 2: declared gate-5 axes live on the CLASS, never on StrategySpec --
+def _declaring(axes):
+    """A TrendContinuation that declares extra sensitivity axes."""
+
+    class _Declaring(TrendContinuation):
+        def sensitivity_axes(self):  # type: ignore[override]
+            return axes
+
+    return _Declaring()
+
+
+def test_declared_axes_extend_the_family_grid() -> None:
+    """`time_stop_bars` is the only thing distinguishing v2 from v3 and gate 5
+    never varies it (MAP §0.5). A declaration adds it without touching the
+    shipped grid."""
+    import math as _math
+
+    plan = _sensitivity_plan(_declaring({"time_stop_bars": [5, 10, 20]}))
+    assert plan is not None
+    _factory, grid = plan
+    assert set(grid) == {"sma_fast", "stop_atr", "time_stop_bars"}
+    assert grid["sma_fast"] == [15, 20, 25]  # shipped axis untouched
+    assert grid["stop_atr"] == [1.2, 1.5, 1.8]
+    assert _math.prod(len(v) for v in grid.values()) == 27
+
+
+def test_undeclared_strategies_keep_their_shipped_nine_point_grid() -> None:
+    """The R4 floor for this item: every v0.1.0 grid is unchanged."""
+    import math as _math
+
+    expected = {
+        "relative_strength.medium_swing": {
+            "excess_return_min": [0.03, 0.05, 0.07],
+            "lookback": [42, 63, 84],
+        },
+        "trend_continuation.short_swing": {
+            "sma_fast": [15, 20, 25],
+            "stop_atr": [1.2, 1.5, 1.8],
+        },
+        "mean_reversion.short_swing": {
+            "z_entry": [-2.5, -2.0, -1.5],
+            "stop_atr": [1.5, 2.0, 2.5],
+        },
+        "volatility_breakout.short_swing": {
+            "contraction_max": [0.65, 0.75, 0.85],
+            "stop_atr": [1.5, 1.75, 2.0],
+        },
+    }
+    for strat in (RelativeStrength(), TrendContinuation(), MeanReversion(), VolatilityBreakout()):
+        plan = _sensitivity_plan(strat)
+        assert plan is not None
+        _f, grid = plan
+        assert grid == expected[strat.key], strat.key
+        assert _math.prod(len(v) for v in grid.values()) == 9
+
+
+def test_declared_axis_not_on_params_raises_at_plan_time() -> None:
+    """Better a loud failure at plan time than dataclasses.replace blowing up
+    mid-grid, after hours of backtests."""
+    with pytest.raises(ValueError, match="not a field of TrendParams"):
+        _sensitivity_plan(_declaring({"no_such_param": [1, 2, 3]}))
+
+
+def test_declared_axis_without_the_baseline_value_raises() -> None:
+    with pytest.raises(ValueError, match="without its baseline value"):
+        _sensitivity_plan(_declaring({"time_stop_bars": [5, 20, 40]}))  # baseline is 10
+
+
+def test_a_declaration_may_not_shrink_a_shipped_axis() -> None:
+    with pytest.raises(ValueError, match="never shrink"):
+        _sensitivity_plan(_declaring({"sma_fast": [15, 20]}))  # drops the shipped 25
+
+
+def test_a_declaration_may_widen_a_shipped_axis() -> None:
+    plan = _sensitivity_plan(_declaring({"sma_fast": [10, 15, 20, 25]}))
+    assert plan is not None
+    assert plan[1]["sma_fast"] == [10, 15, 20, 25]
+
+
+def test_declared_axes_over_the_grid_cap_raise() -> None:
+    from signalforge.research.sensitivity import MAX_GRID_POINTS
+
+    big = {"time_stop_bars": [10, *range(100, 100 + MAX_GRID_POINTS)]}
+    with pytest.raises(ValueError, match="cap is"):
+        _sensitivity_plan(_declaring(big))
+
+
+def test_declared_axes_are_usable_by_the_factory() -> None:
+    plan = _sensitivity_plan(_declaring({"time_stop_bars": [5, 10, 20]}))
+    assert plan is not None
+    factory, grid = plan
+    built = factory({k: v[0] for k, v in grid.items()})
+    assert built.params.time_stop_bars == 5
+
+
+def test_declaring_axes_does_not_change_spec_json_hash() -> None:
+    """The R7 guard. The axis declaration lives on the strategy CLASS
+    precisely so ``asdict(spec)`` — and therefore ``spec_json_hash`` — cannot
+    move. These two literals are the hashes the LIVE approved scopes of
+    versions 2 and 5 are recorded under (evals 20/32 and 23/35): if either
+    ever changes, ``scan_scope_matches`` returns False forever and both
+    PAPER_APPROVED strategies fall permanently out of scope. A red test here
+    is the intended outcome of any future spec-shape change."""
+    from signalforge.research.persistence import spec_json_hash
+
+    assert spec_json_hash(TrendContinuation().spec()) == HV2
+    assert spec_json_hash(RelativeStrength().spec()) == HV5
+    # declaring axes changes nothing about the spec or its hash
+    assert spec_json_hash(_declaring({"time_stop_bars": [5, 10, 20]}).spec()) == spec_json_hash(
+        TrendContinuation().spec()
+    )
+
+
+def test_gate5_evidence_records_per_axis_movement(session: Session) -> None:
+    """The pipeline records the no-op check's per-axis verdict, so a grid that
+    tested nothing on an axis is visible in the stored evidence rather than
+    only in a reason string."""
+    _seed(session)
+    cfg = _permissive_config(session)
+    result = evaluate_promotion(
+        session, TrendContinuation(), symbols=UNIVERSE, start=START, end=END, config=cfg
+    )
+    gate5 = next(g for g in result.gates if g.number == 5)
+    assert set(gate5.evidence["axis_moved"]) == {"sma_fast", "stop_atr"}
+    assert gate5.evidence["inert_axes"] == []
+
+
+# ---- item 7: gate 8 exercises the breakout family's own entry features -----
+def test_gate8_leakage_check_covers_the_breakout_entry_features() -> None:
+    """`atr_contraction`, `donchian_high` and `true_range` are what
+    volatility_breakout's entry rule is built on, and gate 8 never touched
+    them — so its v0.1.0 pass said nothing about them. R4 carve-out: adding
+    checks can only create new ways to fail."""
+    from signalforge.research.promotion import LEAKAGE_FEATURE_CHECKS
+
+    names = [name for name, _fn in LEAKAGE_FEATURE_CHECKS]
+    assert names == [
+        "sma(50)",
+        "rolling_return(20)",
+        "atr(14)",
+        "realized_vol(20)",
+        "atr_contraction(10,50)",
+        "atr_contraction(10,50) @ t-5",
+        "donchian_high(20)",
+        "true_range",
+    ]
+
+
+def test_the_four_new_leakage_checks_pass_on_real_series(session: Session) -> None:
+    """Verify assert_no_lookahead on each of the four additions directly. If
+    one of these ever fails, the finding is about features/daily.py — which
+    the already-approved v2 and v5 also depend on — not about any one
+    strategy, and must be reported that way."""
+    from signalforge.backtest.leakage import assert_no_lookahead
+    from signalforge.research.promotion import LEAKAGE_FEATURE_CHECKS
+
+    _seed(session)
+    series = PriceSeries.load(session, "SPY", START, END)
+    assert len(series) > 200
+    new_checks = dict(LEAKAGE_FEATURE_CHECKS)
+    for name in (
+        "atr_contraction(10,50)",
+        "atr_contraction(10,50) @ t-5",
+        "donchian_high(20)",
+        "true_range",
+    ):
+        assert_no_lookahead(new_checks[name], series)  # raises LookaheadDetected if dirty
+
+
+def test_gate8_leakage_self_check_is_clean_on_the_fixture_universe(session: Session) -> None:
+    from signalforge.research.promotion import _leakage_self_check
+
+    _seed(session)
+    assert _leakage_self_check(session, "SPY", START, END, None) is None

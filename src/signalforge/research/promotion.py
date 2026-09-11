@@ -79,10 +79,18 @@ from signalforge.db.types import utcnow
 from signalforge.domain import Horizon, StrategyStatus
 from signalforge.observability import get_logger
 from signalforge.research.backtest_runner import run_strategy_over_universe
-from signalforge.research.features.daily import atr, realized_vol, rolling_return, sma
+from signalforge.research.features.daily import (
+    atr,
+    atr_contraction,
+    donchian_high,
+    realized_vol,
+    rolling_return,
+    sma,
+    true_range,
+)
 from signalforge.research.persistence import spec_json_hash, upsert_strategy_version
 from signalforge.research.portfolio_metrics import compute_portfolio_metrics
-from signalforge.research.sensitivity import run_parameter_sensitivity
+from signalforge.research.sensitivity import MAX_GRID_POINTS, run_parameter_sensitivity
 from signalforge.research.strategies.base import BaselineStrategy
 
 _log = get_logger("research.promotion")
@@ -173,11 +181,85 @@ class PromotionResult:
 # --------------------------------------------------------------------------- #
 # per-strategy parameter-sensitivity plans (gate 5)
 # --------------------------------------------------------------------------- #
+def declared_sensitivity_axes(strategy: BaselineStrategy) -> dict[str, list[float | int]]:
+    """Extra gate-5 axes a strategy CLASS declares via an optional
+    ``sensitivity_axes()`` method (``strategies.base.DeclaresSensitivityAxes``).
+
+    Deliberately read off the instance with ``getattr`` rather than added to
+    ``StrategySpec``: ``spec_json_hash`` hashes every spec field, so a new
+    field would move every strategy's hash and put the two live approvals
+    permanently out of scope (their approved scopes are keyed by the current
+    hashes). A strategy that declares nothing keeps its shipped grid exactly."""
+    fn = getattr(strategy, "sensitivity_axes", None)
+    if fn is None:
+        return {}
+    return {str(name): list(values) for name, values in (fn() or {}).items()}
+
+
+def _merge_declared_axes(
+    strategy: BaselineStrategy, grid: dict[str, list[float | int]]
+) -> dict[str, list[float | int]]:
+    """Merge a strategy's declared axes into its family grid, validating at
+    plan time. Every failure raises rather than silently skipping an axis: a
+    declaration that does not take effect is worse than no declaration, since
+    it reads as pre-registered coverage that was never actually tested."""
+    declared = declared_sensitivity_axes(strategy)
+    if not declared:
+        return grid
+
+    from dataclasses import asdict as _asdict
+    from dataclasses import fields as _fields
+    from dataclasses import is_dataclass as _is_dataclass
+
+    params = getattr(strategy, "params", None)
+    if not _is_dataclass(params) or isinstance(params, type):
+        raise ValueError(
+            f"{strategy.key} declares sensitivity axes but has no params dataclass to perturb"
+        )
+    names = {f.name for f in _fields(params)}
+    baseline = _asdict(params)
+
+    merged = dict(grid)
+    for axis, values in declared.items():
+        if axis not in names:
+            raise ValueError(
+                f"{strategy.key} declares sensitivity axis {axis!r}, which is not a field of "
+                f"{type(params).__name__} — dataclasses.replace would fail mid-grid"
+            )
+        if not values:
+            raise ValueError(f"{strategy.key} declares sensitivity axis {axis!r} with no values")
+        if baseline[axis] not in values:
+            raise ValueError(
+                f"{strategy.key} declares sensitivity axis {axis!r} without its baseline value "
+                f"{baseline[axis]!r} — there would be no baseline grid point to measure "
+                f"neighbours against"
+            )
+        if axis in grid and not set(grid[axis]).issubset(set(values)):
+            raise ValueError(
+                f"{strategy.key} declares sensitivity axis {axis!r} as {values!r}, which drops "
+                f"shipped value(s) {sorted(set(grid[axis]) - set(values))!r} — a declaration may "
+                f"extend the shipped grid, never shrink it"
+            )
+        merged[axis] = list(values)
+
+    n_points = math.prod(len(v) for v in merged.values())
+    if n_points > MAX_GRID_POINTS:
+        raise ValueError(
+            f"{strategy.key}'s declared axes make a {n_points}-point grid; cap is "
+            f"{MAX_GRID_POINTS}. Shrink the declaration."
+        )
+    return merged
+
+
 def _sensitivity_plan(
     strategy: BaselineStrategy,
 ) -> tuple[StrategyFactory, dict[str, list[float | int]]] | None:
     """(factory, grid) for the sensitivity gate, or ``None`` if this strategy has
-    no defined grid yet — that is an honest gate-5 failure, not a skip."""
+    no defined grid yet — that is an honest gate-5 failure, not a skip.
+
+    The per-family grids below are the shipped v0.1.0 grids and are not
+    edited by the declaration mechanism; a strategy that declares extra axes
+    gets them merged on top (see :func:`_merge_declared_axes`)."""
     key = strategy.key
     if key.startswith("relative_strength"):
         from signalforge.research.strategies.relative_strength import RelativeStrength
@@ -188,7 +270,9 @@ def _sensitivity_plan(
         def factory(p: Mapping[str, Any]) -> BaselineStrategy:
             return RelativeStrength(horizon, _replace(base, **p))
 
-        return factory, {"excess_return_min": [0.03, 0.05, 0.07], "lookback": [42, 63, 84]}
+        return factory, _merge_declared_axes(
+            strategy, {"excess_return_min": [0.03, 0.05, 0.07], "lookback": [42, 63, 84]}
+        )
 
     if key.startswith("trend_continuation"):
         from signalforge.research.strategies.trend_continuation import TrendContinuation
@@ -199,7 +283,9 @@ def _sensitivity_plan(
         def factory(p: Mapping[str, Any]) -> BaselineStrategy:
             return TrendContinuation(horizon, _replace(base, **p))
 
-        return factory, {"sma_fast": [15, 20, 25], "stop_atr": [1.2, 1.5, 1.8]}
+        return factory, _merge_declared_axes(
+            strategy, {"sma_fast": [15, 20, 25], "stop_atr": [1.2, 1.5, 1.8]}
+        )
 
     if key.startswith("mean_reversion"):
         from signalforge.research.strategies.mean_reversion import MeanReversion
@@ -209,7 +295,9 @@ def _sensitivity_plan(
         def factory(p: Mapping[str, Any]) -> BaselineStrategy:
             return MeanReversion(_replace(base, **p))
 
-        return factory, {"z_entry": [-2.5, -2.0, -1.5], "stop_atr": [1.5, 2.0, 2.5]}
+        return factory, _merge_declared_axes(
+            strategy, {"z_entry": [-2.5, -2.0, -1.5], "stop_atr": [1.5, 2.0, 2.5]}
+        )
 
     if key.startswith("volatility_breakout"):
         from signalforge.research.strategies.breakout import VolatilityBreakout
@@ -220,7 +308,9 @@ def _sensitivity_plan(
         def factory(p: Mapping[str, Any]) -> BaselineStrategy:
             return VolatilityBreakout(horizon, _replace(base, **p))
 
-        return factory, {"contraction_max": [0.65, 0.75, 0.85], "stop_atr": [1.5, 1.75, 2.0]}
+        return factory, _merge_declared_axes(
+            strategy, {"contraction_max": [0.65, 0.75, 0.85], "stop_atr": [1.5, 1.75, 2.0]}
+        )
 
     return None
 
@@ -348,11 +438,9 @@ def _unbucketed_evidence(
     ext_lo = start - timedelta(days=MIN_PRESEALED_DAYS)
     proxy_ext = PriceSeries.load(session, proxy_symbol, ext_lo, pre_sealed_end, source=source)
     bars_gained = len(proxy_ext) - len(proxy)
-    if bars_gained > 0:
-        ext_census = _regime_census(trades, label_regimes(proxy_ext))
-    else:
-        # identical series ⇒ identical labelling; do not pay for a second pass
-        ext_census = census
+    # when the extension gains no bars the series is identical, so the
+    # labelling is too — do not pay for a second label_regimes pass
+    ext_census = _regime_census(trades, label_regimes(proxy_ext)) if bars_gained > 0 else census
     extended = {
         "requested_from": ext_lo.isoformat(),
         "proxy_bars": len(proxy_ext),
@@ -402,6 +490,29 @@ def _unbucketed_detail(census: _RegimeCensus, unbucketed: Mapping[str, Any]) -> 
     return out
 
 
+# Gate 8's look-ahead self-check set. Module level so the test suite can
+# assert the coverage itself, not only that some unnamed list came back clean.
+#
+# The first four are the original set. The last four close a real gap: the
+# volatility_breakout family's entry rule is built on atr_contraction and
+# donchian_high, and neither was ever exercised here, so v0.1.0's gate-8 pass
+# said nothing about the features its own rule depends on. Adding checks can
+# only create new ways to FAIL gate 8, never make it easier to satisfy — the
+# same R4 carve-out that permits adding a missing sensitivity axis. The
+# lagged t-5 form is included because a feature can be clean at t and still
+# read the future when evaluated at an earlier index.
+LEAKAGE_FEATURE_CHECKS: list[tuple[str, Any]] = [
+    ("sma(50)", lambda s, t: sma(s, t, 50)),
+    ("rolling_return(20)", lambda s, t: rolling_return(s, t, 20)),
+    ("atr(14)", lambda s, t: atr(s, t, 14)),
+    ("realized_vol(20)", lambda s, t: realized_vol(s, t, 20)),
+    ("atr_contraction(10,50)", lambda s, t: atr_contraction(s, t, 10, 50)),
+    ("atr_contraction(10,50) @ t-5", lambda s, t: atr_contraction(s, t - 5, 10, 50)),
+    ("donchian_high(20)", lambda s, t: donchian_high(s, t, 20)),
+    ("true_range", lambda s, t: true_range(s, t)),
+]
+
+
 def _leakage_self_check(
     session: Session, symbol: str, start: date, end: date, source: SourceFilter
 ) -> str | None:
@@ -410,13 +521,7 @@ def _leakage_self_check(
     series = PriceSeries.load(session, symbol, start, end, source=source)
     if len(series) < 60:
         return None  # too little data to check meaningfully; not a leakage finding
-    checks: list[tuple[str, Any]] = [
-        ("sma(50)", lambda s, t: sma(s, t, 50)),
-        ("rolling_return(20)", lambda s, t: rolling_return(s, t, 20)),
-        ("atr(14)", lambda s, t: atr(s, t, 14)),
-        ("realized_vol(20)", lambda s, t: realized_vol(s, t, 20)),
-    ]
-    for name, fn in checks:
+    for name, fn in LEAKAGE_FEATURE_CHECKS:
         try:
             assert_no_lookahead(fn, series)
         except LookaheadDetected as exc:
