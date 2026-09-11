@@ -1188,3 +1188,46 @@ def test_gate8_leakage_self_check_is_clean_on_the_fixture_universe(session: Sess
 
     _seed(session)
     assert _leakage_self_check(session, "SPY", START, END, None) is None
+
+
+def test_cli_sealed_look_summary_reads_the_gate9_ledger() -> None:
+    """The CLI's disclosure line is derived from gate 9's stored ledger, so
+    the printed count can never disagree with the recorded evidence."""
+    from types import SimpleNamespace
+
+    from signalforge.cli import _sealed_look_summary
+    from signalforge.research.promotion import Gate
+
+    ledger = {
+        "strategy_key": "trend_continuation.short_swing",
+        "k_prior": 4,
+        "this_look": 5,
+        "reused_this_run": False,
+        "total_sealed_tests": 5,
+        "looks": [{"sealed_test_id": i, "is_this_run": i == 21} for i in (1, 6, 11, 16, 21)],
+    }
+    result = SimpleNamespace(
+        strategy_key="trend_continuation.short_swing",
+        sealed_look_prior=4,
+        gates=[Gate(9, "sealed_final_test", True, "", {"sealed_look_ledger": ledger})],
+    )
+    line = _sealed_look_summary(result)
+    assert "look 5 of this strategy family" in line
+    assert "4 prior sealed tests: ids 1, 6, 11, 16" in line
+
+    # a replay says so, and does not advance the count
+    ledger_replay = {**ledger, "this_look": 4, "reused_this_run": True}
+    replay = SimpleNamespace(
+        strategy_key="trend_continuation.short_swing",
+        sealed_look_prior=4,
+        gates=[Gate(9, "sealed_final_test", True, "", {"sealed_look_ledger": ledger_replay})],
+    )
+    assert "no new look taken" in _sealed_look_summary(replay)
+
+    # a gate-0 short circuit takes no look at all and says that too
+    early = SimpleNamespace(
+        strategy_key="intraday_orb.intraday",
+        sealed_look_prior=0,
+        gates=[Gate(0, "data_availability", False, "", {})],
+    )
+    assert "no sealed look taken by this evaluation" in _sealed_look_summary(early)
