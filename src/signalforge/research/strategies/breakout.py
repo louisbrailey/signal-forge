@@ -7,24 +7,33 @@ price breaks the Donchian channel, take the breakout in the regime's direction.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from signalforge.backtest.engine import EntrySignal
 from signalforge.data.series import PriceSeries
 from signalforge.domain import Direction, Horizon
 from signalforge.gitinfo import git_sha
-from signalforge.research.features.daily import atr, atr_contraction, donchian_high, donchian_low
+from signalforge.research.features.daily import (
+    atr,
+    atr_contraction,
+    donchian_high,
+    donchian_low,
+    true_range,
+)
 from signalforge.research.regime import Trend
 from signalforge.research.registry import StrategySpec, StrategyStatus
 from signalforge.research.strategies.base import StrategyContext
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 
 @dataclass(frozen=True, slots=True)
 class BreakoutParams:
     channel: int = 20
     contraction_max: float = 0.75  # ATR(10)/ATR(50) must be <= this (vol squeezing)
+    squeeze_lag: int = 5  # squeeze measured this many bars BEFORE the break bar
+    release_min: float = 1.0  # break-bar TR, in units of ATR(50) at t-1
     atr_window: int = 14
     stop_atr: float = 1.75
     target_atr: float = 3.5
@@ -42,6 +51,21 @@ class VolatilityBreakout:
         self.params = params or BreakoutParams()
         self.key = f"volatility_breakout.{horizon.value.lower()}"
 
+    def sensitivity_axes(self) -> Mapping[str, Sequence[float | int]]:
+        """Gate-5 axes for v0.2.0's two new parameters (``strategies.base.
+        DeclaresSensitivityAxes``; merged by ``promotion._sensitivity_plan``).
+
+        The whole point of v0.2.0 is ``squeeze_lag`` and ``release_min``, and
+        the shipped ``volatility_breakout`` grid varies neither — gate 5 would
+        otherwise pass having perturbed nothing about the change under test.
+        Declared here rather than edited into the shipped grid so
+        ``contraction_max`` and ``stop_atr`` keep their v0.1.0 values exactly;
+        the merge makes the family grid 3 x 3 x 3 x 3 = 81 points with the
+        defaults at the centre of every axis. R4 carve-out: more searching,
+        never less. Pre-registered in the design's §12.1 and fixed before any
+        expanded-snapshot number existed."""
+        return {"squeeze_lag": [3, 5, 10], "release_min": [0.8, 1.0, 1.2]}
+
     def _time_stop(self) -> int:
         p = self.params
         return p.time_stop_medium if self.horizon is Horizon.MEDIUM_SWING else p.time_stop_short
@@ -54,17 +78,24 @@ class VolatilityBreakout:
             git_sha=git_sha(),
             horizon=self.horizon,
             rule_definition=(
-                f"When ATR(10)/ATR(50) <= {p.contraction_max} (volatility contracting) and price "
-                f"closes above the {p.channel}-day Donchian high, go LONG (SHORT on a break of the "
-                "Donchian low when shorts are enabled and the regime is BEAR). ATR stop and target."
+                f"When ATR(10)/ATR(50) at t - {p.squeeze_lag} was <= {p.contraction_max} "
+                f"(volatility was contracting BEFORE the break) and the break bar's true range "
+                f"is at least {p.release_min} x ATR(50) measured at t - 1 (the release), and "
+                f"price closes above the {p.channel}-day Donchian high, go LONG (SHORT on a "
+                "break of the Donchian low when shorts are enabled and the regime is BEAR). "
+                "ATR stop and target."
             ),
             required_data_sources=("BAR_DAILY",),
             feature_definitions=(
-                "contraction = ATR(10) / ATR(50)",
+                f"contraction = ATR(10) / ATR(50), evaluated at t - {p.squeeze_lag}",
+                f"release = true_range(t) / ATR(50, t - 1), required >= {p.release_min}",
                 f"donchian_high({p.channel}) / donchian_low({p.channel}) (excluding today)",
                 f"atr = ATR({p.atr_window})",
             ),
-            entry_conditions="contraction <= contraction_max and close beyond the Donchian edge",
+            entry_conditions=(
+                "contraction(t - squeeze_lag) <= contraction_max and "
+                "TR(t) >= release_min * ATR(50, t-1) and close beyond the Donchian edge"
+            ),
             invalidation_conditions="close back inside the channel",
             exit_logic=f"target = entry +/- {p.target_atr} * ATR({p.atr_window})",
             stop_logic=f"stop = entry -/+ {p.stop_atr} * ATR({p.atr_window})",
@@ -89,7 +120,7 @@ class VolatilityBreakout:
 
     def evaluate(self, series: PriceSeries, t: int, ctx: StrategyContext) -> EntrySignal | None:
         p = self.params
-        contraction = atr_contraction(series, t, 10, 50)
+        contraction = atr_contraction(series, t - p.squeeze_lag, 10, 50)  # squeeze BEFORE
         dc_hi = donchian_high(series, t, p.channel)
         dc_lo = donchian_low(series, t, p.channel)
         a = atr(series, t, p.atr_window)
@@ -97,6 +128,10 @@ class VolatilityBreakout:
             return None
         if contraction > p.contraction_max:
             return None
+        if p.release_min > 0.0:  # release AT the break
+            base = atr(series, t - 1, 50)
+            if math.isnan(base) or base <= 0 or true_range(series, t) / base < p.release_min:
+                return None
         close = float(series.close[t])
 
         if close > dc_hi and not ctx.regime.risk_off:
