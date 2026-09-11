@@ -337,7 +337,7 @@ either.
 | types | `MYPYPATH=src .venv/bin/mypy` | **PASS** (168 source files) |
 | imports | `.venv/bin/lint-imports` | **PASS** (8 contracts kept, 0 broken) |
 | secrets | `git ls-files -z \| xargs -0 .venv/bin/detect-secrets-hook --baseline .secrets.baseline --exclude-files 'docs/research/.*'` | **PASS** — see §6.1 |
-| tests | `PYTHONPATH=<worktree>/src .venv/bin/python -m pytest -q` | **PASS except one environment-dependent deploy test** — see §6.2 |
+| tests | `PYTHONPATH=<worktree>/src .venv/bin/python -m pytest -q` | **PASS except two environment-dependent deploy parametrisations** — see §6.2 |
 
 ### 6.1 Secret-scan note — a change made outside this work
 
@@ -361,15 +361,30 @@ hashes in `docs/research/designs/trend_continuation_medium_swing.md` and
 `docs/research/diagnostics/pipeline_hardening_spec.json`, all present at this
 branch's base commit and none of them touched here.
 
-### 6.2 The one failing test
+### 6.2 The two failing parametrisations
 
+The whole suite's short summary lists exactly two failures, both
+parametrisations of
 `tests/deploy/test_launchd.py::test_program_arguments_start_with_an_absolute_venv_bin_path`
-fails **only because the suite is running inside a git worktree**: the test
-derives `VENV_BIN` from the repo root it is running in
+(`com.signalforge.api.plist` and `com.signalforge.worker.plist`). They fail
+**only because the suite is running inside a git worktree**: the test derives
+`VENV_BIN` from the repo root it runs in
 (`…/.claude/worktrees/wf_cfb7bab7-b74-1/.venv/bin`) while the committed launchd
 plists point at the real venv (`/Users/louisbrailey/signal-forge/.venv/bin`).
-It is independent of every change here — the test reads plist files and paths,
-not `src/` — and would pass when run from the main checkout.
+They are independent of every change here — the test reads plist files and
+paths, never `src/`.
+
+**FACT (demonstrated both ways).**
+
+```
+cd /Users/louisbrailey/signal-forge/.claude/worktrees/wf_cfb7bab7-b74-1
+PYTHONPATH=.../src .venv/bin/python -m pytest tests/deploy -q   # 2 failed
+cd /Users/louisbrailey/signal-forge
+.venv/bin/python -m pytest tests/deploy -q                      # 11 passed
+```
+
+Same commit of the test, same plists: passing from the main checkout and
+failing from the worktree isolates the cause to the working-copy path.
 
 ---
 
