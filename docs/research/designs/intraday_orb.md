@@ -1,241 +1,213 @@
-# Design — `intraday_orb.intraday` v0.1.0 (version 1)
+# Design — `intraday_orb.intraday` v0.1.0 (version 1): requirements, costed, with the operator question
 
 **Synthesis of the design phase for version 1.** One proposal was written for this
-strategy (`designs/proposals/intraday_orb--requirements.md`, the requirements /
-data-and-policy angle mandated by `STRATEGY_COMPLETION_MAP.md` §4.1), scored by two
-judges (legitimacy 7/10 *revise*; impact-robustness-cost 8/10 *revise*). This document
-is the single design of record. It supersedes the proposal wherever the two differ.
+strategy (`docs/research/designs/proposals/intraday_orb--requirements.md`, the
+*requirements* angle — `STRATEGY_COMPLETION_MAP.md` §4.1 assigns exactly one,
+"requirements only … **No promotion attempt**"), and it was scored by two judges
+(legitimacy 7/10 *revise*; impact/robustness/cost 7.5/10 *revise*). There are no
+runners-up to graft from; this document is that proposal corrected against every
+judge defect that survived checking, plus four findings of my own, plus the
+pre-registration and implementation material §4.2 items 4/6/9/10 require.
 
-**Chosen path (§A): the requirements design plus the operator question, with the null
-option — a documented `DOES NOT OPERATE` record — as the standing recommendation.**
-No `v0.2.0`. No promotion attempt. No strategy-code change. No database write.
+**Conformance.** Written to `STRATEGY_COMPLETION_MAP.md` §4.2 (all eleven sections,
+in order, §§1–11 below), under §1 rules R1–R10 and `STRATEGY_COMPLETION_PLAN.md`'s
+seven rules. Every claim is labelled **FACT** (a `file:line`, a read-only `SELECT`,
+or a reproducible in-process computation), **DERIVED** (arithmetic on stated inputs)
+or **HYPOTHESIS**.
 
-**Conformance:** `STRATEGY_COMPLETION_MAP.md` §1 (R1–R10), §2.4, §4.0/§4.2/§4.3, and
-`STRATEGY_COMPLETION_PLAN.md`'s seven rules. The eleven §4.2 sections are reproduced in
-order as §1–§11; §12 is the frozen pre-registration record; §13 the implementation
-checklist and scratch-database commands; §14 the operator approvals and the failure
-report.
+**Sealed-window discipline (R1).** Nothing here is derived from the sealed window
+(2025-09-08 → 2026-09-08 on snapshots 2–4; 2025-09-07 → 2026-09-07 on snapshot 1).
+Every computed number is code arithmetic, a read-only query, or a computation over
+the **pre-sealed** span `2016-10-17 … 2025-09-07`. The sealed window is referenced
+twice, both for **disposition** (permitted under R1) and both marked inline: §10
+(the look ledger) and §11 (the null option).
 
-**Labelling.** Every claim is **FACT** (verified in this synthesis by `file:line`, a
-read-only `SELECT`, or a reproducible in-process computation), **DERIVED** (arithmetic
-on stated inputs), or **HYPOTHESIS**. Proportions carry binomial standard errors. A
-difference under 2 SE is not treated as evidence.
-
-**Sealed-window discipline (R1).** Nothing below is derived from the sealed window
-(2025-09-08 → 2026-09-08 on snapshots 2–4; 2025-09-07 → 2026-09-07 on snapshot 1). Every
-computed number is code arithmetic, a read-only query, or a computation over the
-**pre-sealed** span `2016-10-17 … 2025-09-07`. The sealed window is referenced exactly
-twice, both for *disposition*, both marked inline: §10 (the look ledger) and §11 (the
-null option).
-
-**Work performed for this synthesis:** read-only. No file under `src/` or `tests/` was
-modified; no command that writes `data/signalforge.sqlite` was run; no provider API was
-called; no package installed; no service restarted. In-process calls were limited to
-`PriceSeries.load`, `backtest/regime.label_regimes` and `research/regime.regime_lookup`
-(all read-only), plus `sqlite3` opened `mode=ro`.
+**Work performed.** Read-only. No file under `src/` or `tests/` was modified, no
+database write was issued, no provider API was called, no package installed, no
+service restarted. In-process calls were limited to `PriceSeries.load`,
+`backtest/regime.label_regimes` and `research/regime.regime_lookup` (all read-only),
+plus `SELECT`s against `data/signalforge.sqlite` opened `mode=ro`.
 
 ---
 
-## A. Chosen path, and the disposition of every judge defect
+## A. Chosen path
 
-### A.1 The path
+**The chosen path is the requirements record plus the operator question — and its
+recommendation is the null option of §11: do not build the intraday pipeline.**
 
-The map (§2.4, §4.1) and the plan both fix this strategy's output as *"a data-and-policy
-requirements design plus an explicit operator question, explicitly not a promotion
-attempt."* Both judges agreed the proposal's substance is right and neither asked for a
-different path; both asked for corrections. This design therefore keeps the path and
-applies the corrections.
+This is not a "does not pass" record. `intraday_orb.intraday` has never been
+measured past gate 0 and, under today's entitlements, cannot be measured in a way
+that would mean anything live. Its record is a **capability finding**
+("DOES NOT OPERATE"), and filing it as though the rules had been tested and found
+wanting would be false. Status stays `EXPERIMENTAL`; no database row changes.
 
-The synthesis makes **one substantive addition** that neither the proposal nor the map
-contained, and it is the most consequential thing in this document:
+Three things the corrected analysis says that the original proposal did not:
 
-> **FACT (verified for this synthesis).** `evaluate_promotion` has exactly **three**
-> `return _finalize` sites — `promotion.py:522`, `:571`, `:893` — and the first two are
-> **both inside gate 0**. There is no early return anywhere between gate 0 and gate 9.
-> Gate 9 at `promotion.py:838` therefore runs on **every** evaluation that clears gate 0,
-> whatever gates 1–8 did, and it calls `_get_or_create_sealed_test`, which is keyed on
-> `(strategy_version_id, dataset_snapshot_id)` and documented at `promotion.py:377-384`
-> as *"locked — never recomputed, never overwritten"*.
->
-> **Consequence.** The *first* intraday run that clears gate 0 — including a partial,
-> pre-bundle or debugging run — irreversibly creates version 1's **first-ever**
-> `strategy_sealed_test` row and locks it. FACT (queried): version 1 has **zero** rows in
-> `strategy_sealed_test` today; that is why the table holds 20 rows and not 24. Because
-> `VERSION` stays `"0.1.0"`, `upsert_strategy_version` (`persistence.py:46-93`) reuses the
-> same version row, so a *later, correct* evaluation on the same snapshot would silently
-> **replay** the locked, meaningless result. Escaping it needs either a `VERSION` bump or
-> a new snapshot key — each of which is itself a further sealed look.
+1. **No evaluation of the unchanged v0.1.0 may ever be run.** The proposal's own §7
+   establishes a genuine lookahead — an intraday entry inside session *D* reads
+   `ctx.regime` derived from *D*'s own daily close — and then §9/§10 pre-registered
+   "full promotion evaluations of the unchanged v0.1.0: **1**". Those cannot both
+   stand. The lag fix is behavioural and requires `VERSION = "0.2.0"` (R3/R7), so the
+   **first evaluable artifact for this strategy is a v0.2.0, not v0.1.0**, and that
+   v0.2.0 needs its own §4.2 design document and its own variant budget. This
+   document therefore pre-registers **zero** evaluations and **zero** sealed looks.
+2. **The "hard nine-year calendar ceiling" on gate 6's bear bucket is a property of
+   the ladder's long-only run configuration, not of the calendar.** Both judges caught
+   this and both are right; I reproduced it independently (§3.1). It changes the
+   framing of the headline finding, not the recommendation.
+3. **The cost finding is an upper bound, and gate 4 is *not* "the first non-power-
+   limited gate in the program".** Once the program's own adopted clustering
+   diagnostic (`docs/research/diagnostics/clustered_bootstrap_all.md`) is applied, an
+   intraday strategy is the most calendar-clustered trade set here and its effective
+   *n* is nothing like its trade count (§5, gate 4).
 
-This is the R3 staleness trap arriving through the **promotion path** rather than through
-the strategy code. The proposal's §10 asserted the trap "cannot" occur here; that
-assertion is withdrawn. It converts the variant budget's "1 full promotion evaluation"
-from a compute cost into an **irreversible, single-use asset**, and it is the reason §13
-mandates that all bundle development and every dry run happen on a scratch database copy.
+### A.1 Judge-defect disposition
 
-### A.2 Judge defects — accepted
-
-| # | Judge | Defect | Disposition |
+| Defect | Judge | Disposition | Where fixed |
 |---|---|---|---|
-| J1-1 | legitimacy | Gate 9 runs unconditionally after gate 0; §2.3's "misleading, not unsafe" and §10's R3 trap check are wrong | **ACCEPTED, verified.** §A.1, §10, §12.5, §13. Promoted to the headline finding. |
-| J1-2 / J2-2 | both | The cost table uses the OR width `w` as the risk unit; the engine's unit is `entry_fill − or_lo` | **ACCEPTED, verified** (`engine.py:108-111`), **with a correction to the judges' framing** — see §A.3(a). §8 is recomputed on the engine's unit. |
-| J1-3 | legitimacy | B1's cited location is wrong: `sensitivity.py:148` already threads `intraday`/`bar_size` | **ACCEPTED, verified.** `run_parameter_sensitivity` declares them at `sensitivity.py:128-129` and passes them at `:155-157`; the omission is at the **caller**, `promotion.py:708`. B1 relocated. |
-| J1-4 | legitimacy | The bear-supply ceiling silently assumes long-only; the strategy is two-sided | **ACCEPTED, verified and quantified.** `backtest_runner.py:176` `allow_short: bool = False`, never passed at `promotion.py:386`/`:586`; `intraday_orb.py:116` shorts exactly when `ctx.regime.risk_off`. I measured the short-eligible set: **248** bear-labelled risk-off sessions against the 19 long-eligible ones. Disclosed at every point the ceiling is asserted, and added to F1. |
-| J1-5 | legitimacy | Gate 0's predicate is not the predicate the backtest loads under | **ACCEPTED, verified.** `PriceSeries.load_intraday` (`series.py:105-136`) filters only `bar_size`, `bar_start` and `source` — not `session`, not `is_simulated`, both of which exist as columns (`db/models/market.py:117`, `:126`). New bundle item **B7**. |
-| J1-6 / J2-6 | both | Sealed-look accounting is internally inconsistent ("k = 5 … plus the next one", then "look 6") and the k=5 baseline does not exist for this family | **ACCEPTED.** §10 now reports three numbers on every future look and flags the map's own §0.1-vs-§4.2 contradiction as an operator open item. |
-| J1-7 | legitimacy | The "≥ 15 min" latency magnitude is over-labelled as measured | **ACCEPTED, verified.** `entitlements.py:250-257` passes `latency="DELAYED"` as a *declared* label into `_check`; `CAPABILITY_MATRIX.md:26` attributes the 15-minute figure to the lead's brief. Relabelled; the conclusion is restated to hold for **any** delay of one bar or more. |
-| J1-8 / J2-8 | both | §2.2's 95% / 99% gate-0 thresholds are unpre-registered, and the 99% bar-count condition **rejects a correct backfill** because of NYSE early closes | **ACCEPTED.** Condition (c) is rewritten as a calendar-typed set membership; the thresholds are pre-registered with a stated basis in §12.1. |
-| J1-9 | legitimacy | R10 partially unmet: F3/F4 not stated across all four snapshots | **ACCEPTED.** §4 now states the cross-snapshot status of every falsifier explicitly, including why snapshots 1/2/4 cannot carry an intraday snapshot at all. |
-| J1-10 / J2-5 | both | The synthetic entry rate carries a misleading SE and silently underwrites four gate forecasts | **ACCEPTED.** The `± 0.04` is relabelled as simulation sampling error, and §3.5 now carries a rate-sensitivity band that §5 uses. |
-| J2-1 | impact | Gate 4's "not power-limited" ignores trade clustering | **ACCEPTED, verified** against `diagnostics/clustered_bootstrap_all.md:130-155` (month-block `deff` 2.55/3.04/4.86/2.60/2.66), which map §4.3 makes mandatory to report. The claim is withdrawn; §5 and §12 carry a design-effect table. **The judge's specific numbers are corrected** — see §A.3(b). |
-| J2-3 | impact | "4–10× any daily strategy" is not supported at the low end | **ACCEPTED with a better replacement.** §8 now reports the raw multiple correctly *and* the break-even **cost wedge**, which is nearly invariant to the risk-unit correction — see §A.3(c). |
-| J2-4 | impact | Gate 7 is declared unforecastable when its direction is computable | **ACCEPTED, verified** (`portfolio_metrics.py:110`, `promotion.py:775`, `_benchmark_metrics` at `:216-238`). Restated as *expected pass, and uninformative*. |
-| J2-7 | impact | B2 collides with `diagnostics/pipeline_hardening_spec.md:167-169`, which already claims `promotion.py:744` | **ACCEPTED, verified.** B2 is restated as a **rider** on that spec's Change A, not a competing patch. |
-| J2-9 | impact | Storage figures are stated two inconsistent ways | **ACCEPTED.** §3.3 states added bytes and resulting multiple separately per option. |
+| J1-1 / J2-1 `allow_short` undisclosed; bear-session arithmetic conditional | both | **Accepted (major).** Reproduced independently: short-eligible bear sessions are **248 / 212 / 167 / 167 / 123 / 18 / 18 / 0** at starts 2016-10-17 / 2018-09-10 / 2019-09-09 / 2020-09-08 / 2021-09-08 / 2022-09-08 / 2023-09-08 / 2024-09-22 | §3.1, §3.2, F1, §12.2, Q6 |
+| J1-2 §7 "blocking" vs §9/§10 budget | legitimacy | **Accepted (major).** Resolved in favour of §7: the lag is blocking; the budget now pre-registers 0 evaluations of v0.1.0 | §A, §9, §10 |
+| J1-3 new gate-0 constants (95 %/99 %/staleness) | legitimacy | **Accepted as a hardening requirement; rejected as a legitimacy violation.** A hard-coded unconditional fail cannot be *weakened* by adding conditions, so R4 is not breached — but the constants are unnecessary slack on an operator-controlled backfill. Replaced with 100 % against an enumerated exchange calendar, and frozen | §2.2 |
+| J1-4 no R4 argument for B1–B6 | legitimacy | **Accepted.** Each bundle item now carries one | §2.3 |
+| J1-5 B2 unreconciled with §7 | legitimacy | **Accepted.** Gate 6 buckets *descriptively* on session *D*; the traded signal must lag to *D−1*. Stated, with the asymmetry disclosed in the evidence blob | §2.3 B2, §7 |
+| J1-6 / J2-4 "4–10×" multiple unsupported | both | **Accepted.** Corrected to 3.3×–8.7× vs `volatility_breakout` (0.042R) and 6.3×–16.7× vs `relative_strength` (0.022R) at λ = 1 | §0, §8, §11 |
+| J1-7 zero-margin case in wrong units | legitimacy | **Accepted.** Restated in gate 6's own units (trades) *and* in sessions, naming session supply as the zero-margin quantity | §5 |
+| J1-8 F3/F4/F6 not stated across snapshots (R10) | legitimacy | **Accepted.** All eight falsifiers now carry an explicit four-snapshot statement | §4 |
+| J1-9 gate-0 RTH purity depends on ingest discipline, not code | legitimacy | **Accepted.** Added as bundle item **B7** (`load_intraday` must filter or assert on `session`) | §2.3 B7 |
+| J1-10 map self-contradiction on *k* | legitimacy | **Accepted.** The contradiction is in the map, not the proposal: `MAP.md:69` and `:341` say "look 5", `:1321-1322` says "look 6". Flagged; this report adopts **k = 5 baseline, next = look 6**, per §4.2 item 10 and per my task brief, with version 1's own count disclosed alongside | §10 |
+| J2-2 gate 4 ignores the clustered-bootstrap diagnostic | impact | **Accepted (major).** Gate 4 restated with a design-effect term; "not power-limited — a first for this program" **withdrawn** | §5 gate 4 |
+| J2-3 cost table ignores the overshoot factor λ | impact | **Accepted, with one correction to the judge.** λ = (entry_fill − or_lo)/w is **not** strictly ≥ 1: the fill is the *next bar's open* (`engine.py:107-109`), which can print back inside the range. λ ≥ 1 holds typically, not by construction | §8, F3 |
+| J2-5 entry rate quoted with a sampling SE | impact | **Accepted.** Replaced by a bracket **0.4–0.8 trades/symbol-session** with no SE, plus a hard structural ceiling of **2** | §3.5 |
+| J2-6 gate-6 unbucketed stated as a session share | impact | **Accepted.** Trade count now stated, with the uniformity assumption named | §5 |
+| J2-7 storage multiple inconsistent (§3.3 vs Q4) | impact | **Accepted.** One table, added bytes and final multiple both stated | §3.3 |
+| J2-8 wall-clock quoted without a hardware band | impact | **Accepted.** ±15 % band; F4 restated as a ratio | §3.4, F4 |
+| J1-1's inference that the Option C recommendation collapses | legitimacy | **Partially rejected.** Option **A** is dead under *both* settings (0 bear and 0 range *labelled* sessions at 2024-09-22 — verified), and the pre-registered ladder configuration is long-only, under which the 2021-09 floor stands. What collapses is the claim that the ceiling is *calendar*, not configuration | §3.2 |
+| J1-2's alternative remedy ("withdraw the word blocking") | legitimacy | **Rejected.** The same-session regime read is a real lookahead for an intraday entry; it is blocking | §7 |
 
-### A.3 Judge defects — rejected, or accepted only in part, with reasons
+### A.2 Four findings neither the proposal nor the judges stated
 
-**(a) J1-2 / J2-2's "upper bound" framing is rejected; the correction itself is accepted.**
-Both judges concluded that because `risk_per_share = |entry_fill − sig.stop_price|`
-(`engine.py:111`) with `stop_price = or_lo` and the signal requires `close[t] > or_hi`,
-the engine's risk unit `d` is *strictly greater* than the OR width `w`, so the w-anchored
-cost figures are an **upper bound** on cost in R. That is wrong in general. FACT
-(`engine.py:107-109`): the fill is the **next bar's open**, `entry_fill =
-series.open[t+1] × (1 + slip)`, not the signal close. A next bar that opens back inside
-the opening range gives `entry_fill < or_hi`, hence `d < w`, hence cost in R **higher**
-than the w-anchored figure. The w-table is therefore neither an upper nor a lower bound;
-it is the `ρ = d/w = 1` special case of a quantity that is unmeasurable without intraday
-data. §8 is rewritten in terms of `d/price` directly, `ρ` is added to the post-ingest
-measurement list, and the modal expectation `E[ρ] > 1` (so the w-table *usually*
-overstates cost) is stated as HYPOTHESIS, not as a bound.
-
-**(b) J2-1's design-effect arithmetic is rejected; its substance is accepted.** The judge
-gives the sd = 1.420 gate-4 hurdle as **+0.0819R** at `deff` 3 and **+0.0999R** at
-`deff` 5. Recomputed: the hurdle is `0.02 + 1.96·sd·√(D/n)`, and at `n = 5,393`,
-`1.96 × 1.420/√5,393 = 0.03789`, so `D = 3` gives **+0.0856R** and `D = 5` gives
-**+0.1047R**. The judge's figures correspond to `D ≈ 2.67` and `D ≈ 4.45`. §5 and §12.2
-use the recomputed values.
-
-**(c) J2-3's "3.3×–8.7×" is accepted arithmetically but is not the right statistic, and
-the proposal's "4–10×" was not fabricated.** At the *hypothesised* OR-width band
-(w = 0.5–0.7%) the raw multiple against `volatility_breakout`'s 0.042R is 4.0–5.2×, i.e.
-inside the proposal's stated range; the "low end" the judge objects to (3.3×) comes from
-w = 0.8%, the extreme edge of the proposal's own table. The deeper problem is that the
-raw multiple moves with the risk-unit correction while the economically meaningful
-quantity does not. §8 therefore leads with the **cost wedge** — the number of percentage
-points by which cost lifts the break-even hit rate above the geometry's random-walk
-baseline — which has the closed form `wedge = (round_trip/10⁴)/(d + m·w)` and is
-therefore almost insensitive to `ρ`. See §8.
-
-**(d) J1-4's "the claim inverts if `allow_short` is ever true" is accepted as a
-disclosure requirement, not as a correction to the forecast.** FACT: the promotion ladder
-is long-only today and nothing in `promotion.py` can change that — `allow_short` is never
-passed at `:386` or `:586`. The gate-6 forecast in §5 is computed for the ladder as it
-runs. What is added is the disclosure that the 19-session ceiling is a property of the
-*long-only ladder*, that 248 bear-labelled sessions are short-eligible under
-`intraday_orb.py:116`, that the operating path already threads the flag
-(`scan.py:271`, `cli.py:903`, `config/research.py:296 allow_short_candidates = False`),
-and that turning it on would be a **behavioural change to the evidence base** requiring
-its own pre-registration.
-
-**(e) J1-5's "B3 runs at gate 8, i.e. after gates 1–7 have already produced the numbers"
-is accepted with a precision.** A gate-8 failure does block promotion — `passed =
-bool(gates) and all(g.passed …)` (`promotion.py:922`). The real harm is that gates 1–7
-would *report* numbers computed on contaminated bars, and those numbers are what a human
-reads. B7 (filter at load) is therefore the fix, and B3 (validate at gate 8) is the
-audit, not the other way round.
-
-**(f) J1-8's implication that the new gate-0 thresholds risk an R4 weakening is
-rejected.** Every condition in §2.2 is strictly harder to satisfy than the hard-coded
-fail it replaces; none can make any gate easier to pass. What the judge is right about is
-that they are gate numbers entering a pre-registration document with no stated basis —
-that is fixed in §12.1, and condition (c) is repaired.
+- **FACT.** `signalforge data ingest-intraday` (`cli.py:622-659`) takes only a
+  trailing `--days`; there is no `--since`/`--until`. A 2016 backfill has no CLI
+  entry point today, and `ingest_intraday_universe` would be handed one ten-year
+  window. The proposal's "no new ingest code is needed" is wrong at the CLI layer
+  and at the chunking layer (B9, §2.3).
+- **FACT.** `signalforge evaluate-promotion` (`cli.py:1282-1305`) accepts
+  `--dataset` from a closed set of three names only; there is no way to select or
+  create a custom-keyed snapshot from the CLI. `evaluate_promotion(...,
+  dataset_snapshot=...)` does accept one (`promotion.py:483-491`), so the keyed
+  intraday snapshot requires an in-process script or a new CLI flag (B10, §2.3).
+- **FACT.** `ResearchConfig.enabled_horizons` **includes** `Horizon.INTRADAY`
+  (`config/research.py:297-302`) while `approved_scope_scan.approved_horizons`
+  excludes it (`:81`) and `alerts/dispatch.py:241` skips it. The EOD-only policy is
+  therefore inconsistent across three surfaces — a fourth policy surface the map's
+  §2.4 "three blocks" framing does not name.
+- **FACT.** `run_backtest` sets `t = exit_idx + 1` (`engine.py:150`) — no overlapping
+  positions per symbol. With a 26-bar RTH session, an entry window of
+  `3 ≤ since_open ≤ 16` and a 12-bar time stop, **at most 2 trades per symbol-session
+  are structurally possible**. This is a hard ceiling on every trade-count forecast
+  below and on the gate-6 bear bucket (≤ 19 × 24 × 2 = 912 long bear trades in nine
+  pre-sealed years).
 
 ---
 
-## 0. Executive summary — the six findings that decide this
+## 0. Executive summary — the five findings that decide this
 
-1. **FACT — the first intraday run past gate 0 permanently burns version 1's only
-   sealed look, whatever else it does.** `evaluate_promotion` has no early return between
-   gate 0 and gate 9 (`promotion.py:522`, `:571`, `:893` are the only three); gate 9 at
-   `:838` locks a row keyed `(version, snapshot)` (`:377-384`). Version 1 has zero sealed
-   rows today. A debugging run is indistinguishable, afterwards, from the real one. §A.1.
-2. **FACT — the entitled feed is `DELAYED`, and no `REALTIME` equities feed exists on
-   this plan.** `entitlements.py:250-257` probes `stocks_intraday_aggs_5m` with a declared
-   `latency="DELAYED"`; `MassiveAdapter` declares only `LatencyCategory.END_OF_DAY`
-   (`massive.py:86-100`). The engine enters at the **next bar's open**
-   (`engine.py:107-109`). Any feed delay of one bar or more makes the modelled fill
-   unattainable live. *(The specific "≥ 15 minutes" magnitude is out-of-band — attributed
-   to the lead's brief by `CAPABILITY_MATRIX.md:26` — not measured in this repo. The
-   conclusion does not depend on the magnitude.)*
-3. **FACT/DERIVED — the frozen cost model imposes a break-even hit-rate penalty 3.3×–10.5×
-   larger than any daily strategy's.** The engine's risk unit is `entry_fill − or_lo`, a
-   few tens of basis points, not an ATR multiple. At the unchanged 11.0 bps round trip
-   (`engine.py:94`, `:144`) the cost wedge above the geometry's random-walk break-even is
-   **4.6–14.7 pp** across the plausible opening-range band, against **1.23 pp** for
-   `trend_continuation` and **1.40 pp** for `volatility_breakout` (§8). Gate 3, not gate 4,
-   is the binding gate — a reversal of the pattern for every other strategy in the program.
-4. **FACT — gate 6 fails unconditionally on any intraday run of the promotion path as it
-   stands.** `promotion.py:744` looks trades up in `label_regimes`'s `dict[date, str]`
-   (`backtest/regime.py:25`) using `t.entry_date`, which for an intraday run is a
-   timezone-aware `datetime` (`engine.py:113` ← `series.dates[entry_idx]`). A `datetime`
-   key never matches a `date` key. Buckets `0/0/0`, 100% unbucketed. Note the asymmetry
-   that makes this survivable to diagnose: `signal_fn_for` **does** normalise
-   (`base.py:38-40`), so the strategy's own regime gate works; only the gate-6 census does
-   not.
-5. **FACT — gate 6's bear bucket has a hard nine-year calendar ceiling under the long-only
-   ladder.** Recomputed independently for this synthesis over `2016-10-17 … 2025-09-07`,
-   source `massive`: of **267** bear-labelled proxy sessions only **19** are tradeable
-   under the strategy's own `not ctx.regime.risk_off` gate — **7.12% ± 1.57%**, against
-   bull **73.56% ± 1.18%** (a ~34 SE contrast). All 19 fall in Oct–Nov 2020 (3) and
-   Feb–Jun 2023 (16); **none after 2023-06-02**; **zero** for any pre-sealed start on or
-   after 2022-09-08, which includes the shortest span gate 0 will accept. Disclosed
-   dependency: the ladder runs `allow_short=False`; **248** bear sessions are short-eligible
-   under `intraday_orb.py:116` and the ladder cannot reach them.
-6. **FACT — the promotion path is intraday-incapable in eight places beyond gate 0**, and
-   converting gate 0 alone (the R4-permissible change) turns a truthful, self-explaining
-   hard fail into a set of zero-trade gate failures that read as strategy defects. §2.3.
+1. **FACT — latency: the entitled feed's delay equals the bar size, so the modelled
+   fill is unattainable live.** Intraday aggregates are entitled but `DELAYED` ≥ 15 min
+   (`data/entitlements.py:246-257`, feed `stocks_intraday_aggs_5m`, `latency="DELAYED"`;
+   `docs/CAPABILITY_MATRIX.md:26`; `reports/SUBSCRIPTION_STATUS.md:19` "No real-time
+   feed on this plan"), and the research bar size is 15 m
+   (`config/research.py:303`). **DERIVED:** the engine signals on bar *t*'s close and
+   fills at bar *t+1*'s open (`engine.py:106-109`), i.e. at the same instant. With a
+   delay *d* and bar size *b*, the earliest attainable action is the open of bar
+   *t + 1 + ceil(d/b)* — at *d = b =* 15 min that is bar *t+2*. **The backtest fill is
+   exactly one bar early, permanently.** `LatencyCategory.REALTIME` is never set by
+   any adapter (`grep`: only the enum, the migrations and a docstring warning).
+2. **FACT/DERIVED — cost: this strategy's risk unit is the opening-range width, so
+   the frozen 11.0 bps round trip buys a far bigger slice of it than for any daily
+   strategy.** `risk_per_share = |entry_fill − stop_price|` (`engine.py:110`) and the
+   stop is the opposite OR edge (`intraday_orb.py:108`), so
+   `cost_R = 0.0011 / (λ·w)` where *w* is the OR width as a fraction of price and
+   λ = (entry_fill − or_lo)/w. At **λ = 1** and *w* ∈ [0.30 %, 0.80 %] the cost is
+   **0.37R – 0.14R per round trip** — **3.3×–8.7×** `volatility_breakout`'s 0.042R
+   (the program's most expensive) and **6.3×–16.7×** `relative_strength`'s 0.022R
+   (`MAP.md` §0.4). Gate 3, not gate 4, is the expected binding gate — a reversal of
+   the pattern for every other strategy. This is an **upper bound**: λ > 1 lowers it.
+3. **FACT — the promotion path is intraday-incapable in at least eight places beyond
+   gate 0, and one makes gate 6 fail unconditionally.** `promotion.py:744` looks each
+   trade up as `regimes.get(t.entry_date, "warmup")` against `label_regimes`'
+   `dict[date, str]` (`backtest/regime.py:25`); for an intraday run `t.entry_date` is
+   a `datetime` (`engine.py:136` ← `series.dates[entry_idx]`), and a `datetime` key
+   never matches a `date` key. Buckets would read `0/0/0` with 100 % unbucketed
+   whatever the data says. Converting gate 0 alone is therefore **necessary but must
+   not ship alone** (bundle B1–B10, §2.3).
+4. **FACT — gate 6's bear bucket is supply-limited, and the size of the limit depends
+   on the run configuration.** Under the ladder's **hard-wired long-only**
+   configuration (`run_strategy_over_universe(..., allow_short: bool = False)`,
+   `backtest_runner.py:176`, never passed at `promotion.py:586`, `promotion.py:386`
+   or `sensitivity.py:148`), only **19 of 267** bear-labelled pre-sealed sessions are
+   tradeable (**7.12 % ± 1.57 %**), none after 2023-06-02, and **zero** at any
+   pre-sealed start on or after 2022-09-08. Under `allow_short=True` — a config flag
+   the operator can set from the dashboard (`config/research.py:296`;
+   `app/routers/dashboard.py:332`; passed on the *live* scan path at
+   `research/scan.py:271` and `cli.py:903`, but **not** on the ladder) — the strategy
+   has a SHORT branch that fires exactly when `risk_off` is true
+   (`intraday_orb.py:116`, `permits_short=True` at `:75`), and 248 further bear
+   sessions become eligible. **Either way, the shortest gate-0-legal span (start
+   2024-09-22) has 0 bear and 0 range *labelled* sessions and gate 6 is
+   arithmetically unreachable.**
+5. **FACT — no promotion evaluation of v0.1.0 is admissible at all.** For an intraday
+   entry inside session *D*, `ctx.regime` is derived from *D*'s own daily close
+   (`backtest_runner.py:183-185`; `strategies/base.py:39-40` normalises the intraday
+   stamp to its session date) — future information relative to a 10:15 entry, and
+   invisible to `assert_no_lookahead` because it lives in the plumbing, not in a
+   feature. Fixing it is behavioural → `VERSION = "0.2.0"` (R3/R7). Running v0.1.0
+   would spend version 1's first-ever sealed look on a rule set already known to read
+   the future.
 
-**Recommendation: do not build the pipeline. Take the null option (§11).** The
-requirements below are specified in full so the decision is made on costed facts rather
-than on the absence of a plan. The recommendation changes only if the operator answers
-**Q1** (§14) by acquiring a real-time equities entitlement, or if **F1** or **F3** (§4)
-falls.
+**Recommendation: do not build the pipeline; take the null option (§11).** It is
+reversed only by an affirmative answer to **Q1** *and* a real-time equities
+entitlement. The requirements below are specified in full so the decision is made on
+costed facts rather than on the absence of a plan.
 
 ---
 
 ## 1. Mechanism
 
-This design proposes no market hypothesis about opening-range breakouts, because it
-proposes no rule and forecasts no edge. It states a **capability hypothesis** in the §2
-form the map requires, so that it can be killed:
+This design proposes no market hypothesis and forecasts no edge. It states a
+**capability hypothesis**, in the §2 form the map requires, so it can be killed:
 
-> **H13.** `STRATEGY_COMPLETION_MAP.md` §2.4 identifies three independent blocks
-> (promotion-path gate, EOD-only operating policy, absent data path). H13 asserts that
-> **removing all three is neither sufficient nor economically sensible**, because three
-> further layers — provider **latency**, the frozen **cost model**, and the
-> **irreversibility of the first gate-9 lock** — independently prevent an honest,
-> operable pass, and all three are quantifiable **today, with no intraday data at all**.
+> **H13 (new).** `intraday_orb.intraday` is blocked by three independent layers
+> (`MAP.md` §2.4: promotion-path gate, EOD-only operating policy, absent data path).
+> H13 asserts that removing all three is **neither sufficient nor economically
+> sensible**, because three further layers — provider **latency**, the frozen **cost
+> model**, and a **same-session regime lookahead** in the intraday plumbing —
+> independently prevent an honest, operable pass, and all three are quantifiable
+> **today, with no intraday data at all**.
 
-Why this should be true in markets rather than only in the backtest: an opening-range
-breakout is a *microstructure* strategy. Whatever edge it has lives in the first hour,
-when effective spread and adverse selection are at their daily maximum, and its risk unit
-is the opening range — tens of basis points — rather than a multi-percent ATR stop. Both
-facts push the same way: the ratio of transaction cost to risk unit is an order of
-magnitude worse than for a swing strategy, and the sensitivity of the realised fill to
-execution latency is an order of magnitude higher. A strategy of this shape is viable only
-with (a) real-time data, (b) a measured spread, and (c) a cost model calibrated to the
-opening auction. This program has none of the three: real time is unentitled; NBBO quotes
-return `403 not_authorized` (`data/entitlements.py`, feed `stocks_nbbo_quotes`;
-`universe/screen.py` flags every symbol `F_SPREAD = "spread_filter_not_licensed"`); and
-R4 freezes the cost model at a universe- and horizon-independent flat 5.0 bps assumed
-spread (`engine.py:90`; `backtest_runner.py:205-206` never overrides it).
+Why this should be true in markets, not merely in the backtest: an opening-range
+breakout is a **microstructure** strategy. Whatever edge it has lives in the first
+hour, when effective spread and adverse selection are at their daily maximum, and its
+risk unit is the opening range — tens of basis points — rather than a multi-percent
+ATR stop. Both push the same way: the ratio of transaction cost to risk unit is an
+order of magnitude worse than for a swing strategy, and the sensitivity of the
+realised fill to execution latency is an order of magnitude higher. A strategy of
+this shape needs (a) real-time data, (b) a measured spread, and (c) a cost model
+calibrated to the opening auction. This program has none of the three: real time is
+unentitled, NBBO quotes return `403 not_authorized`
+(`reports/SUBSCRIPTION_STATUS.md:17`; `universe/screen.py` flags every symbol
+`F_SPREAD = "spread_filter_not_licensed"`), and R4 freezes the cost model at a flat,
+universe- and horizon-independent 5.0 bps assumed spread (`engine.py:90`;
+`backtest_runner.py:205-206` never overrides it).
 
-Relation to the existing hypothesis set: H13 uses none of H1–H4 (v3, demoted), H6/H8/H9
-(v4) or H11. It **inherits H12's mechanism** from `diagnostics/v6_regime_power.md` — a
-regime gate shut on almost every bear session, producing a breadth/availability failure at
-gate 6 with a hard calendar ceiling — and §3.1 shows `intraday_orb` sits behind *the same
-gate expression* (`not ctx.regime.risk_off`, `intraday_orb.py:105`) that `breakout.py:102`
-uses.
+H13 inherits **H12**'s replacement mechanism from
+`docs/research/diagnostics/v6_regime_power.md` — a regime gate shut on almost every
+bear session, producing an availability failure at gate 6 with a calendar ceiling —
+and §3 shows `intraday_orb`'s LONG branch sits behind *the same gate expression*
+(`not ctx.regime.risk_off`, `intraday_orb.py:105`) as `breakout.py:102`. **Corrected
+from the proposal:** unlike `volatility_breakout`, this strategy also has a SHORT
+branch keyed to the *complement* of that expression, so the ceiling is
+configuration-dependent (§3.1).
 
 ---
 
@@ -243,379 +215,382 @@ uses.
 
 ### 2.1 What this design does **not** change
 
-- `src/signalforge/research/strategies/intraday_orb.py` — **unchanged**. `VERSION` stays
-  `"0.1.0"` (`:25`); `ORBParams` (`:28-34`) unchanged; `IntradayORB.evaluate` (`:88-127`)
-  unchanged. No `v0.2.0` row is created, so R3 and R7 are satisfied vacuously.
-- `research/strategies/__init__.py:43-51` `default_strategies()` — unchanged (6 entries;
-  `IntradayORB` is already registered).
-- Any threshold in `config/research.py:93-123` or `backtest/costs.py:11-16` — unchanged
-  (R4).
+- `src/signalforge/research/strategies/intraday_orb.py` — **unchanged**. `VERSION`
+  stays `"0.1.0"`; `ORBParams` (`:29-35`) unchanged; `IntradayORB.evaluate`
+  (`:88-127`) unchanged. **No `v0.2.0` is created by this design** (R3/R7 satisfied
+  vacuously). The regime-lag fix that a future evaluation requires is *specified*
+  here (§7) and *implemented* in a separate, separately-budgeted v0.2.0 design.
+- `research/strategies/__init__.py:43-51` `default_strategies()` — unchanged.
+- Any threshold in `config/research.py:93-123` or `backtest/costs.py:11-16` —
+  unchanged (R4).
 - **R7 / R7b safety (FACT).** Nothing here touches any `StrategySpec`, so
-  `approval_scope.current_spec_json_hash()` for the two live PAPER_APPROVED versions
-  (v2 `trend_continuation.short_swing`, v5 `relative_strength.medium_swing`) cannot move,
-  and no new *passing* evaluation is created, so the `scopes[0]` ordering hazard
-  (`paper_probation.py:118`, `approval_scope.py:45-66` with no `order_by`) is not
-  activated. §13 re-verifies both after any future work.
+  `approval_scope.current_spec_json_hash()` cannot move for the two live
+  PAPER_APPROVED versions (v2 `trend_continuation.short_swing`, v5
+  `relative_strength.medium_swing`), and no new *passing* evaluation is created, so
+  the `scopes[0]` ordering hazard (`paper_probation.py:113-122`) is not activated.
+  Verified state to re-record before any future run: v2 and v5 each have exactly two
+  passing evaluations, both on snapshot 3 → sealed tests 11 and 14.
 
-### 2.2 The R4-permissible change (specified, **not applied**): gate 0 becomes a real query
+### 2.2 The R4-permissible change: gate 0 becomes a real data query
 
-**File:** `src/signalforge/research/promotion.py`. **Symbol:** `evaluate_promotion`, the
-`Horizon.INTRADAY` block.
+**File:** `src/signalforge/research/promotion.py`. **Symbol:** `evaluate_promotion`,
+the `Horizon.INTRADAY` early-return block.
 
-**Before (FACT, `promotion.py:512-534`):** `if spec.horizon is Horizon.INTRADAY:` appends
-a hard-coded failing `Gate(0, "data_availability", False, …)` and `return _finalize(…)`
-at `:522`, skipping even the `MIN_PRESEALED_DAYS` check that the daily path applies at
-`:559-583`.
+**Before (FACT, `promotion.py:512-534`):** `if spec.horizon is Horizon.INTRADAY:`
+appends a hard-coded failing `Gate(0, "data_availability", False, …)` and returns
+`_finalize(...)` immediately — **skipping even the `MIN_PRESEALED_DAYS` check** that
+the daily path applies at `:556-583`.
 
-**After (specification):** replace the declared-horizon test with a coverage query against
-`OHLCVIntraday`, then **fall through** to the existing `MIN_PRESEALED_DAYS` check.
+**After (specification, NOT applied):**
 
 ```
 gate 0 (INTRADAY) passes only if ALL of:
   a. for every symbol in `symbols`, OHLCVIntraday rows exist with
        bar_size == config.intraday_bar_size, source == the run's SourceFilter,
        is_simulated is False, session == "rth", bar_start within [start, end];
-  b. per-symbol session coverage >= 99% of the daily sessions the same symbol has in
-     OHLCVDaily over the same span and source (catches partial backfills);
-  c. per-session bar count is EXACTLY the expected RTH count for that session's
-     exchange-calendar type at that bar size -- 26 for a full session at "15m",
-     14 for a 13:00 ET early close -- for 100% of covered sessions, with the
-     early-close dates supplied by an explicit calendar list, not inferred;
-  d. the latest ingested bar_start satisfies the same freshness bound
-     approved_scope_scan.data_readiness applies to the daily feed;
-  e. the existing pre-sealed-span test then runs unchanged
-     ((pre_sealed_end - start).days >= MIN_PRESEALED_DAYS == 350,
-      promotion.py:94, :559).
+  b. per-symbol session coverage == 100% of the daily sessions the same symbol
+     has in OHLCVDaily over the same span and source;
+  c. per-session bar count == the expected RTH count for that bar size and that
+     calendar day (26 at "15m" on a full day; 14 on an enumerated NYSE half-day),
+     for 100% of covered sessions;
+  d. the latest ingested bar_start is no staler than the bound
+     `approved_scope_scan.data_readiness` already applies to the daily feed
+     (`approved_scope_scan.py:84-130`) — the SAME bound, not a new constant;
+  e. the existing pre-sealed-span test then runs UNCHANGED, by falling through
+     rather than returning early:
+       (pre_sealed_end - start).days >= MIN_PRESEALED_DAYS == 350.
 Otherwise: Gate(0, "data_availability", False, <which of a-e failed, per symbol>).
 ```
 
-**Condition (c) is the judges' repair (J2-8), and it matters.** A 13:00 ET early close is
-9:30–13:00 = 210 minutes = **14** bars at 15 m, not 26. NYSE runs roughly two to three
-early closes a year (July 3 when it falls on a weekday, the day after Thanksgiving,
-Christmas Eve in most years) — HYPOTHESIS from the market calendar, out-of-band, ~0.8–1.2%
-of sessions. The proposal's "== 26 bars for ≥ 99% of sessions" therefore **rejects a
-complete, correct, RTH-only backfill** by roughly 0.2 pp every year while nominally
-policing exactly the defect it misses. Set membership against a calendar type is both
-stricter (100%, not 99%) and correct.
+**Why this is R4-permissible (the §1 carve-out 2 argument, stated symmetrically).**
+The current test is an unconditional fail; **any** real query is at least as hard to
+satisfy, because it fails for as long as no intraday data exists and then keeps
+failing on partial, mis-sized, simulated, wrong-source, non-RTH or stale data.
+Nothing in the ladder becomes easier to pass, and (e) makes the intraday path
+*strictly stricter* than today by restoring a check the early return skips.
 
-**Why this is R4-permissible and not a weakening.** The current test is a hard-coded fail;
-any real query is *at least as hard* to satisfy, because it keeps failing for as long as
-no intraday data exists and then keeps failing on partial, mis-sized, simulated,
-wrong-source or stale data. Conditions (b)–(d) are additions the hard-coded fail never
-enforced. This is the same carve-out that permits adding a missing sensitivity grid
-(map §1, R4 carve-out 1) and the map itself already rules it permitted-in-principle
-(§2.4, §1 R4 carve-out 2).
+**Judge defect J1-3, accepted as hardening.** The proposal's 95 % / 99 % tolerances
+are unnecessary slack on a backfill the operator controls end to end, and a
+tolerance that can later be relaxed to obtain a pass is a latent threshold. They are
+replaced by **100 %** against an **enumerated** exchange calendar (the half-day list
+is data, checked into the repo alongside the validator, not a tunable), and (d)
+**reuses the daily path's existing bound rather than introducing a number**.
+**Pre-registered and frozen for the duration of the program: (b) = 100 %,
+(c) = 100 %, (d) = the daily feed's own bound. None of the three may be relaxed to
+obtain a pass.** A gate-0 failure still returns early via `_finalize` — the ladder
+must not report gates 1–10 computed on data it has just declared unfit.
 
 ### 2.3 The mandatory bundle — gate 0 must NOT ship alone
 
-**FACT:** after §2.2, execution falls through to
-`full = run_strategy_over_universe(…)` at `promotion.py:586`, which does **not** pass
-`intraday=` or `bar_size=`. Those default to `intraday=False, bar_size="15m"`
-(`backtest_runner.py:179-180`), so the ladder would evaluate an INTRADAY strategy on
-**daily** bars. FACT (verified read-only in the proposal, mechanism re-verified here):
-`IntradayORB` over daily bars yields `n_trades = 0` — `features/intraday.py:19-21`
-`_session_date` returns each daily bar's own date, so `bars_since_open` (`:24-32`) is
-always `0`, `opening_range` (`:35-45`) never accumulates `k_bars = 3` bars in one
-"session" and returns `(nan, nan)`, and `evaluate` exits at `intraday_orb.py:90-91`.
+**FACT.** After §2.2, execution falls through to
+`run_strategy_over_universe(...)` at `promotion.py:586`, which passes **neither**
+`intraday=` **nor** `bar_size=`; the defaults are `intraday=False, bar_size="15m"`
+(`backtest_runner.py:179-180`). The same omission exists at `promotion.py:386`
+(gate 9's sealed run) and `research/sensitivity.py:148` (gate 5's nine re-runs). The
+whole ladder would evaluate an INTRADAY strategy on **daily** bars. The proposal
+verified in-process that this yields `n_trades = 0` over 53,196 daily bars —
+mechanically, `_session_date` (`features/intraday.py:19-21`) returns each daily
+bar's own date, so `bars_since_open` is always 0, `opening_range` never accumulates
+`k_bars` bars in one "session" and returns `(nan, nan)`, and `evaluate` exits at
+`intraday_orb.py:91-92`. The failure mode of shipping §2.2 alone is therefore
+**misleading, not unsafe**: it cannot fabricate a pass, but it converts a truthful
+self-explaining gate-0 fail into zero-trade failures at gates 1–7 that read as
+strategy defects. That is unacceptable for an auditable ladder.
 
-Shipping §2.2 alone is therefore **not safe**, contrary to the proposal: gate 0 would
-report data availability, gates 1–7 would report zero-trade failures that read as strategy
-defects, and — per §A.1 — **gate 9 would run and lock version 1's first sealed test on
-zero trades**.
+Each item below carries its own R4 argument, per judge defect J1-4.
 
-| # | File / symbol | Defect today (FACT) | Required |
-|---|---|---|---|
-| **B1** | `promotion.py:586` and `:386`; **`promotion.py:708`** (the `run_parameter_sensitivity` call) | `run_strategy_over_universe` called without `intraday=`/`bar_size=`; the sensitivity **caller** omits them too. *(Corrected from the proposal: `run_parameter_sensitivity` already declares them at `sensitivity.py:128-129` and threads them at `:155-157` — the callee is fine.)* | thread `intraday = spec.horizon is Horizon.INTRADAY` and `bar_size = config.intraday_bar_size` through gates 1–5 and gate 9 |
-| **B2** | `promotion.py:744` `regimes.get(t.entry_date, "warmup")` against `dict[date, str]` (`backtest/regime.py:25`) | intraday `t.entry_date` is a `datetime`; buckets `0/0/0`, 100% unbucketed, **gate 6 fails unconditionally**. `signal_fn_for` normalises (`base.py:38-40`); this call site does not | apply `_as_date` (`backtest_runner.py:163-164`) to `t.entry_date`. **This is a rider on `diagnostics/pipeline_hardening_spec.md` §1.5 Change A (lines 167-169), which already pre-registers replacing this same line with a three-way `missing`/`warmup`/bucket classification.** The two are complementary — the hardening spec does not address the key *type* — and must land as one patch, not two |
-| **B3** | `data/validate.py` has only `validate_daily` (`:66`) and `validate_option_aggregates` (`:249`) | gate 8 (`promotion.py:808`) validates **daily** bars for an intraday strategy — a PASS that says nothing about the data traded | a `validate_intraday` counterpart (session completeness, bar-count-per-session against the calendar type, duplicate `bar_start`, non-positive prices, `source`/`bar_size`/`session`/`is_simulated` purity) wired into gate 8 when the horizon is INTRADAY |
-| **B4** | `promotion.py:249-267` `_leakage_self_check` covers four daily features on the daily proxy | the intraday feature set is never leakage-checked by the ladder | add `opening_range`, `bars_since_open`, `session_bar_count` on the intraday series when the horizon is INTRADAY (§7 shows they pass today) |
-| **B5** | `promotion.py:161-210` `_sensitivity_plan` has no `intraday_orb` branch | gate 5 **hard-fails** (`promotion.py:694-703`) — an automatic permanent failure, not a skip | register the §6 grid (R4 carve-out 1) |
-| **B6** | `features/intraday.py:38` `opening_range` rescans `range(t+1)`; `series.head(t)` (`series.py:40-51`) copies the `dates` tuple | the backtest is `O(n²)` per symbol — extrapolated ~32 min per 24-symbol full-span pass at 15 m, ~5.4 h per 10-gate evaluation (§3.4) | precompute session boundaries once per series (or cache the per-session index) before any intraday evaluation is attempted |
-| **B7** *(new, J1-5)* | `PriceSeries.load_intraday` (`series.py:105-136`) filters only `bar_size`, `bar_start` and `source` | gate 0 could pass on the RTH, non-simulated subset while gates 1–9 **trade pre/post-market and simulated bars** — the exact corruption `_session_date`'s UTC grouping produces. `session` and `is_simulated` both exist as columns (`db/models/market.py:117`, `:126`) | filter `session` and `is_simulated` at load, so the predicate gate 0 asserts is the predicate the backtest runs under. Enforce **before** gate 1, not at gate 8 via B3 |
-| **B8** *(new)* | `cli.py:1282-1412` `evaluate-promotion` accepts only `--dataset baseline\|ex_meta\|meta_continuity_corrected`, and with `--symbols` it passes `dataset_snapshot=None`, so `evaluate_promotion` calls `get_or_create_dataset_snapshot(session, symbols=…)` **unkeyed** (`promotion.py:505`) | FACT (queried): snapshot **3** `universe_24_ex_meta` has `reusable_by_new_evaluations = 1`, and the unkeyed branch (`promotion.py:333-337`) matches any reusable snapshot on an exact symbol-set match. An intraday run on the 24 ex-META symbols would **silently attach to snapshot 3** — the daily-bar snapshot the two live approvals sit on | add an explicit intraday dataset variant that mints the key `universe_24_ex_meta_intraday_15m`. FACT: the keyed branch (`promotion.py:309-329`) accepts a distinct key with the same symbol set, and raises rather than reusing on a mismatch |
+| # | File / symbol | Defect today (FACT) | Required | R4 argument |
+|---|---|---|---|---|
+| **B1** | `promotion.py:586`, `:386`; `sensitivity.py:148` | called without `intraday=`/`bar_size=` | thread `intraday = spec.horizon is Horizon.INTRADAY` and `bar_size = config.intraday_bar_size` through gates 1–5 and 9 | Not a threshold change. Today five gates are computed on data the strategy cannot trade, yielding 0 trades → automatic fail. Threading makes them *measure the declared horizon*; the thresholds they test against are untouched. It cannot make a gate pass that a correct measurement would fail. |
+| **B2** | `promotion.py:744` `regimes.get(t.entry_date, "warmup")`; keys are `dict[date, str]` (`backtest/regime.py:25`) | intraday `t.entry_date` is a `datetime` → every trade unbucketed → **gate 6 fails unconditionally** | normalise with the module's own `_as_date` (`backtest_runner.py:163-164`) before the lookup | Same carve-out shape as gate 0: a type error that makes a gate un-passable is not a *threshold*. `min_trades_per_regime = 10` and `min_regimes_covered = 3` (`config/research.py:109-110`) are untouched. Note `run_strategy_over_universe` **already** applies `_as_date` at three places (`:211`, `:214`, `:220`) — gate 6 is the one place that forgot. |
+| **B3** | `data/validate.py` has only `validate_daily` (`:66`) and `validate_option_aggregates` (`:249`) | gate 8 (`promotion.py:808`) validates **daily** bars for an intraday strategy — a PASS that says nothing about the data traded | add `validate_intraday` (session completeness, bars-per-session, duplicate `bar_start`, non-positive prices, `source`/`bar_size`/`session` purity) and dispatch on horizon at gate 8 | Adds a check where there is effectively none. Strictly harder. |
+| **B4** | `promotion.py:249-267` `_leakage_self_check` covers four **daily** features on the daily proxy | the intraday feature set is never leakage-checked by the ladder | add `opening_range`, `bars_since_open`, `session_bar_count` on the intraday series when the horizon is INTRADAY | Adds assertions. Strictly harder. |
+| **B5** | `promotion.py:161-210` `_sensitivity_plan` has no `intraday_orb` branch (verified: four `startswith` branches, then `return None`) | gate 5 hard-fails (`promotion.py:694-703`) — permanent automatic failure, not a skip | register §6's pre-registered grid | Explicitly R4 carve-out 1 in `MAP.md` §1. The grid is fixed before any intraday bar exists. |
+| **B6** | `features/intraday.py:39` `opening_range` rescans `range(t+1)`; `series.head(t)` copies the `dates` tuple (`series.py:40-51`) | backtest is `O(n²)` per symbol — one 24-symbol option-C pass ≈ **32 min**, one 10-gate evaluation ≈ **5.4 h** | precompute session boundaries once per series / cache the per-session index | Pure performance. No statistic changes; a regression test must assert identical trades before/after. |
+| **B7** *(new, J1-9)* | `data/series.py:105-137` `PriceSeries.load_intraday` filters `bar_size` and `source` but **not** `session`, while `OHLCVIntraday` carries `session` (`db/models/market.py:117`) | gate 0 can certify RTH purity while the series actually traded contains pre/post bars; `_session_date` groups by **UTC** date, so an EST post-market bar ≥ 19:00 ET lands on the *next* session and corrupts its opening range | filter `session == "rth"` in the loader (or assert purity and raise) | Removes contaminating rows. Cannot admit a trade that the correct series would not admit. Ingest discipline is policy; this is code. |
+| **B8** *(new)* | `portfolio_metrics.py:97` sums `bars_held` into `exposure_days`; `:119` clamps `exposure` at 1.0; `:110` `ann_factor = sqrt(trades_per_year)` | gate 7's evidence would report 100 % exposure for a strategy flat overnight, and annualise ~1,500 trades/yr against SPY buy-and-hold | horizon-aware `exposure_days` (`bars_held × bar_minutes / 390`) **reported as a diagnostic**; gate 7's pass/fail construction unchanged pending Q5 | Reporting only. Changing gate 7's construction is **out of scope** — it is the operator's open item (`MAP.md` §0.2). |
+| **B9** *(new, §A.2)* | `cli.py:622-659` `ingest-intraday` offers only trailing `--days`; adapter rejects `next_url` (`massive.py:186`) | no CLI entry point for a dated backfill; a ten-year window in one request | add `--since/--until`, and calendar chunking inside the intraday adapter | New capability, no gate touched. |
+| **B10** *(new, §A.2)* | `cli.py:1282-1305` `evaluate-promotion --dataset` accepts three fixed names only | the keyed intraday snapshot cannot be selected from the CLI | add `--dataset-key`, or drive `evaluate_promotion(..., dataset_snapshot=...)` (`promotion.py:483-491`) from a script | Plumbing; prevents the silent-attach hazard below. |
 
-Two further defects are **reporting**, not gate, problems, listed for disclosure rather
-than as blockers: `research/portfolio_metrics.py:97` sums `bars_held` into `exposure_days`
-(15-minute bars counted as days) and `:119` clamps `exposure` at 1.0, so gate 7's evidence
-blob would report 100% exposure for a strategy that is flat overnight; and `_resolve_exit`
-(`engine.py:152-184`) has no session-boundary awareness — see the leash defect in §5.
+**Reconciliation of B2 with §7 (judge defect J1-5).** Gate 6 buckets trades by the
+**daily regime label of the session the trade was entered in**. That is a
+*descriptive coverage* statistic computed after the fact by the evaluator — it is not
+a signal the strategy reads, so bucketing on session *D* is **not** a lookahead.
+The strategy's own gate is different: it *does* read *D*'s regime while *D* is being
+traded, and that **is** a lookahead (§7). The two must be allowed to disagree: after
+the v0.2.0 regime lag, a trade taken on the *D−1* label is still bucketed by the *D*
+label. **Requirement:** the gate-6 evidence blob must state which session's label it
+buckets on, so the asymmetry is visible in the audit record rather than inferred.
 
-### 2.4 Data-pipeline requirements (the part that costs money and time)
+### 2.4 Data-pipeline requirements
 
 | Item | Requirement | Evidence / basis |
 |---|---|---|
-| Adapter | a real `MassiveAdapter.fetch_intraday_bars` satisfying `IntradayBarAdapter` (`adapters/base.py:138-149`), declaring `AdapterCapability(feed_type=FeedType.BAR_INTRADAY, latency_category=DELAYED, rate_limit_per_min=5)` | FACT: `massive.py:86-100` declares **only** `BAR_DAILY`; the only `BAR_INTRADAY` capability in the repo is the test fixture (`adapters/fixture/__init__.py:79`) |
-| Endpoint | `/v2/aggs/ticker/{sym}/range/15/minute/{from}/{to}?adjusted=true&sort=asc&limit=50000` | FACT: the daily path uses the same family at `massive.py:178`; the entitlement probe uses `/range/5/minute/` (`entitlements.py:252-254`) |
-| Pagination | the daily adapter **rejects** any response carrying `next_url` (`massive.py:186`); an intraday adapter must chunk by calendar instead | FACT |
-| Bar size | **15 m**, not 5 m | FACT: `config/research.py:303 intraday_bar_size = "15m"`; `backtest_runner.py:180` default; and the strategy's own guard `session_bar_count + time_stop_bars > 26 + or_bars` (`intraday_orb.py:97`) is written against a **26-bar** session = 390 RTH minutes ÷ 15 |
-| Session filter | ingest **RTH only** (`session="rth"`) **and** filter at load (B7) | FACT: `load_intraday` (`series.py:105-136`) filters neither `session` nor `is_simulated`; `_session_date` (`features/intraday.py:19-21`) groups by **UTC** date, so (i) a 04:00 ET pre-market bar becomes the "opening range" and (ii) under EST a post-market bar starting ≥ 19:00 ET falls on the *next* UTC date and corrupts that session's range |
-| Ingest entry point | `ingest_intraday_symbol` / `ingest_intraday_universe` (`ingest.py:455-489`, `:527-542`) and `signalforge ingest-intraday` (`cli.py:622-659`) already exist and write `OHLCVIntraday` | FACT — no new ingest code is needed, but `cli.py:640-642` exits if the adapter has no `fetch_intraday_bars`, which today it does not |
-| Snapshot key | a **new, explicit** key `universe_24_ex_meta_intraday_15m`, plus the B8 CLI path to mint it | FACT: `DataSnapshot` (`db/models/research.py:224-249`) has **no bar-size or horizon column**; see B8 for the silent-attachment hazard. Verify the key against both auto-generators (`universe_auto_*`, `promotion.py:339`; `liquid_us_<date>_<digest>`, `screen.py:259`) — FACT (queried): ten `data_snapshot` rows exist today, ids 1–10 |
-| Concurrency | schedule the backfill in a maintenance window with the worker stopped | a live paper probation and a background worker run against `data/signalforge.sqlite`; a 0.8–1.6 M-row insert inside a sticky write-intent session is exactly the contention the project's SQLite rules exist to avoid |
+| Adapter | a real `MassiveAdapter.fetch_intraday_bars` satisfying `IntradayBarAdapter` (`adapters/base.py:138-149`), declaring `AdapterCapability(feed_type=BAR_INTRADAY, latency_category=DELAYED, rate_limit_per_min=5)` | FACT: `massive.py:86-100` declares **only** `BAR_DAILY` with `END_OF_DAY`; the only `BAR_INTRADAY` capability in the repo is the test fixture (`adapters/fixture/__init__.py:79`) |
+| Endpoint | `/v2/aggs/ticker/{sym}/range/15/minute/{from}/{to}?adjusted=true&sort=asc&limit=50000` | FACT: the daily path uses the same family (`massive.py:178`); the entitlement probe uses `/range/5/minute/` (`entitlements.py:252-254`) |
+| Pagination | the daily adapter **rejects** any response carrying `next_url` (`massive.py:186`); an intraday adapter must chunk by calendar (B9) | FACT |
+| Bar size | **15 m**, not 5 m | FACT: `config/research.py:303`; `backtest_runner.py:180` default; the strategy's own guard `session_bar_count + time_stop_bars > 26 + or_bars` (`intraday_orb.py:97`) is written against a 26-bar session = 390 RTH min ÷ 15 |
+| Session filter | ingest **RTH only** *and* filter in the loader (**B7**) | FACT as above |
+| Ingest entry point | `ingest_intraday_symbol` / `ingest_intraday_universe` (`ingest.py:455-489`, `:527-542`) exist and write `OHLCVIntraday`; **the CLI does not expose a dated backfill** (B9) | FACT |
+| Snapshot key | a **new, explicit** key `universe_24_ex_meta_intraday_15m` | FACT: `DataSnapshot` has **no bar-size or horizon column**; an unkeyed call matches any reusable snapshot on an exact symbol-set match (`promotion.py:331-337`), so an unkeyed intraday run on the 24 ex-META symbols would silently attach to **snapshot id 3** — the daily snapshot the two live approvals sit on. A distinct key with the same symbol set is accepted by the key branch (`:309-329`). Verify the key against both auto-generators (`universe_auto_*`, `:339`; `liquid_us_<date>_<digest>`, `screen.py:259`) |
+| Concurrency | maintenance window, worker stopped | a live paper probation and a background worker run against `data/signalforge.sqlite`; a 0.3–1.6 M-row insert under a sticky write-intent session is exactly the contention the project's SQLite rules exist to avoid |
 
 ---
 
 ## 3. Pre-sealed evidence, with standard errors
 
-All computations use **only** the pre-sealed span `2016-10-17 … 2025-09-07`, source
-`massive`, or pure code arithmetic. `STRATEGY_COMPLETION_MAP.md` §0.3 supplies **no**
-per-trade `sd` for version 1 (it has never been evaluated past gate 0), so where an `sd`
-is needed the result is stated **as a function of `sd`** over the program's observed range
-0.807–1.741 rather than invented.
+All computations use **only** pre-sealed data (`2016-10-17 … 2025-09-07`, source
+`massive`) or code arithmetic. `MAP.md` §0.3 supplies **no per-trade `sd` for
+version 1** (it has never been evaluated past gate 0), so every `sd`-dependent result
+is stated **as a function of `sd`** over the program's observed range 0.807–1.741
+rather than invented. Proportions carry binomial SEs; a difference under 2 SE is not
+evidence.
 
-### 3.1 The regime gate is shut on 93% of bear sessions (decisive for gate 6)
+### 3.1 The regime gate and the bear bucket — corrected for `allow_short`
 
-FACT — recomputed **independently for this synthesis** in-process (read-only):
-`label_regimes(SPY)` (gate 6's labeller, `backtest/regime.py`) crossed with
-`regime_lookup(SPY).risk_off` (the strategy's own gate, `research/regime.py:41-42`).
-Proxy: 2,234 SPY sessions, 2016-10-17 → 2025-09-05.
+**FACT (recomputed independently for this document, in-process, read-only):**
+`label_regimes(SPY)` (gate 6's labeller) crossed with `regime_lookup(SPY).risk_off`
+(the strategy's own gate), pre-sealed span, source `massive`:
 
-| gate-6 bucket | labelled sessions | tradeable (`not risk_off`) | share ± SE |
-|---|---|---|---|
-| bull | 1,392 | 1,024 | 73.56% ± 1.18% |
-| **bear** | **267** | **19** | **7.12% ± 1.57%** |
-| range | 375 | 116 | 30.93% ± 2.39% |
-| warmup (unbucketable, map §0.6) | 200 | 178 | 89.00% ± 2.21% |
+| gate-6 bucket | labelled sessions | **long-tradeable** (`not risk_off`) | **short-eligible** (`risk_off`) | long share ± SE |
+|---|---|---|---|---|
+| bull | 1,392 | 1,024 | 368 | 73.56 % ± 1.18 % |
+| **bear** | **267** | **19** | **248** | **7.12 % ± 1.57 %** |
+| range | 375 | 116 | 259 | 30.93 % ± 2.39 % |
+| warmup (unbucketable, §0.6) | 200 | 178 | 22 | 89.00 % ± 2.21 % |
 
-The load-bearing contrast — bear 7.12% ± 1.57% against bull 73.56% ± 1.18% — is roughly
-**34 SE**, far past the 2 SE bar. Bear sessions are 267/2,034 = **13.13% ± 0.75%** of
-labelled pre-sealed sessions, reproducing `diagnostics/v6_regime_power.md`'s 267 / 11.95%
-(the latter over all 2,234 sessions including warmup) exactly.
+Cross-check: 267 bear-labelled sessions and 267/2,234 = 11.95 % reproduce
+`v6_regime_power.md` exactly on an independently written computation. Bear sessions
+are 13.13 % ± 0.75 % of the 2,034 **labelled** pre-sealed sessions. The 19
+long-tradeable bear sessions are 3 in Oct–Nov 2020 and 16 in Feb–Jun 2023; none
+after 2023-06-02.
 
-FACT — the 19 tradeable bear sessions, in full: 2020-10-28, 2020-10-30, 2020-11-02;
-2023-02-02, -02-03, -02-06, -02-07, -02-08, -02-09, -02-10, -02-13, -02-14, -02-16,
--02-17; 2023-05-16, -05-24, -05-31; 2023-06-01, 2023-06-02. **None after 2023-06-02.**
+**The correction (judge defects J1-1 / J2-1, both accepted).** `intraday_orb.py:105`
+gates the **LONG** branch on `not ctx.regime.risk_off`; `intraday_orb.py:116` opens a
+**SHORT** branch on `ctx.allow_short and close < or_lo and ctx.regime.risk_off`, and
+`spec()` declares `permits_short=True` (`:75`). The ladder is long-only **only
+because** `run_strategy_over_universe(..., allow_short: bool = False, ...)`
+(`backtest_runner.py:176`) is never passed `allow_short` at `promotion.py:586`,
+`promotion.py:386` or `sensitivity.py:148` — verified by reading all three call
+sites. `ResearchConfig.allow_short_candidates` defaults to `False`
+(`config/research.py:296`), is operator-togglable from the dashboard
+(`app/routers/dashboard.py:332`, `app/templates/settings.html:40`) and **is** passed
+on the live scan path (`research/scan.py:271`, `cli.py:903`) — so the ladder and the
+live scanner do not agree on this flag.
 
-**Disclosed long-only dependency (J1-4).** FACT: the ladder runs `allow_short=False`
-(`backtest_runner.py:176`, never passed at `promotion.py:386`/`:586`), while
-`intraday_orb.py:116` takes shorts precisely when `ctx.allow_short and close < or_lo and
-ctx.regime.risk_off`. Measured for this synthesis: **248** of the 267 bear-labelled
-sessions are risk-off, i.e. short-eligible and long-ineligible. The 19-session ceiling is a
-property of the long-only ladder, not of the market. FACT: the operating path does thread
-the flag (`scan.py:271`, `cli.py:903`) from `config/research.py:296
-allow_short_candidates = False`. Turning it on would change the evidence base and requires
-its own pre-registration; it is added to F1 as a falsifier.
+**Pre-registered run configuration: `allow_short = False`**, matching the ladder's
+current hard-wired behaviour and the config default. Enabling shorts is a
+**variant** under R5 (it changes which trades exist, hence every gate), needs its own
+pre-registration and its own budget line, and is raised as **Q6**.
 
-### 3.2 History depth is forced by gate 6, not by gate 0
+### 3.2 History depth — forced by gate 6, and by which configuration
 
-Tradeable (`not risk_off`) sessions by gate-6 bucket, as a function of pre-sealed start.
-`label_regimes` labels the first `TREND_LOOKBACK = 200` sessions `"warmup"`
-(`backtest/regime.py:20, 36-37`), so a later start swallows real regime sessions into the
-warmup hole. (Table from the proposal; both judges reproduced it and I reproduced the
-2016-10-17 row exactly in §3.1.)
+Sessions by gate-6 bucket as a function of pre-sealed start date. `label_regimes`
+labels the first `TREND_LOOKBACK = 200` sessions `"warmup"` (`backtest/regime.py:20,
+36-37`), so a later start swallows real regime sessions into the warmup hole.
+**FACT (recomputed for this document at both pre-sealed ends, 2025-09-06 and
+2025-09-07 — identical at every start date):**
 
-| pre-sealed start | sessions | bull | **bear** | range | warmup |
+| pre-sealed start | sessions | bull L / S | **bear L / S** | range L / S | warmup L / S |
 |---|---|---|---|---|---|
-| 2016-10-17 (parity with the daily program) | 2,234 | 1,024 | **19** | 116 | 178 |
-| 2018-09-10 | 1,757 | 822 | **19** | 71 | 161 |
-| 2019-09-09 | 1,507 | 707 | **19** | 65 | 95 |
-| 2020-09-08 | 1,255 | 493 | **16** | 65 | 200 |
-| 2021-09-08 | 1,003 | 400 | **16** | 62 | 94 |
-| 2022-09-08 | 751 | 348 | **0** | 31 | 200 |
-| 2023-09-08 | 500 | 139 | **0** | 4 | 177 |
-| 2024-09-22 (shortest gate-0-legal span) | 239 | 39 | **0** | 0 | 108 |
+| 2016-10-17 (parity with the daily program) | 2,234 | 1,024 / 368 | **19 / 248** | 116 / 259 | 178 / 22 |
+| 2018-09-10 | 1,757 | 822 / 260 | **19 / 212** | 71 / 173 | 161 / 39 |
+| 2019-09-09 | 1,507 | 707 / 208 | **19 / 167** | 65 / 141 | 95 / 105 |
+| 2020-09-08 | 1,255 | 493 / 179 | **16 / 167** | 65 / 135 | 200 / 0 |
+| 2021-09-08 | 1,003 | 400 / 115 | **16 / 123** | 62 / 87 | 94 / 106 |
+| 2022-09-08 | 751 | 348 / 115 | **0 / 18** | 31 / 39 | 200 / 0 |
+| 2023-09-08 | 500 | 139 / 100 | **0 / 18** | 4 / 39 | 177 / 23 |
+| **2024-09-22** (shortest gate-0-legal span) | 239 | 39 / 0 | **0 / 0** | **0 / 0** | 108 / 92 |
 
-DERIVED, and this is the hardest requirement in the document:
+L = long-tradeable (`not risk_off`), S = short-eligible (`risk_off`). Under
+`allow_short=True` a bucket's usable supply is L + S, i.e. **every labelled session**.
+
+**DERIVED, and this is the single hardest requirement in the document:**
 
 - The **shortest span gate 0 will accept** is 716 calendar days
   (`sealed_start = end − 365`; `pre_sealed_end = sealed_start − 1`;
-  `(pre_sealed_end − start).days ≥ MIN_PRESEALED_DAYS = ceil(200 × 365.25/252) + 60 = 350`
-  — `promotion.py:90-94`, `:559`). For `end = 2026-09-08` that is `start ≤ 2024-09-22`. At
-  that start **39 of 239** pre-sealed sessions are labelled and every one is `bull_lowvol`:
-  bear = 0 and range = 0, so gate 6 (`≥ 10 trades in each of 3 buckets`,
-  `config/research.py:109-110`) is **arithmetically unreachable** no matter how good the
-  strategy is.
-- Any start on or after **2022-09-08** yields **0** tradeable bear sessions.
-- A start of **2021-09-08** recovers the 16 Feb–Jun 2023 sessions; **2019-09-09** or
-  earlier recovers all 19.
+  `(pre_sealed_end − start).days ≥ MIN_PRESEALED_DAYS = ceil(200 × 365.25/252) + 60 =
+  350` — `promotion.py:94`, `:556-559`). For `end = 2026-09-08` that is
+  `start ≤ 2024-09-22`. At that start only **39 of 239** sessions are labelled and
+  every one is `bull_*`: **bear = 0 and range = 0 under *both* configurations**, so
+  gate 6 (`≥ 10 trades in each of 3 buckets`) is **arithmetically unreachable** no
+  matter how good the strategy is. **Option A is dead under every configuration.**
+- Under the pre-registered **long-only** configuration: any start on or after
+  2022-09-08 yields **0** tradeable bear sessions; 2021-09-08 recovers 16;
+  2019-09-09 or earlier recovers all 19. **Minimum viable depth: 2021-09.**
+- Under `allow_short=True`: 2022-09-08 already yields 18 short-eligible bear
+  sessions. **Minimum viable depth: 2022-09** — so the *configuration*, not the
+  calendar, sets two of the three depth options apart.
 
-**So the intraday backfill must reach back to at least 2021-09, and to 2016-10 for parity
-with the daily program. "Two years of intraday bars" is not a viable option.**
+**So the backfill must reach back to at least 2021-09 under the pre-registered
+configuration, and to 2016-10 for parity with the daily program. "Two years of
+intraday bars" is not a viable option under any configuration.**
 
 ### 3.3 Data volume, API budget and storage
 
-DERIVED. Symbols = the 24 of snapshot 3 (`universe_24_ex_meta`, the only universe on which
-gate 8 passes — map §0.1); RTH bars/session = 26 at 15 m, 78 at 5 m. Extended-hours figures
-are shown because the provider returns them unless the window is filtered, and §2.4 / B7
-require they be dropped.
+DERIVED. Symbols = the 24 of snapshot 3 (`universe_24_ex_meta`, the only universe on
+which gate 8 passes — `MAP.md` §0.1); RTH bars/session = 26 at 15 m, 78 at 5 m.
 
-| Option | Span | Sessions/sym | 15 m RTH rows | 15 m incl. pre/post | 5 m RTH rows | API calls (yearly × 24) | Paced wall-clock |
-|---|---|---|---|---|---|---|---|
-| **A** minimum legal | 2024-09-22 → 2026-09-08 | 491 | 306,384 | 754,176 | 919,152 | 48 | 9.7 min |
-| **B** bear-coverage minimum | 2021-09-08 → 2026-09-08 | 1,255 | 783,120 | 1,927,680 | 2,349,360 | 120 | 24.2 min |
-| **C** parity with the daily program | 2016-10-17 → 2026-09-08 | 2,486 | 1,551,264 | 3,818,496 | 4,653,792 | 240 | **48.4 min** |
+| Option | Span | Sessions/sym | 15 m RTH rows | API calls (yearly chunks × 24) | Paced wall-clock |
+|---|---|---|---|---|---|
+| **A** minimum legal (**dead**, §3.2) | 2024-09-22 → 2026-09-08 | 491 | 306,384 | 48 | 9.7 min |
+| **B** minimum viable depth | 2021-09-08 → 2026-09-08 | 1,255 | 783,120 | 120 | 24.2 min |
+| **C** parity with the daily program | 2016-10-17 → 2026-09-08 | 2,486 | 1,551,264 | 240 | **48.4 min** |
 
 Basis: pacing 12.1 s/request (`massive.py:39-40 _MIN_REQUEST_SPACING_S = 12.1`;
-`config/settings.py:53` same default; Basic plan 5 req/min). Same order as W1's
-pre-registered daily build (126 calls / ~25 min,
-`diagnostics/w1_universe_preregistration.md:275-276`). Yearly chunking keeps every request
-under the 50,000-row cap even with extended hours (252 × 192 = 48,384 at 5 m).
+Basic plan 5 req/min). Same order as W1's pre-registered daily build (126 calls /
+~26 min, `w1_universe_preregistration.md`). Yearly chunking keeps every request under
+the 50,000-row cap even with extended hours (252 × 192 = 48,384 at 5 m).
 
-**Storage — stated as added bytes and resulting multiple separately, per option (J2-9).**
-FACT (measured, `dbstat`, read-only): `ohlcv_daily` plus its five indexes occupy
-355,749,888 B for 1,036,162 rows = **343 B/row**. FACT (queried): the database file is
-**381,739,008 B (0.382 GB)** and `ohlcv_intraday` holds **0 rows**. `OHLCVIntraday` carries
-two extra short string columns and a different index set, so ±20% is the honest band.
+**Storage — one table, both conventions (judge defect J2-7).** FACT (measured,
+`dbstat`, read-only): `ohlcv_daily` plus its five indexes occupy 355,749,888 B for
+1,036,162 rows = **343 B/row**; the whole database is **381,739,008 B = 0.382 GB**;
+`ohlcv_intraday` holds **0 rows**. `OHLCVIntraday` carries two extra short string
+columns and a different index set, so ±20 % on the per-row figure.
 
-| Option C variant | rows | added | resulting file | resulting multiple |
+| Variant | rows | **added** | **final file** | **final multiple** |
 |---|---|---|---|---|
-| 15 m, RTH only (**recommended if proceeding**) | 1,551,264 | ~0.53 GB | ~0.91 GB | **~2.4×** |
-| 15 m, pre/post kept | 3,818,496 | ~1.31 GB | ~1.69 GB | ~4.4× |
-| 5 m, RTH only | 4,653,792 | ~1.60 GB | ~1.98 GB | ~5.2× |
+| B, 15 m, RTH only | 783,120 | 0.27 GB | 0.65 GB | **1.70×** |
+| **C, 15 m, RTH only (recommended if proceeding)** | 1,551,264 | **0.53 GB** | **0.91 GB** | **2.39×** |
+| C, 15 m, pre/post kept | 3,818,496 | 1.31 GB | 1.69 GB | 4.43× |
+| C, 5 m, RTH only | 4,653,792 | 1.60 GB | 1.98 GB | 5.18× |
 
 ### 3.4 Compute cost of one promotion evaluation
 
-FACT (measured by the proposal on synthetic in-memory series, no DB; mechanism verified
-here at `features/intraday.py:38` and `series.py:40-51`): `run_backtest` with
-`signal_fn_for(IntradayORB())` on 15-minute bars is cleanly quadratic — 1,560 bars 0.06 s;
-3,120 bars 0.24 s; 6,552 bars 1.03 s; 13,104 bars 4.11 s; fit `t ≈ 2.394 × 10⁻⁸ · n²`
-s/symbol.
+FACT (measured by the proposal on synthetic in-memory series, no DB): `run_backtest`
+with `signal_fn_for(IntradayORB())` on 15-minute bars is cleanly quadratic —
+1,560 bars 0.06 s; 3,120 bars 0.24 s; 6,552 bars 1.03 s; 13,104 bars 4.11 s; fit
+`t ≈ 2.394 × 10⁻⁸ · n²` s/symbol. Mechanism: `opening_range` rescans `range(t+1)`
+(`features/intraday.py:39`) and `series.head(t)` copies the `dates` tuple
+(`series.py:45`). **A second, independent replicate by the impact judge reproduced
+the quadratic shape ~10 % faster at every point.** The figures below therefore carry
+an explicit **±15 % hardware band** and are extrapolations from ≤ 13,104 bars up to
+58,084, not measurements.
 
-DERIVED, 24 symbols, one complete evaluation = 1 pre-sealed pass + 9 gate-5 grid re-runs
-(`sensitivity.py:148`, one per grid point) + 1 sealed pass:
-
-| Option | bar size | pre-sealed bars/symbol | one pass | one full 10-gate evaluation |
+| Option | bar size | bars/symbol (pre-sealed) | one 24-symbol pass | one full 10-gate evaluation (1 + 9 grid + 1 sealed) |
 |---|---|---|---|---|
-| A | 15 m | 6,214 | 0.4 min | 0.07 h |
-| B | 15 m | 26,078 | 6.5 min | 1.1 h |
-| **C** | **15 m** | **58,084** | **32.3 min** | **5.4 h** |
-| C | 5 m | 174,252 | 290.7 min | 48.5 h |
+| B | 15 m | 26,078 | 6.5 min (5.5–7.5) | **1.1 h** (0.9–1.3) |
+| **C** | **15 m** | **58,084** | **32.3 min** (27–37) | **5.4 h** (4.6–6.2) |
+| C | 5 m | 174,252 | 290.7 min | **48.5 h** |
 
-**Declared limitation:** the fit is measured over 1,560–13,104 bars and extrapolated to
-58,084–174,252. The quadratic form is mechanistically justified and the four points fit
-cleanly, but the 5.4 h and 48.5 h figures are **extrapolations, not measurements**, and
-they exclude database load time. F4 is the kill test.
+Every re-evaluation, variant and sensitivity check pays this again. **B6 is a
+prerequisite, not an optimisation.**
 
-### 3.5 Entry-rate scale (HYPOTHESIS, order of magnitude only) and its sensitivity band
+### 3.5 Entry-rate and trade-count scale (HYPOTHESIS, order of magnitude only)
 
-FACT (code arithmetic, `intraday_orb.py:94, 97`): with `or_bars = 3`,
-`min_bars_before_entry = 3`, `max_bars_after_open = 20`, `time_stop_bars = 12`, entries are
-admissible only for `3 ≤ since_open ≤ 16` — a **14-bar** window in a 26-bar session.
+FACT (code arithmetic, `intraday_orb.py:94, 97`): with `or_bars=3`,
+`min_bars_before_entry=3`, `max_bars_after_open=20`, `time_stop_bars=12`, entries are
+admissible only for `3 ≤ since_open ≤ 16` — a 14-bar window in a 26-bar session.
+FACT (§A.2): `engine.py:150` sets `t = exit_idx + 1`, so **at most 2 trades per
+symbol-session** are structurally possible.
 
-HYPOTHESIS (synthetic geometric-random-walk 15 m series, **not** market data): the entry
-rate is **≈ 0.42** trades per symbol-session. **The `± 0.04` the proposal attached is the
-sampling error of the simulation, not uncertainty about the real rate, and is dropped**
-(J1-10/J2-5) — a geometric random walk has neither volatility clustering nor opening-range
-persistence, which are precisely the properties that set an ORB entry rate. DERIVED at
-that rate on option C: pre-sealed trades ≈ 1,337 tradeable sessions × 24 × 0.42 ≈
-**13,500**; OOS ≈ **5,400**; bear-bucket trades ≈ 19 × 24 × 0.42 ≈ **190**.
+**HYPOTHESIS, restated per judge defect J2-5.** The proposal's synthetic
+geometric-random-walk estimate was 0.42 trades/symbol-session quoted with a
+*sampling* SE of ±0.04; an independent replicate at σ = 15 bps/bar returned
+0.633 / 0.692 / 0.766 / 0.764 at 60 / 120 / 252 / 504 sessions — 5–9 of those SEs
+away. The dispersion is driven by the synthetic's volatility parameter, not by
+sampling, so **the SE is withdrawn**. The pre-registered working bracket is
 
-**Rate-sensitivity band (J2-5), pre-registered so §5's labels can be audited.** OOS
-symbol-sessions on option C ≈ 0.4 × 1,337 × 24 = **12,835**.
+> **entry rate ∈ [0.4, 0.8] trades per symbol-session, hard ceiling 2, synthetic,
+> not market data, to be replaced by a measurement on real bars before any gate
+> forecast is relied upon.**
 
-| Forecast | flips below an entry rate of |
-|---|---|
-| gate 2 (≥ 30 OOS trades) passes | **0.0023** /symbol-session |
-| gate 5's 15-per-cell floor is non-binding | **0.0012** |
-| gate 6's bear bucket (≥ 10, over 19 × 24 = 456 symbol-sessions) clears | **0.0219** |
-
-| entry rate | OOS n | gate-4 iid hurdle (sd 1.420) | at `deff` 3 |
-|---|---|---|---|
-| 0.42 | 5,391 | +0.0579R | +0.0857R |
-| 0.25 | 3,209 | +0.0691R | +0.1051R |
-| 0.10 | 1,284 | +0.0977R | +0.1546R |
-| 0.05 | 642 | +0.1299R | +0.2103R |
-
-Gates 2 and 5 survive as "pass" over essentially the whole plausible band. **Gate 6's bear
-bucket is the fragile one**: it needs the realised rate to exceed 2.19% per symbol-session,
-and it is the only forecast in §5 whose label the synthetic rate does real work to support.
-Gate 4's label depends on the rate *and* on the design effect, which is why §5 withdraws
-"not power-limited".
+DERIVED at that bracket on option C, long-only (1,337 tradeable sessions × 24):
+pre-sealed trades **12,800–25,700**; OOS (~40 %) **5,100–10,300**; bear-bucket trades
+**182–365** (ceiling 912). Every count in §5 is **order-of-magnitude only**, and §5's
+gate-6 conclusion is carried on the parameter-free threshold instead (§5).
 
 ---
 
-## 4. Falsification — stated in advance, cross-snapshot status given for every item
+## 4. Falsification — stated in advance, on all four snapshots (R10)
 
-Per R10 each condition must be stated to hold across snapshots 1–4. The structural reason
-most are snapshot-invariant: gate 6's labels and the strategy's regime gate both derive
-from the **SPY proxy alone**, which is identical in all four snapshots (they differ only by
-`META` / `META_CONT` / its absence). The proposal verified this rather than asserting it —
-recomputing §3.2 with snapshot 1's pre-sealed end (2025-09-06) and snapshots 2–4's
-(2025-09-07) returns identical counts at every start date.
+**Why most of these are snapshot-invariant, verified rather than asserted.** Gate 6's
+labels and the strategy's regime gate both derive from the **SPY proxy alone**, which
+is identical in all four snapshots (they differ only in `META` / `META_CONT` / its
+absence). Recomputing §3.1/§3.2 at snapshot 1's pre-sealed end (2025-09-06) and at
+snapshots 2–4's (2025-09-07) returns **identical** counts at every start date. F3,
+F4 and F6 run over the *symbol set*, so they are stated explicitly for the 25-symbol
+snapshots too (judge defect J1-8).
 
-| # | Claim | What kills it (pre-sealed only) | Cross-snapshot status |
+| # | Claim | What kills it (pre-sealed only) | Four-snapshot statement |
 |---|---|---|---|
-| **F1** | A pre-sealed span starting on/after 2022-09-08 has **zero** long-tradeable bear sessions, so gate 6 is unreachable at that depth | any snapshot on which that span yields ≥ 1 session that is `bear_*` under `label_regimes` **and** `not risk_off` under `regime_lookup`; **or** the evaluation being run with `allow_short=True` / `config/research.py:296 allow_short_candidates` turned on, which opens the 248 short-eligible bear sessions (`scan.py:271`) | **Verified false on all four** (SPY-proxy-driven; identical counts at both pre-sealed end dates) |
-| **F2** | Gate 6 returns `0/0/0` with 100% unbucketed for **any** intraday run of the *current* promotion path | any intraday gate-6 evidence blob with a non-zero bucket before B2 lands | **Snapshot-invariant** — a type-level property of `promotion.py:744` vs `backtest/regime.py:25`, independent of universe |
-| **F3** | Cost is ≥ 0.1375R per round trip at the frozen 11.0 bps | measuring, after ingest, a **median engine risk unit `d = entry_fill − or_lo` > 0.80% of price** across the 24 symbols pre-sealed. *(Restated on `d`, not `w`, per §A.3(a).)* Pre-sealed anchor: median mean daily `(H−L)/C` = 1.579% (min 1.090% DIA, max 3.663% NVDA) — F3 fails only if the first 45 RTH minutes plus the breakout extension routinely exceed half the day's whole range | **Snapshot-3 symbol set only, and necessarily so:** no other snapshot can carry an intraday snapshot — META has no intraday backfill plan and `META_CONT` is `continuity_bridge:1`-sourced, which fails gate 8 outright (map §0.1). Stated as a scope limit, not a gap |
-| **F4** | One full 10-gate evaluation on option C at 15 m exceeds 2 h before B6 | a measured single 24-symbol pre-sealed pass completing in under 12 min | **Snapshot-agnostic**: compute scales with symbols × bars²; 25 vs 24 symbols moves it ~4% |
-| **F5** | Live execution cannot reproduce the modelled next-bar-open fill on this entitlement | an entitlement probe recording `latency_category = REALTIME` for any equities feed, or adoption of a bar size strictly greater than the measured feed delay | **Snapshot-independent** (a provider fact) |
-| **F6** | The strategy's own regime gate, not the market, produces the bear shortfall | fewer than 10 trades across 24 symbols on the 19 tradeable bear sessions — which would move the diagnosis from "gate shut" to "no signal" and *strengthen* the null option | **Snapshot-invariant** (same 19 SPY-derived sessions on all four) |
-| **F7** *(new)* | Any evaluation that clears gate 0 irreversibly creates and locks version 1's first `strategy_sealed_test` row | finding any early return, guard or skip between the gate-0 block and `promotion.py:838`; or a run that clears gate 0 and leaves `strategy_sealed_test` unchanged for `(version 1, that snapshot)` | **Snapshot-independent** — verified today: the only `return _finalize` sites are `:522`, `:571`, `:893` |
+| **F1** | Under the pre-registered `allow_short=False` configuration, a pre-sealed span starting on/after 2022-09-08 has **zero long-tradeable bear sessions**, so gate 6 is unreachable at that depth | any snapshot on which that span yields ≥ 1 session that is `bear_*` under `label_regimes` **and** `not risk_off` under `regime_lookup` | Verified false on all four (SPY-proxy derived; identical at both pre-sealed ends). **Explicitly conditional:** under `allow_short=True` F1 is *already false* (18 short-eligible bear sessions) — that is a configuration change, not a falsification |
+| **F1b** | The shortest gate-0-legal span (start 2024-09-22) has 0 bear **and** 0 range **labelled** sessions, so option A is dead under *every* configuration | ≥ 1 `bear_*` or `range_bound` label in that span on any snapshot | Verified false on all four |
+| **F2** | Gate 6 returns `0/0/0` with 100 % unbucketed for **any** intraday run of the current promotion path | any intraday gate-6 evidence blob with a non-zero bucket before B2 is applied | Type-level (`datetime` key vs `date` key), so snapshot-independent by construction |
+| **F3** | Cost is ≥ 0.1375R per round trip at the frozen 11.0 bps | measuring, after ingest, a **median λ·w > 0.80 % of price** — where λ = (entry_fill − or_lo)/w and *w* is the OR width — across the universe on the pre-sealed span | Stated for **all four**: snapshot 3's 24 symbols and the 25-symbol sets of snapshots 1/2/4 (adding one mega-cap to a 24-name median moves it by at most one rank position; the pre-sealed anchor median daily (H−L)/C = 1.579 % is computed on the 24 and must be recomputed on the 25 before F3 is scored there) |
+| **F4** | One full 10-gate evaluation on option C at 15 m exceeds 2 h before B6 | a measured single 24-symbol pre-sealed pass completing in **under 40 % of the forecast for that hardware** (i.e. under ~13 min against a 32.3 min forecast) — stated as a ratio, not an absolute, because the forecast is hardware-dependent (J2-8) | Compute scales with symbol count: the 25-symbol snapshots cost 25/24 = 1.04× the 24-symbol figure; the ratio form is snapshot-invariant |
+| **F5** | Live execution cannot reproduce the modelled fill on this entitlement | an entitlement probe recording `latency_category = REALTIME` for any equities feed, or adoption of a bar size strictly greater than the measured feed delay | Entitlement is a plan property, independent of snapshot |
+| **F6** | The strategy's own regime gate, not the market, produces the bear shortfall | finding **< 10 trades across the universe on the 19 long-tradeable bear sessions** — which would move the diagnosis from "gate shut" to "no signal" and would **strengthen** the null option | Stated for all four: 19 sessions × 24 symbols (snapshot 3) and 19 × 25 (snapshots 1/2/4); the session set is proxy-derived and identical |
+| **F7** *(new)* | Gate 4 is **not** an easy gate for this strategy once calendar clustering is admitted | measuring a session-block design effect `deff ≤ 1.2` on real intraday OOS trades (the program's daily strategies measure 2.55–4.86 at month blocks — `clustered_bootstrap_all.md` §3.1) | Diagnostic is computed per run; must be reported on whichever snapshot the run uses |
+| **F8** *(new)* | No admissible evaluation of v0.1.0 exists, because the same-session regime read is a lookahead | a demonstration that `regime_by_date` for session *D* is derivable from information available at 10:15 on *D* (it is not: `regime_lookup` labels *D* from *D*'s daily bar) | Plumbing-level, snapshot-independent |
 
-**If F1 or F3 falls, the §0 recommendation changes.** If F2, F4 or F7 falls, the
-corresponding bundle item is dropped. F5 is the operator's decision gate, not a research
-finding.
+**If F1 *and* F1b both fell, the depth recommendation changes. If F3 falls, the §0
+cost finding weakens materially and the recommendation changes. If F2, F4 or F7
+falls, the corresponding bundle item or caveat is dropped. F5 and F8 are blocking:
+neither is a research finding the pipeline can overturn.**
 
 ---
 
 ## 5. Gate-by-gate forecast
 
-Trade sets tagged per map §0.2: gates 2/3/4 read `full.out_of_sample`; gates 1/6/7 read
-`full.trades` (**all** pre-sealed, IS+OOS — including gate 7, whose docstring at
-`config/research.py:111-113` contradicts `promotion.py:775`). Forecasts assume the full
-bundle B1–B8 is applied and option C data exists; **without the bundle every gate 1–7 reads
-0 trades and fails, and gate 9 still runs and locks** (§A.1).
+Trade sets tagged per `MAP.md` §0.2: gates 2/3/4 read `full.out_of_sample`
+(`promotion.py:652`, `:679`); gates 1/6/7 read `full.trades` — **all** pre-sealed,
+IS+OOS — including gate 7, whose docstring (`config/research.py:111-113`) contradicts
+`promotion.py:775`. Forecasts assume the **full bundle** (§2.3) is applied, option C
+data exists, and the run is `allow_short=False`. **Without the bundle every gate 1–7
+reads 0 trades and fails** (verified).
 
 | Gate | Trade set | Forecast | Confidence |
 |---|---|---|---|
-| **0** `data_availability` | — | **Pass only under option B or C**, and only after §2.2. Fails on option A by (e) (window < 716 days) and passes (a)–(d) only on a complete, RTH-only, non-simulated, `massive`-sourced, calendar-correct backfill | FACT (arithmetic) |
-| **1** `rolling_walkforward` | all pre-sealed (~13,500) | **Pass on the trade-count conjunct** — ~3,400 trades/fold against a floor of 15 (`promotion.py:632`, the shared `sensitivity_min_grid_trades` constant). Whether 2 of 4 folds show `expectancy_r > 0` is the real test and is unforecastable | HYPOTHESIS |
-| **2** `min_oos_trades` | OOS (~5,400) | **Pass**, and robust: the label survives any entry rate above 0.0023/symbol-session (§3.5) — a factor of ~180 below the synthetic estimate. The only trivially satisfied gate | HYPOTHESIS on the rate; FACT on the mechanism |
-| **3** `net_expectancy` | OOS | **Expected FAIL — the binding gate.** Requires a gross edge exceeding a cost that lifts the break-even hit rate **4.6–14.7 pp** above the geometry's own random-walk baseline (§8), against **1.23 pp** for `trend_continuation`. The realised payoff ratio is additionally **strictly below** the nominal 1.5 (see the target/stop note below) | HYPOTHESIS on the edge; FACT on the cost half |
-| **4** `bootstrap_ci` | OOS | **"Not power-limited" is WITHDRAWN (J2-1).** The iid form `exp > 0.02 + 1.96·sd/√n` gives +0.0415R (sd 0.807) to +0.0665R (sd 1.741) at n ≈ 5,391 — but `diagnostics/clustered_bootstrap_all.md:130-155` measures month-block design effects of **2.55 / 3.04 / 4.86 / 2.60 / 2.66** for versions 2–6, and map §4.3 makes reporting them mandatory. An intraday run is the program's worst case for clustering: ~5,400 trades in ~535 OOS sessions across 24 symbols of which 15 are ETFs, several containing the others, so same-morning breakouts are near-replicates. Cluster-adjusted hurdles below | DERIVED |
-| **5** `parameter_sensitivity` | OOS per grid point | **Automatic FAIL today** (`promotion.py:694-703`: no `intraday_orb` grid). With §6's grid registered, 9 cells × ~5,400 OOS trades — the 15-trade floor never binds above a rate of 0.0012; positivity is the open question. Cost: 9 extra full passes (§3.4) | FACT on the current failure |
-| **6** `regime_coverage` | all pre-sealed | **FAIL today, unconditionally** (F2). After B2: unbucketed ≈ 178/1,337 = **13.3%** of tradeable sessions (the 200-session `label_regimes` warmup, map §0.6); bull ≈ 10,300, **bear ≈ 190**, range ≈ 1,170 at the §3.5 rate. Passes on option C or B; **arithmetically impossible on option A**. Bear is the binding bucket, its ceiling is calendar rather than skill, and its label is the most rate-fragile in this table (flips below 0.0219/symbol-session) | FACT on the mechanism; HYPOTHESIS on counts |
-| **7** `benchmark_comparison` | all pre-sealed | **"Unforecastable" is WITHDRAWN (J2-4): expected PASS, and uninformative.** FACT: `portfolio_metrics.py:110` sets `ann_factor = √(trades_per_year)` and `:111` `sharpe = (mean_r/std)·ann_factor`, while `_benchmark_metrics` (`promotion.py:216-238`) computes the SPY side as `cagr/ann_vol` — two different constructions. At ~1,500 trades/yr, √1,500 = 38.73 against SPY's pre-sealed Sharpe of 0.719 (map §2.1), gate 7 needs only `mean_r/std > 0.01856`: **exp > 0.015R** at sd 0.807, **+0.0186R** at 1.0, **+0.0264R** at 1.420, **+0.0323R** at 1.741 — *below* gate 4's own hurdle at every sd. Gate 7 provides **no independent check at this turnover**. `exposure` would also report a clamped 1.0 (`:119`) for a strategy flat overnight | FACT on the construction; DERIVED on the hurdle |
-| **8** `data_quality_and_leakage` | — | **Passes vacuously and misleadingly today** — `validate_daily` at `promotion.py:808` would validate the *daily* bars (which pass on snapshot 3) and say nothing about the intraday bars traded. Needs B3, and B7 before it (§A.3(e)). The leakage half is clean (§7) | FACT |
-| **9** `sealed_final_test` | sealed year | **Runs unconditionally once gate 0 passes and locks permanently** (§A.1). Needs ≥ 10 trades and expectancy ≥ 0R. Would be **version 1's first sealed test ever** (§10) | FACT on the mechanism |
-| **10** `live_paper_probation` | — | `health_monitor.enabled` is true so the gate passes — **but a pass is meaningless for this horizon**: `approved_scope_scan.approved_horizons` excludes INTRADAY (`approved_scope_scan.py:81`, policy comment `:19-22`) and `alerts/dispatch.py:241` skips INTRADAY (`continue  # never alert on intraday signals (EOD-only operation)`). No candidate and no alert could ever be produced | FACT |
+| **0** `data_availability` | — | **Pass only under option B or C**, and only after §2.2. Fails on option A by (e). Passes (a)–(d) only with a complete, RTH-only, `massive`-sourced, correctly-sized, fresh backfill | FACT (arithmetic) |
+| **1** `rolling_walkforward` | all pre-sealed (12,800–25,700) | **Trade-count conjunct passes trivially** — ~3,200–6,400 per fold against a floor of 15 (`promotion.py:632`, the shared `sensitivity_min_grid_trades` constant). Whether 2 of 4 folds show `expectancy_r > 0` is the real test and is unforecastable | HYPOTHESIS |
+| **2** `min_oos_trades` | OOS (5,100–10,300) | **Pass with enormous margin** (≥ 30). The only trivially satisfied gate | HYPOTHESIS on the rate; FACT on the mechanism |
+| **3** `net_expectancy` | OOS | **Expected FAIL — the binding gate.** Requires gross edge above 0.14R–0.37R/trade at λ = 1 (§8). Break-even hit rate **45.5 %** at c = 0.1375R, **48.8 %** at 0.22R, **54.7 %** at 0.3667R, against a **40.0 %** random-walk baseline for a nominal 1.5:1 bracket — and the *realised* payoff ratio is strictly below 1.5 (target measured from the signal close, stop at `or_lo`, fill at the next open) | HYPOTHESIS; the cost half is FACT |
+| **4** `bootstrap_ci` | OOS | **"Not power-limited" is WITHDRAWN (judge defect J2-2).** The hurdle is `exp > 0.02 + 1.96·sd·√deff/√n`, and the program's own diagnostic measures month-block `deff` of **2.55 / 3.04 / 4.86 / 2.60 / 2.66** for versions 2/3/4/5/6 (`clustered_bootstrap_all.md` §3.1), flipping gate 4 to FAIL for **both** currently PAPER_APPROVED strategies. An intraday ORB is the **most calendar-clustered trade set in the program** — up to 24 symbols entering inside the same 90-minute window of the same session. Effective independent units are ~1,337 pre-sealed sessions / ~535 OOS sessions (~108 / ~43 months), not 5,100–10,300 trades. At n = 5,400: **deff = 1** → hurdle +0.0415R (sd 0.807) to +0.0664R (sd 1.741); **deff = 2.5** → **+0.0540R to +0.0934R**; **deff = 4** → +0.0620R to +0.1126R. Required n = `deff·(1.96·sd/(exp − 0.02))²`. **Honest statement: gate 4's hurdle is unknown until a session-clustered `deff` is measured on real bars, and is structurally worse here than for any daily strategy** | DERIVED; `deff` is HYPOTHESIS (F7) |
+| **5** `parameter_sensitivity` | OOS per grid point | **Automatic FAIL today** (`promotion.py:694-703`: `_sensitivity_plan` returns `None` for this prefix). With §6's grid, 9 cells × thousands of OOS trades — the 15-trade floor never binds; positivity is the open question. Cost: 9 extra full passes (§3.4) | FACT on the current failure |
+| **6** `regime_coverage` | all pre-sealed | **FAIL today, unconditionally** (F2). After B2, long-only option C: unbucketed ≈ **178/1,337 = 13.3 % of tradeable sessions ≈ 1,700–3,400 trades** — the two coincide only if the per-session entry rate is uniform across warmup and labelled sessions, which is **assumed, not measured** (judge defect J2-6). Buckets ≈ bull 9,800–19,700, **bear 182–365**, range 1,110–2,230. Passes on option C or B; **arithmetically impossible on option A** | FACT on the mechanism; HYPOTHESIS on counts |
+| **7** `benchmark_comparison` | all pre-sealed | **Unforecastable and, as constructed, not comparable.** `ann_factor = sqrt(trades_per_year)` (`portfolio_metrics.py:110`) at ~1,500–3,000 trades/yr against SPY buy-and-hold is a different construction on the two sides, and `exposure` would report a clamped 1.0 (`:119`) for a strategy flat overnight. B8 reports the corrected exposure as a diagnostic; the gate's construction is Q5, the operator's open item | FACT on the construction |
+| **8** `data_quality_and_leakage` | — | **Passes vacuously and misleadingly today** — `validate_daily` (`promotion.py:808`) would validate the *daily* bars of the 24 symbols and say nothing about the intraday bars actually traded. Requires B3. The leakage half is clean for the three intraday features (§7) but **does not cover the regime plumbing**, which is where the real lookahead lives | FACT |
+| **9** `sealed_final_test` | sealed year | **Not forecast, and not to be run on v0.1.0** (§A, F8). Needs ≥ 10 trades and expectancy ≥ 0R | — |
+| **10** `live_paper_probation` | — | `health_monitor.enabled` is true, so the gate passes — **but a pass is meaningless for this horizon**: `approved_scope_scan.py:81` excludes INTRADAY (policy comment `:19-22`) and `alerts/dispatch.py:241` skips it, so no candidate and no alert could ever be produced. Note `ResearchConfig.enabled_horizons` *includes* INTRADAY (`config/research.py:297-302`) — the policy is inconsistent across surfaces (§A.2) | FACT |
 
-**Gate 4 restated as a required n, with the mandatory clustering correction.** Hurdle
-`= 0.02 + 1.96·sd·√(D/n)`; required `n = (1.96·sd/(exp − 0.02))²·D`. At n = 5,391:
+**Zero-margin cases (§4.2 item 5), corrected for units (judge defect J1-7).** Neither
+named case is touched: v6's gate-5 neighbour fraction (0.750 on snapshot 3, already
+failing at 0.500 on snapshot 4) and v5's bear bucket (11 against a floor of 10)
+belong to other versions and nothing here re-evaluates them. The **new** zero-margin
+case is `intraday_orb`'s bear bucket, and it must be stated in both units:
 
-| per-trade sd | iid (D = 1) | D = 2 | D = 3 | D = 4.86 (program max) | D = 10.08 (n_eff = OOS sessions) |
-|---|---|---|---|---|---|
-| 0.807 | +0.0415R | +0.0505R | +0.0573R | +0.0675R | +0.0884R |
-| 1.000 | +0.0467R | +0.0577R | +0.0662R | +0.0788R | +0.1047R |
-| 1.420 | +0.0579R | +0.0736R | **+0.0856R** | +0.1036R | +0.1403R |
-| 1.741 | +0.0665R | +0.0857R | +0.1005R | +0.1224R | +0.1675R |
+- **In gate 6's own units (trades):** ~182–365 bear trades against a floor of 10 — a
+  **18×–36× margin**, not zero margin.
+- **The genuinely zero-margin quantity is the SESSION SUPPLY:** **19** long-tradeable
+  bear sessions in nine pre-sealed years, the entire supply, zero after 2023-06-02,
+  and zero at any start on or after 2022-09-08. The floor of 10 clears only if the
+  realised entry rate exceeds **10 / (19 × 24) = 2.19 %** per symbol-session — a
+  parameter-free threshold that does not depend on §3.5's synthetic bracket. **This
+  is the form the gate-6 conclusion is carried on.**
 
-The last column takes the most conservative available clustering assumption, `n_eff` = the
-OOS **session** count (~535), which corresponds to `D = 10.08` at this n. **The corrected
-statement is: gate 4 passes only if gate 3 passes with roughly 0.06R–0.14R to spare, not
-0.05R.** A clustered bootstrap on the realised trades is a required post-ingest diagnostic
-(permitted under R4 as a stricter reported statistic, never a gate change).
-
-**Zero-margin cases (§4.2 item 5).** Neither named case is touched: v6's gate-5 neighbour
-fraction (0.750 on snapshot 3, already 0.500 on snapshot 4) and v5's bear bucket (11 against
-a floor of 10) belong to other versions and nothing here re-evaluates them. The **new**
-zero-margin case is `intraday_orb`'s own bear bucket: 19 tradeable bear sessions is the
-entire nine-year long-only supply, and the floor of 10 clears only if the realised entry
-rate exceeds `10/(19 × 24) = 2.19%` per symbol-session.
-
-**Two strategy-code defects found while forecasting (reported, not proposed as changes).**
-FACT: `intraday_orb.py:97` admits entries while `session_bar_count + time_stop_bars ≤
-26 + or_bars = 29`, i.e. `since_open ≤ 16`. In a 26-bar RTH session (bars 0–25) an entry at
-`since_open ∈ {14, 15, 16}` puts the 12-bar time stop at bars 26–28 — **after the close**.
-`_resolve_exit` (`engine.py:152-184`) has no session-boundary awareness, so those positions
-are carried **overnight** with the opposite opening-range edge as the stop, exposed to the
-gap. FACT: `target_price = close + target_range_mult × width` is measured from the signal
-*close* (`intraday_orb.py:108`) while the stop is `or_lo` and the fill is the next bar's
-open (`engine.py:107-109`), so the realised reward:risk is
-`m·w/(entry_fill − or_lo)`, which is **below** `m` whenever the fill lands above `or_hi`.
-**Both are out of scope here** — fixing either is behavioural and requires
-`VERSION = "0.2.0"` under R3/R7. They are recorded so no one reads a gate-3 failure as
-purely a cost effect, and so a future intraday design starts from them.
+**Two strategy-code defects found while forecasting (reported, not proposed).**
+FACT: `intraday_orb.py:97` admits entries while `since_open ≤ 16`; in a 26-bar
+session (bars 0–25) an entry at `since_open ∈ {14,15,16}` puts the 12-bar time stop
+at bars 26–28 — **after the close** — and `_resolve_exit` (`engine.py:152-184`) has
+no session-boundary awareness, so those positions are carried **overnight** with the
+opposite OR edge as the stop, exposed to the gap. FACT:
+`target_price = close + 1.5 × width` is measured from the signal *close* while the
+stop is `or_lo` and the fill is the next bar's *open*, so the realised reward:risk is
+`1.5w / (entry_fill − or_lo)`, below 1.5 whenever the fill is above `or_hi`. Both are
+**out of scope here** (each is behavioural → `VERSION = "0.2.0"`), recorded so that a
+future intraday design starts from them and so no one reads a gate-3 failure as a
+pure cost effect.
 
 ---
 
 ## 6. Sensitivity-grid plan (gate 5)
 
-§4.2 item 6 requires every parameter a change introduces to become a pre-registered axis.
-This design introduces no parameter, so the requirement resolves to R4 carve-out 1:
-**register the missing grid for a family that has none** — a genuine ±1-step neighbourhood
-around the shipped parameters, written down before any result is seen.
+§4.2 item 6 requires every parameter a change introduces to become a pre-registered
+axis. This design introduces no parameter, so the requirement resolves to R4's
+carve-out 1: **register the missing grid for a family that has none** — a genuine
+±1-step neighbourhood around the shipped parameters, written down before any result
+is seen.
 
 **Pre-registered now, before any intraday bar exists** (`promotion.py:161-210`, a new
 `key.startswith("intraday_orb")` branch returning a factory over `ORBParams`):
@@ -624,210 +599,202 @@ around the shipped parameters, written down before any result is seen.
 {"or_bars": [2, 3, 4], "target_range_mult": [1.25, 1.5, 1.75]}
 ```
 
-Rationale, in advance: `or_bars` is the definitional parameter of an opening-range breakout
-— it sets both the range and, via `26 + p.or_bars`, the entry-window guard
-(`intraday_orb.py:97`); `target_range_mult` sets the payoff ratio that §8's break-even hit
-rate turns on. Coverage is **2 of 5** `ORBParams` fields (`intraday_orb.py:28-34`) — the
-same 2-of-6-to-8 shortfall map §0.5 criticises, declared rather than hidden. The three
-untested fields are `min_bars_before_entry`, `max_bars_after_open` and `time_stop_bars`.
+Rationale, in advance: `or_bars` is the definitional parameter of an opening-range
+breakout — it sets both the range and, via `26 + p.or_bars`, the entry-window guard
+(`intraday_orb.py:97`); `target_range_mult` sets the payoff ratio that §5's
+break-even hit rate turns on. **Coverage is 2 of 5 `ORBParams` fields** — the same
+2-of-6-to-8 shortfall `MAP.md` §0.5 criticises, declared rather than hidden. The
+three untested fields are `min_bars_before_entry`, `max_bars_after_open`,
+`time_stop_bars`.
 
-**Why the usual `stop_atr` axis is unavailable (FACT):** every other family's grid pairs a
-signal axis with `stop_atr`. `ORBParams` has **no** `stop_atr` — the stop is structural
-(`stop_price = or_lo`, `intraday_orb.py:108`). There is no risk-sizing axis to perturb, so
-this grid is genuinely two signal axes.
+**Why no `stop_atr` axis (FACT):** every other family's grid pairs a signal axis with
+`stop_atr`. `ORBParams` has no `stop_atr` — the stop is structural
+(`stop_price = or_lo`). There is no risk-sizing axis to perturb, so this grid is
+genuinely two signal axes.
 
-**Mandatory pre-integration no-op check (§4.2 item 6; map §2.1's silent failure mode).**
-Before the grid is used in any verdict, confirm each axis measurably moves the OOS trade
-count **or** OOS expectancy: run the 3 × 3 grid on the scratch database and assert
-(i) the nine `(n_trades, expectancy_r)` pairs are **not all identical**; (ii) `or_bars ∈
-{2, 4}` changes `n_trades` — it must, since it changes both the range definition and the
-entry-window guard; (iii) `target_range_mult ∈ {1.25, 1.75}` changes `expectancy_r`. A grid
-whose nine cells coincide passes gate 5 at 100% having tested nothing. §13 makes this a
-blocking checklist item.
+**Mandatory pre-integration no-op check** (§4.2 item 6; `MAP.md` §2.1's silent
+failure mode). Before the grid is used in any verdict, run the 3 × 3 grid and assert:
+(i) the nine `(n_trades, expectancy_r)` pairs are **not all identical**;
+(ii) `or_bars ∈ {2,4}` **changes `n_trades`** (it must — it changes both the range
+definition and the entry-window guard); (iii) `target_range_mult ∈ {1.25,1.75}`
+**changes `expectancy_r`**. A grid whose nine cells coincide passes gate 5 at 100 %
+having tested nothing. **If any assertion fails, gate 5's result is void and must be
+reported as void, not as a pass.**
 
-**Coupling to disclose (map §4.3):** the per-cell floor `sensitivity_min_grid_trades = 15`
-(`config/research.py:106`) is **also** gate 1's per-fold floor (`promotion.py:632`). Neither
-may be changed (R4); at the forecast trade scale neither binds (§3.5).
+**Coupling to disclose (`MAP.md` §4.3):** `sensitivity_min_grid_trades = 15`
+(`config/research.py:106`) is **also** gate 1's per-fold floor (`promotion.py:632`).
+Neither may change (R4); at this trade scale neither binds.
 
 ---
 
 ## 7. Leakage argument
 
-**Point-in-time contract.** All three intraday features read `(series, t)` with slices
-`≤ t`: `bars_since_open` walks backwards from `t` (`features/intraday.py:26-32`);
-`opening_range` enumerates `range(t + 1)` (`:38`); `session_bar_count` delegates to
-`bars_since_open` (`:52-54`). The module docstring states the contract (`:3-4`). The
-strategy reads nothing else except `ctx.regime`.
+**Point-in-time contract.** All three intraday features read `(series, t)` with
+slices ≤ *t*: `bars_since_open` walks backwards from *t* (`features/intraday.py:28-32`);
+`opening_range` enumerates `range(t + 1)` (`:39`); `session_bar_count` delegates to
+`bars_since_open` (`:52-54`). **FACT (verified in-process by the proposal on a
+synthetic 40-session 15 m series):** `assert_no_lookahead`
+(`backtest/leakage.py:23-41`) reports **clean** for `opening_range(...)[0]`,
+`opening_range(...)[1]`, `bars_since_open` and `session_bar_count`. That is the check
+gate 8 would run under **B4**; the ladder does not run it today
+(`promotion.py:249-267` checks four daily features on the daily proxy only).
 
-**Verified, not asserted (FACT, in-process on a synthetic 40-session 15 m series, per the
-proposal):** `assert_no_lookahead` (`backtest/leakage.py:23-41`) reports **clean** for
-`opening_range(...)[0]`, `opening_range(...)[1]`, `bars_since_open` and
-`session_bar_count`. This is the check gate 8 would run under B4; the ladder does not run
-it today (`promotion.py:249-267` checks only the four daily features against the daily
-proxy).
+**The blocking lookahead — and why it settles the variant budget.** `regime_lookup`
+labels a session from **that session's daily bar**, whose close is not known while
+the session is being traded. For a *daily* strategy this is harmless (signal at bar
+*t*'s close, fill at *t+1*'s open → the regime is strictly past). For an **intraday**
+strategy trading inside session *D*, `ctx.regime` for *D* is derived from *D*'s own
+close — **future information relative to a 10:15 entry**. The plumbing is
+`backtest_runner.py:183-185` (`regimes = regime_lookup(proxy)`, keyed by date) and
+`strategies/base.py:39-40` (the intraday stamp is normalised to its own session
+date). `assert_no_lookahead` cannot catch it: it lives in the `regime_by_date`
+plumbing, not in a feature function.
 
-**Two residual point-in-time concerns, both requirements rather than findings.**
+**Requirement:** an intraday run must lag the regime by one session (use *D−1*'s
+label). **This is behavioural and therefore requires `VERSION = "0.2.0"` (R3/R7).**
+Consequently — and this is the resolution of judge defect J1-2 — **no promotion
+evaluation of v0.1.0 may be run**, because gate 9 would lock version 1's first-ever
+sealed test against a rule set known to read the future. The first evaluable artifact
+is a v0.2.0 with its own §4.2 design document and its own budget.
 
-1. **Same-session regime — a genuine lookahead the ladder cannot catch.** `regime_lookup`
-   labels a session from that session's own daily bar, whose close is not known while the
-   session is being traded. For a *daily* strategy this is harmless (signal at bar `t`'s
-   close, fill at `t+1`'s open, so the regime is strictly past). For an **intraday**
-   strategy trading inside session `D`, `ctx.regime` for `D` derives from `D`'s own close —
-   **future information relative to a 10:15 entry**. It is invisible to
-   `assert_no_lookahead` because it lives in the `regime_by_date` plumbing
-   (`backtest_runner.py:183, 213-217`, `base.py:38-40`), not in a feature function.
-   **Requirement: any intraday run must lag the regime by one session (use `D−1`'s
-   label).** This is a behavioural change requiring `VERSION = "0.2.0"` under R3, so it is
-   **out of scope here** and recorded as a **blocking prerequisite** for any future
-   intraday promotion attempt. *(Escalation note, per the proposal's own self-assessment:
-   this is a lookahead, not a nicety. It is stated here at §7's head and again in §11 and
-   §14 rather than buried as a sub-item.)*
-2. **Session grouping by UTC date.** Covered in §2.4 and B7: RTH-only ingest **and** an
-   RTH filter at load, or `_session_date` (`features/intraday.py:19-21`) mis-assigns EST
-   post-market bars to the following session.
+**Gate 6 is not part of this lookahead** (see §2.3's reconciliation): it buckets
+descriptively on *D*, after the fact, and buckets no trade the strategy did not
+already take.
 
-**No new cross-sectional or breadth term is introduced**, so no new `StrategyContext`
-plumbing (`strategies/base.py:15-19`) is needed and no shared surface changes.
+**Session grouping by UTC date** (§2.4, B7): RTH-only ingest **and** a loader filter,
+or `_session_date` (`features/intraday.py:19-21`) mis-assigns EST post-market bars to
+the following session and corrupts its opening range.
+
+**No new cross-sectional or breadth term is introduced**, so no new
+`StrategyContext` plumbing (`strategies/base.py:15-19`) and no shared-surface change.
 
 ---
 
-## 8. Cost-model statement (quantitative, recomputed on the engine's own risk unit)
+## 8. Cost-model statement (quantitative)
 
 **The cost model is unchanged (R4).** FACT: `backtest/costs.py:11-16` —
 `commission_per_share = 0.0`, `commission_min_per_order = 0.0`, `slippage_bps = 3.0`,
 `half_spread_fill_penalty = True`. FACT: `engine.py:90` `spread_bps: float = 5.0`;
 `engine.py:94` `slip = (3.0 + 5.0/2)/10,000 = 5.5 bps` per side; `engine.py:144`
-`costs_bps = slip × 2 × 10,000 = 11.0` bps of notional per round trip. FACT:
+`costs_bps = slip × 2 × 10,000 = 11.0 bps` per round trip. FACT:
 `backtest_runner.py:205-206` never passes `spread_bps`, so the 5.0 bps assumption is
 universe- **and horizon**-independent.
 
-### 8.1 The risk unit — the correction both judges demanded, restated correctly
+**Per-trade cost in R, with the overshoot factor (judge defect J2-3, accepted with a
+correction).** `engine.py:110` defines `risk_per_share = |entry_fill − stop_price|`
+and the stop is the opposite OR edge, so the risk unit is `entry_fill − or_lo`, not
+the OR width itself. Define
 
-FACT (`engine.py:107-111`): `entry_idx = t + 1`; `entry_fill = series.open[entry_idx] ×
-(1 + d·slip)`; `risk_per_share = |entry_fill − sig.stop_price|`. For this strategy
-`stop_price = or_lo` (`intraday_orb.py:108`), so the engine's risk unit is
+> **λ = (entry_fill − or_lo) / w**, where *w* is the OR width as a fraction of price;
+> **cost_R = (round_trip_bps / 10,000) / (λ · w)**.
 
-> **`d = entry_fill − or_lo`**, *not* the opening-range width `w = or_hi − or_lo`.
+**Correction to the judge:** λ ≥ 1 is **not** guaranteed by construction. The signal
+requires `close > or_hi`, but the fill is the *next bar's open* (`engine.py:107-109`,
+plus slippage), which can print back inside the range. λ ≥ 1 holds *typically*, not
+strictly. The table below is therefore the **λ = 1 reference**, i.e. an **upper bound
+on cost in the typical case**:
 
-Write `ρ = d/w`. The signal requires `close[t] > or_hi` (`intraday_orb.py:105`) but the
-fill is the **next bar's open**, so `ρ > 1` in the modal case (the breakout holds) and
-`ρ < 1` when the next bar opens back inside the range. **The proposal's w-anchored table is
-therefore the `ρ = 1` special case — neither an upper nor a lower bound**, contrary to both
-judges (§A.3(a)). HYPOTHESIS: `E[ρ] > 1`, so the w-table usually *overstates* cost in R.
-Measuring the realised `ρ` distribution is item 1 of the post-ingest diagnostic (§12.3).
-
-`cost_R = (round_trip_bps/10,000)/(d/price)`:
-
-| `d/price` | @ 11.0 bps (today) | @ 26 bps (20 bps quoted) | @ 36 bps (30 bps quoted) | @ 66 bps (60 bps quoted) |
+| OR width `w` (% of price) | @ 11.0 bps (today) | @ 26 bps (20 bps quoted) | @ 36 bps | @ 66 bps |
 |---|---|---|---|---|
-| 0.20% | **0.5500R** | 1.3000R | 1.8000R | 3.3000R |
-| 0.30% | **0.3667R** | 0.8667R | 1.2000R | 2.2000R |
-| 0.50% | **0.2200R** | 0.5200R | 0.7200R | 1.3200R |
-| 0.65% | **0.1692R** | 0.4000R | 0.5538R | 1.0154R |
-| 0.80% | **0.1375R** | 0.3250R | 0.4500R | 0.8250R |
-| 1.20% | **0.0917R** | 0.2167R | 0.3000R | 0.5500R |
+| 0.20 % | **0.5500R** | 1.3000R | 1.8000R | 3.3000R |
+| 0.30 % | **0.3667R** | 0.8667R | 1.2000R | 2.2000R |
+| 0.50 % | **0.2200R** | 0.5200R | 0.7200R | 1.3200R |
+| 0.80 % | **0.1375R** | 0.3250R | 0.4500R | 0.8250R |
+| 1.20 % | **0.0917R** | 0.2167R | 0.3000R | 0.5500R |
 
-Formula sanity check against map §0.4: `trend_continuation` at `stop_atr = 1.5`,
-`ATR/price = 2%` gives `risk/price = 3%` and `0.0011/0.03 = 0.0367R`, matching the map's
-0.037R exactly.
+At λ = 1.3 and *w* = 0.50 %, cost falls from 0.2200R to **0.1692R** — λ matters as
+much as *w*, and **both must be measured post-ingest**. F3's kill test is therefore
+stated on the **product λ·w**, not on *w* alone.
 
-**Pre-sealed anchor for `w` (FACT, read-only, from the proposal):** across the 24
-snapshot-3 symbols over `2016-10-17 … 2025-09-07`, mean daily `(H − L)/C` has median
-**1.579%** (min 1.090% DIA, max 3.663% NVDA). HYPOTHESIS: a 45-minute opening range
-captures roughly 30–45% of the day's range, putting `w ≈ 0.5–0.7%`. **This fraction is not
-verified anywhere in this repo** and measuring it is item 2 of the post-ingest diagnostic.
-F3 is the kill test.
+Formula sanity check against the map: `trend_continuation` at `stop_atr = 1.5`,
+`ATR/price = 2 %` gives `risk/price = 3 %` and `0.0011/0.03 = 0.0367R`, matching
+`MAP.md` §0.4's 0.037R exactly.
 
-### 8.2 The cost wedge — the statistic that survives the risk-unit correction
+**Pre-sealed anchor for *w* (FACT, read-only):** across the 24 snapshot-3 symbols on
+`2016-10-17 … 2025-09-07`, mean daily `(H − L)/C` has median **1.579 %** (min 1.090 %
+DIA, max 3.663 % NVDA). HYPOTHESIS: a 45-minute opening range captures roughly
+30–45 % of the day's range, putting *w* ≈ 0.5–0.7 %. **This fraction is not verified
+anywhere in this repo**; measuring λ and *w* is item 1 of the post-ingest diagnostic.
 
-With a target of `m·w` measured from the close and a stop at `or_lo`, the realised payoff
-ratio is `b = m·w/d` and the break-even hit rate is `p* = (1 + c)/(1 + b)` against a
-random-walk baseline of `1/(1 + b)`. The **cost wedge** — how far cost lifts the required
-hit rate above what the geometry alone demands — has the closed form
+**Comparison to the rest of the program (DERIVED, corrected — judge defects J1-6 /
+J2-4).** At λ = 1 and *w* ∈ [0.30 %, 0.80 %], cost is 0.3667R–0.1375R, i.e.
+**3.3×–8.7×** `volatility_breakout`'s 0.042R (the program's most expensive, already
+"68 % of its entire edge" per `MAP.md` §0.4) and **6.3×–16.7×** `relative_strength`'s
+0.022R (the cheapest). At the *w* = 0.50 % point estimate specifically: **5.2×**
+volatility_breakout, **5.9×** trend_continuation (0.037R), **10.0×**
+relative_strength. The proposal's "4–10× any daily strategy" is not the minimum or
+maximum of any consistent comparison and is **withdrawn**.
 
-> **`wedge = c/(1 + b) = (round_trip/10⁴)/(d + m·w)`**
+**Turnover delta.** This design changes no rule, so the delta versus v0.1.0 is
+**zero by construction**. In absolute terms, DERIVED at §3.5's bracket: 12,800–25,700
+pre-sealed trades against v2's 1,169 (`MAP.md` §0.6) — **11×–22×** the busiest
+strategy in the program, so any cost error is amplified by that factor at the
+portfolio level.
 
-which depends on `ρ` only through the smaller of the two terms in the denominator. That is
-why it, and not the raw multiple, is the right comparator (§A.3(c)). At `m = 1.5`:
+**Break-even hit rate (DERIVED).** With a nominal 1.5R target and a 1R stop, net
+expectancy `p·1.5 − (1−p)·1 − c > 0` requires `p > (1 + c)/2.5`: **45.5 %** at
+c = 0.1375R, **46.8 %** at 0.169R (λ = 1.3, *w* = 0.5 %), **48.8 %** at 0.22R,
+**54.7 %** at 0.3667R, **62.0 %** at 0.55R. The random-walk baseline for a 1.5:1
+bracket is **40.0 %**, and §5 notes the realised payoff ratio is strictly below 1.5,
+which raises every figure above.
 
-| `w` | `ρ = 1.0` | `ρ = 1.2` | `ρ = 1.3` | `ρ = 1.5` |
-|---|---|---|---|---|
-| 0.30% | 14.67 pp | 13.58 pp | 13.10 pp | 12.22 pp |
-| 0.50% | 8.80 pp | 8.15 pp | **7.86 pp** | 7.33 pp |
-| 0.80% | 5.50 pp | 5.09 pp | 4.91 pp | 4.58 pp |
-
-**Daily comparators (DERIVED from map §0.4 and the shipped params):**
-`trend_continuation` — `stop_atr 1.5`, `target_atr 3.0`, so `b = 2.0`, `c = 0.037R`,
-wedge = **1.23 pp**. `volatility_breakout` — `stop_atr 1.75`, `target_atr 3.5`
-(`breakout.py:29-30`), so `b = 2.0`, `c = 0.042R`, wedge = **1.40 pp**.
-
-> **`intraday_orb`'s cost wedge is 4.6–14.7 pp against 1.23–1.40 pp for the daily
-> strategies — a factor of 3.3× to 10.5× across the plausible opening-range band, and
-> 4.0×–5.6× at the hypothesised `w = 0.5–0.7%`, `ρ = 1.3`.**
-
-**Fully worked consistent case (J2-2's required example), `w = 0.5%`, `ρ = 1.3`:**
-`d = 0.65%`; `c = 0.1692R` (not the proposal's 0.22R); realised payoff `b = 1.154` (not
-1.5); break-even `p* = 54.3%` (not 48.8%) against a random-walk baseline of **46.4%** (not
-40.0%); wedge **7.86 pp**. Both the cost and the payoff move together, which is exactly why
-the proposal's mixed-unit presentation was misleading and why the wedge is quoted first.
-
-**The raw multiple, corrected (J2-3):** at 11 bps, cost in R is 3.3× (`d = 0.80%`) to 8.7×
-(`d = 0.30%`) `volatility_breakout`'s 0.042R, and 3.7×–9.9× `trend_continuation`'s 0.037R.
-The proposal's "4–10×" is right at its own hypothesised `w` band and wrong at the edges of
-its own table; it is replaced by these figures and by the wedge above.
-
-**Turnover delta.** This design changes no rule, so the turnover delta versus
-`intraday_orb` v0.1.0 is **zero by construction**. In absolute terms, DERIVED at the §3.5
-rate: ~13,500 pre-sealed trades against v2's 1,169 (map §0.6) — **≈11.5×** the busiest
-strategy in the program, so any cost error is amplified ~11.5× at the portfolio level.
-Carries the §3.5 rate caveat.
-
-**Expanded-snapshot requirement (§4.2 item 8).** Not applicable — this design uses the
-existing 24-symbol snapshot-3 set. Should an intraday run ever be attempted on an expanded
-universe, the 2× (26 bps) and 5× (66 bps) columns above are pre-registered as mandatory; the
-5× column puts cost above **1R per round trip** for `d ≤ 0.65%`.
+**Expanded-snapshot requirement (§4.2 item 8).** Not applicable — this design uses
+snapshot 3's 24-symbol set and does not run on an expanded universe. Should an
+intraday run ever be attempted on an expanded snapshot, the 2× (26 bps) and 5×
+(66 bps) columns above are **pre-registered as mandatory**, and the 5× column puts
+cost above **1R per round trip** for *w* ≤ 0.5 %.
 
 **Unmeasurable-spread caveat (FACT).** NBBO quotes return `403 not_authorized`
-(`data/entitlements.py`, feed `stocks_nbbo_quotes`), and `universe/screen.py` flags every
-symbol `F_SPREAD = "spread_filter_not_licensed"`. **The true opening-auction spread cannot
-be measured on this plan at all**, so the 5.0 bps assumption can be neither validated nor
-calibrated for the one time of day this strategy trades. Every figure above is therefore
-optimistic by an unknown, unmeasurable amount.
+(`reports/SUBSCRIPTION_STATUS.md:17`) and `universe/screen.py` flags every symbol
+`F_SPREAD = "spread_filter_not_licensed"`. **The true opening-auction spread cannot
+be measured on this plan at all**, so the 5.0 bps assumption can be neither validated
+nor calibrated for the one time of day this strategy trades.
 
 ---
 
-## 9. Variant budget and stopping rule (whole strategy, all angles combined)
+## 9. Variant budget and stopping rule (whole strategy, all angles)
 
-**Strategy variants: 0.** Only one angle was written for this strategy (§4.1 assigns it
-one, requirements-only), and it proposes no rule change and no `v0.2.0`. Recorded verbatim
-for the final report (R5):
+**Strategy variants: 0. Promotion evaluations: 0. Sealed looks: 0.**
 
-> *`intraday_orb.intraday` — 1 proposal (requirements angle), 0 strategy variants tried,
-> 0 pre-sealed backtests of a modified rule set, 0 sealed looks consumed.*
+Recorded verbatim for the final report (R5):
 
-**Non-strategy budget, if and only if the operator authorises the pipeline:**
+> *`intraday_orb.intraday` — design phase: **1** angle (requirements), **0** strategy
+> variants tried, **0** pre-sealed backtests of a modified rule set, **0** promotion
+> evaluations run, **0** sealed looks consumed. The strategy's sealed-look count
+> stays at 0; the program's stays at k = 5.*
+
+**Corrected from the proposal (judge defect J1-2):** the proposal budgeted "full
+promotion evaluations of the unchanged v0.1.0: 1". That is **withdrawn**. §7
+establishes that v0.1.0 reads future information on an intraday run, so no evaluation
+of it is admissible; the first evaluable artifact is a v0.2.0 carrying the
+regime lag, and a v0.2.0 is a **new design document with its own budget**, not a line
+in this one.
+
+**Conditional budget, pre-registered, applicable only if the operator answers Q1
+"yes" and authorises a v0.2.0 design:**
 
 | Item | Budget | Stopping rule |
 |---|---|---|
-| Bar size | **1** (15 m) | fixed in advance by `config/research.py:303` and the 26-bar guard at `intraday_orb.py:97`. **5 m is not to be tried** as an alternative — it would be a bar-size search over the same sealed calendar year, a variant in disguise, at 9× the compute (§3.4) |
-| History depth | **1** (option C, 2016-10-17) | chosen in advance by §3.2's bear-coverage arithmetic, not by results. If budget permits only option B, that is a cost decision taken before any run |
-| Gate-5 grid | **1** (§6, pre-registered before any intraday bar exists) | fixed; the no-op check is a blocking gate on its use, not a tuning loop |
-| Bundle dry runs on a **scratch** database | **unlimited** | scratch copies consume no looks and touch nothing live |
-| Full promotion evaluations against `data/signalforge.sqlite` | **1, and it is irreversible** | §A.1: the first run past gate 0 locks version 1's only sealed test. If it fails, the outcome is the §11 documented non-pass — **not** a strategy variant. Proposing a `v0.2.0` afterwards requires its own §4.2 document and its own budget, and costs a further look |
+| Bar size | **1** (15 m) | fixed in advance by `config/research.py:303` and the 26-bar guard at `intraday_orb.py:97`. **5 m may not be tried** as an alternative — it would be a bar-size search over the same sealed calendar year, a variant in disguise, at 9× the compute (§3.4) |
+| History depth | **1** (option C, 2016-10-17) | chosen in advance by §3.2's arithmetic, not by results. Option B if the budget forbids C — a **cost** decision taken before any run. Option A is excluded by F1b |
+| Run configuration | **1** (`allow_short = False`) | matches the ladder's hard-wired behaviour and the config default. Enabling shorts is a **separate pre-registered variant** requiring its own budget line and an operator decision (Q6) |
+| Gate-5 grid | **1** (§6) | fixed before any intraday bar exists; void if the no-op check fails |
+| Promotion evaluations of **v0.1.0** | **0** | inadmissible (§7, F8) |
+| Promotion evaluations of a future **v0.2.0** | **budgeted in that document, not here** | — |
 
-**Hard stop.** If any of **F1**, **F4**, **F5** or **F7** holds at decision time — and all
-four hold today — the work stops **before ingestion** and the null option is taken. The most
-expensive failure mode available is spending ~48 min of API budget, 0.53–1.60 GB on a live
-probation database, ~5.4 h of compute **and version 1's only sealed look** to reach a gate-3
+**Hard stop.** If any of **F1b, F4, F5 or F8** holds at decision time — and F1b, F5
+and F8 all hold today — the work stops **before ingestion** and the null option is
+taken. The most expensive failure mode available is spending ~48 min of API budget,
+0.53 GB in a live database and ~5.4 h of compute per evaluation to reach a gate-3
 failure that §8's arithmetic already forecasts.
 
 ---
 
 ## 10. Sealed-look accounting
 
-**Reproduction of the map §0.1 ledger (FACT, re-queried read-only for this synthesis:
-`strategy_sealed_test` has 20 rows, exactly 4 each for versions 2–6; 42 rows in
-`strategy_promotion_evaluation`):**
+**Reproduction of the `MAP.md` §0.1 ledger (FACT, re-queried read-only for this
+document: `strategy_sealed_test` has **20** rows — exactly 4 each for versions 2–6,
+and **none** for version 1):**
 
 | Ver | Strategy | snap 1 `universe_25_baseline_legacy` | snap 2 `universe_25_baseline` | snap 3 `universe_24_ex_meta` | snap 4 `universe_25_meta_continuity_corrected` |
 |---|---|---|---|---|---|
@@ -838,363 +805,394 @@ failure that §8's arithmetic already forecasts.
 | 6 | `volatility_breakout.short_swing` | id 5: −0.0979R / 10 ❌ | id 10: −0.0979R / 10 ❌ | id 15: −0.0979R / 10 ❌ | id 20: −0.0979R / 10 ❌ |
 | **1** | **`intraday_orb.intraday`** | **— none** | **— none** | **— none** | **— none** |
 
-**Version 1's own position (FACT, queried):** version 1 has **zero** rows in
-`strategy_sealed_test` — that is why the table holds 20 rows and not 24. It has **seven**
-promotion evaluations, ids **1, 7, 13, 19, 25, 31, 37** on snapshots 1, 1, 2, 3, 2, 3, 4,
-every one `passed = 0`, all stopped at gate 0 before any sealed window was opened.
+**The map contradicts itself on *k*, and this report flags it (judge defect J1-10).**
+`STRATEGY_COMPLETION_MAP.md:69` ("A v0.2.0 that seals against snapshot 3 is the
+**fifth** look") and `:341` ("**A v0.2.0 sealing against snapshot 3 is look 5**")
+disagree with `:1321-1322` ("the baseline count is **k = 5** … so a first v0.2.0
+sealing on snapshot 3 is **look 6**"). **Convention adopted here, and stated so it
+can be checked:** `k = 5` is the baseline count and the next sealed draw is **look
+6** — the §4.2-item-10 form, which is also the form my task brief fixes.
 
-**What this design costs in looks: zero.** No evaluation, no new `StrategyVersion`, no run
-that could reach gate 9. `intraday_orb`'s count stays at **0**; the program's baseline stays
-at **k = 5**.
+**The parenthetical the map attaches to k = 5 is false for this family, and is
+corrected rather than repeated.** "Four existing locked sealed draws per strategy
+family plus the next one" is a category error for version 1, which verifiably has
+**zero**. For `intraday_orb` the accounting is therefore stated **twice, always
+together**: the program-wide count, and version 1's own.
 
-### 10.1 The numbering convention, made self-consistent, and the map's own contradiction
+**Version 1's position (FACT, queried):** zero rows in `strategy_sealed_test` — the
+reason there are 20 rows and not 24. **Seven** promotion evaluations, ids
+**1, 7, 13, 19, 25, 31, 37** on snapshots 1, 1, 2, 3, 2, 3, 4, every one with
+`passed = 0` and the verdict *"NO TRADE — insufficient evidence or poor risk/reward"*,
+all stopped at gate 0 before any sealed window was opened.
 
-Both judges flagged that "k = 5 (four existing locked sealed draws per strategy family plus
-the next one)" followed by "look 6 (k = 5 baseline + 1)" double-counts the next draw, and
-that "four existing draws" is **false for this family** (version 1 has zero).
+**What this design costs in looks: zero.** No evaluation, no new `StrategyVersion`,
+no run that could reach gate 9. `intraday_orb` stays at **0**; the program stays at
+**k = 5**.
 
-**Open item for the operator — the map contradicts itself and this design does not silently
-pick the larger number.** `STRATEGY_COMPLETION_MAP.md` §0.1 and R2 both say *"A v0.2.0 that
-seals against snapshot 3 is the **fifth** look"*; §4.2 item 10 says *"the baseline count is
-k = 5 … so a first v0.2.0 sealing on snapshot 3 is **look 6**."* These cannot both be right.
+**Pre-registered accounting for any future intraday evaluation:**
 
-**Convention adopted here, and it is to state all three numbers every time**, so that no
-reader depends on which clause the program later settles on:
-
-1. **Program-wide sealed-test row number** — unambiguous and queryable: 20 rows exist, so
-   the first intraday sealed test is **row 21**.
-2. **Program look number** under the brief's and §4.2 item 10's `k = 5` baseline:
-   **look 6**.
-3. **This strategy's own look number**: **version 1's look 1** — version 1 contributes
-   **none** of the four baseline draws, a fact that must be stated whenever number 2 is
-   quoted, because otherwise "look 6" implies a selection history this strategy does not
-   have.
-
-### 10.2 Accounting for any future intraday evaluation, pre-registered now
-
-- An evaluation of the **unchanged v0.1.0** on the new keyed snapshot
-  `universe_24_ex_meta_intraday_15m` that clears gate 0 creates `strategy_sealed_test`
-  **row 21** — **program look 6, version 1's look 1** — and it does so **whether or not
-  gates 1–8 pass** (§A.1). There is no such thing as a trial run.
-- A subsequent `v0.2.0` on the same snapshot would be **row 22 / program look 7 /
-  version 1-lineage look 2**; a `v0.2.0` on both the intraday and an expanded snapshot would
-  be rows 22–23 / looks 7–8.
-- **Which snapshot the report leads with, pre-registered (R1):**
-  `universe_24_ex_meta_intraday_15m` — because its symbol set is snapshot 3's, the only
-  symbol set on which gate 8 `validate_daily` passes (map §0.1), and because no other
-  intraday snapshot can exist (META has no intraday plan; `META_CONT` is
-  `continuity_bridge:1`-sourced and fails gate 8). The four daily draws in the table above
-  are disclosed alongside it in every case, together with the explicit statement that
-  version 1 contributes none of them.
-- **R3 trap check, corrected.** The proposal asserted the staleness trap "cannot" occur
-  because no strategy code changes. That assertion is **withdrawn**: the trap here arrives
-  through the *promotion path*, not the strategy code (§A.1). `upsert_strategy_version`
-  (`persistence.py:46-93`) refreshes `spec_json`/`git_sha` on the same row while
-  `_get_or_create_sealed_test` replays the locked result, so a first bad run and a later
-  good run on the same `(version 1, snapshot)` pair return the same sealed number. The
-  mitigations are §13's scratch-only rule and its pre-integration check that no
-  `strategy_sealed_test` row exists for `(version 1, the intraday snapshot id)` before the
-  single live evaluation, and that the row created afterwards was created by *that* run.
-  Any future behavioural change — including the §7 regime-lag fix and the §5 leash/target
-  defects — ships as `VERSION = "0.2.0"`.
+- The **first** admissible evaluation is of a **v0.2.0** (regime lag, §7) on the new
+  keyed snapshot `universe_24_ex_meta_intraday_15m`. If it reaches gate 9 it creates
+  `strategy_sealed_test` row **21** — **version 1's first sealed look ever** —
+  disclosed **simultaneously** as **program look 6** (k = 5 + 1) and as **version 1's
+  own look 1**. Both numbers must appear in the report.
+- A subsequent v0.3.0 on the same snapshot would be program look 7 / family look 2; a
+  v0.2.0 evaluated on both the intraday snapshot and an expanded snapshot would be
+  looks 7 and 8 / family looks 1 and 2.
+- **Snapshot the report will lead with, pre-registered (R1):**
+  **`universe_24_ex_meta_intraday_15m`** — because its symbol set is snapshot 3's, the
+  only symbol set on which gate 8 `validate_daily` passes (`MAP.md` §0.1), and because
+  no other intraday snapshot exists or may be created. The four daily draws above are
+  disclosed alongside it in every case, together with the explicit statement that
+  version 1 contributes **none** of them.
+- **R3 trap check.** No strategy code changes here, so `upsert_strategy_version`
+  (`persistence.py:46-93`) refreshing `spec_json`/`git_sha` on the same row cannot
+  produce a stale-sealed-test pass. Any future behavioural change — the regime lag
+  (§7), the time-stop leash and the target/stop asymmetry (§5) — ships as
+  `VERSION = "0.2.0"` with the `MAP.md` §4.3 pre-integration check that the new sealed
+  test's `strategy_version_id` is a row created by **that** run.
 
 ---
 
-## 11. Null option — and it is the recommendation, not the fallback
+## 11. Null option
+
+**The null option is the recommendation, not the fallback.**
 
 **What gets written:** a documented, evidence-backed **"DOES NOT OPERATE"** record for
 `intraday_orb.intraday` v0.1.0 — the second of the two honest end-states
-`STRATEGY_COMPLETION_PLAN.md` allows, and **distinct from the "does not pass" records** v3,
-v4 and v6 may earn. The distinction matters and must survive into the final report: those
-three can fail on *evidence*; version 1 has never been measured and, on current
-entitlements, cannot be. Its record is a **capability** finding and must not be filed as
-though the rules had been tested and found wanting.
+`STRATEGY_COMPLETION_PLAN.md` allows, and **distinct** from the "does not pass"
+records v3, v4 and v6 may earn. The distinction matters: those three can fail on
+*evidence*; version 1 has never been measured and, under today's entitlements, cannot
+be measured in a way that would mean anything. Its record is a **capability finding**
+and must not be filed as though the rules had been tested and found wanting.
 
-**Evidence it carries** (all pre-sealed or code arithmetic, all reproducible read-only):
+**Evidence it carries (all pre-sealed or code arithmetic, all reproducible
+read-only):**
 
-1. The three independent blocks from map §2.4, with the R4 correction: the promotion-path
-   gate is removable in principle (§2.2); the EOD-only operating policy
-   (`approved_scope_scan.py:81` with its `:19-22` comment; `alerts/dispatch.py:241`) and the
-   absent data path (`massive.py:86-100` declares only `BAR_DAILY`) are not.
-2. **A fourth block the map did not state — latency.** The entitled intraday feed is
-   `DELAYED`; `LatencyCategory.REALTIME` is never set anywhere in the codebase; the engine
-   fills at the next bar's open. Any delay of one bar or more makes the modelled fill
-   unattainable live.
-3. **A fifth block — cost.** A break-even wedge of **4.6–14.7 pp** at the frozen, optimistic
-   11.0 bps, against 1.23–1.40 pp for the daily strategies — 3.3×–10.5× — with the true
-   opening-auction spread **unmeasurable** on this plan (§8).
-4. **A sixth block — irreversibility.** The first run past gate 0 permanently locks version
-   1's only sealed test, whatever gates 1–8 did (§A.1). There is no cheap way to find out.
-5. The measured build cost of finding out anyway: 240 paced API calls / ~48 min; ~0.53 GB
-   added to a 0.38 GB live database (resulting ~2.4×); ~5.4 h of compute per evaluation
-   before the `O(n²)` fix (§3.3, §3.4).
-6. The gate-6 calendar ceiling: **19** long-tradeable bear sessions in nine pre-sealed years
-   (7.12% ± 1.57%), none after 2023-06-02, zero at any pre-sealed start on or after
-   2022-09-08 — with the disclosure that 248 bear sessions are short-eligible and the
-   long-only ladder cannot reach them (§3.1).
-7. The eight promotion-path defects B1–B8 (§2.3), the two behavioural defects (§5), and the
-   **same-session regime lookahead** (§7 item 1) — which is a genuine lookahead that
-   `assert_no_lookahead` structurally cannot catch, and which would by itself force a
-   `v0.2.0` before any intraday number could be believed.
+1. The three independent blocks of `MAP.md` §2.4, with the R4 correction: the
+   promotion-path gate is removable in principle (§2.2); the EOD-only operating
+   policy (`approved_scope_scan.py:81` and its `:19-22` comment;
+   `alerts/dispatch.py:241`) and the absent data path (`massive.py:86-100` declares
+   only `BAR_DAILY`) are not. **Plus a fourth policy surface the map does not name:**
+   `ResearchConfig.enabled_horizons` *includes* INTRADAY (`config/research.py:297-302`),
+   so the policy is inconsistent across surfaces.
+2. **A fourth block: latency.** The entitled feed is `DELAYED` ≥ 15 min against a
+   15-minute bar; the modelled fill (bar *t+1*'s open) precedes the earliest
+   attainable action (bar *t+2*'s open) by exactly one bar, permanently; no `REALTIME`
+   equities feed exists on this plan (§0.1).
+3. **A fifth block: cost.** 0.14R–0.37R per round trip at λ = 1 and the frozen,
+   optimistic 11.0 bps — **3.3×–8.7×** `volatility_breakout` and **6.3×–16.7×**
+   `relative_strength` — against a nominal 1.5:1 payoff whose break-even hit rate is
+   45.5 %–54.7 % versus a 40.0 % random-walk baseline, with the realised payoff ratio
+   strictly below 1.5 (§8, §5).
+4. **A sixth block: a blocking lookahead.** The same-session regime read (§7) makes
+   even a fully-built pipeline unable to evaluate v0.1.0 honestly. It cannot be fixed
+   without a v0.2.0, and a v0.2.0 is a fresh design with a fresh budget.
+5. The measured build cost of finding out anyway: 240 paced API calls / ~48 min,
+   +0.53 GB on a live 0.382 GB database (2.39× the file), and ~5.4 h (4.6–6.2 h) of
+   compute per evaluation before the `O(n²)` fix (§3.3, §3.4).
+6. The gate-6 supply ceiling: **19** long-tradeable bear sessions in nine pre-sealed
+   years (7.12 % ± 1.57 %), none after 2023-06-02, none at any start on or after
+   2022-09-08 — and **0 bear and 0 range labelled sessions** at the shortest
+   gate-0-legal start under *every* configuration (F1b).
+7. The **ten** promotion-path defects B1–B10 (§2.3) that must be fixed before any
+   intraday number from this pipeline means anything, plus the two behavioural
+   defects (§5) that would each force a v0.2.0.
+8. The honest gate-4 statement: with a month-block `deff` of 2.55–4.86 already
+   measured for the program's daily strategies (`clustered_bootstrap_all.md`), an
+   intraday ORB's effective *n* is session-count, not trade-count, and gate 4 is
+   **not** the easy gate the proposal claimed.
 
-**Sealed-window use in this section, marked per R1 (disposition — permitted):** the sealed
-year plays no part in the argument above. `intraday_orb` has no sealed test to cite (§10),
-and that absence *is* the disposition fact: **nothing in this program's sealed evidence has
-ever bound on this strategy, so declining to build the pipeline forfeits no measured edge.**
+**Sealed-window use in this section, marked per R1 (disposition — permitted):** the
+sealed year plays no part in the argument above. `intraday_orb` has **no** sealed test
+to cite, and that absence *is* the disposition fact — nothing in this program's sealed
+evidence has ever bound on this strategy, so declining to build the pipeline forfeits
+no measured edge.
 
-**Status the record carries:** `EXPERIMENTAL`, unchanged — no downgrade, no approval, no
-deletion. `Strategy` id 1 stays as it is. The record is a document, not a database change.
+**Status the record carries:** `EXPERIMENTAL`, unchanged. No downgrade, no approval,
+no deletion, no database change. `Strategy` id 1 stays as it is. **The record is a
+document, not a database write.**
 
-**What would reopen it (pre-registered re-entry condition, so this is not relitigated
-quarterly):** a real-time — not `DELAYED` — U.S. equities entitlement verified by
-`data/entitlements.py`, **plus** a measured effective opening-auction spread for the
-24-symbol universe (which today requires an NBBO entitlement returning `403`), **plus** an
-operator decision to change the EOD-only policy. Absent all three the answer is stable.
-
----
-
-## 12. Pre-registration record — frozen BEFORE any run
-
-Everything in this section is fixed now and may not be revised after any intraday bar is
-ingested or any number is seen. It is reproduced verbatim into the final report.
-
-### 12.1 Gate-5 axes, and the gate-0 thresholds' basis
-
-- **Gate-5 grid:** `{"or_bars": [2, 3, 4], "target_range_mult": [1.25, 1.5, 1.75]}` — a
-  ±1-step neighbourhood around the shipped `or_bars = 3`, `target_range_mult = 1.5`
-  (`intraday_orb.py:29, 32`). Coverage 2 of 5 `ORBParams` fields, declared. No `stop_atr`
-  axis exists for this family (§6). Untested: `min_bars_before_entry`,
-  `max_bars_after_open`, `time_stop_bars`.
-- **No-op check** (§6) is a blocking precondition on any gate-5 verdict.
-- **Gate-0 threshold basis (J1-8).** Condition (b) is set at **99%** session coverage, not
-  the proposal's 95%, because the daily path's own `validate_daily` treats missing sessions
-  as a finding at all (map §0.1 shows a 6.9% META gap failing gate 8 outright), so a 5%
-  intraday tolerance would be looser than the daily standard the same universe already
-  meets. Condition (c) is set at **100%** against an explicit exchange-calendar bar count
-  per session type, because set membership against a known calendar has no legitimate
-  tolerance — a wrong bar count is either an early close (enumerable) or corruption.
-  Condition (d) inherits `approved_scope_scan.data_readiness`'s existing freshness bound
-  verbatim rather than inventing one. All four are strictly harder than the hard-coded fail
-  they replace (R4).
-
-### 12.2 Falsification criteria, per snapshot
-
-F1–F7 as tabulated in §4, each with its cross-snapshot status stated: F1, F2, F6 verified
-snapshot-invariant (SPY-proxy-driven); F4, F5, F7 snapshot-independent by construction; F3
-scoped to the snapshot-3 symbol set with the reason no other snapshot can carry an intraday
-snapshot stated explicitly. **F1 or F3 falling changes the recommendation. F2, F4 or F7
-falling drops the corresponding bundle item.**
-
-### 12.3 Post-ingest diagnostics that must run before any gate verdict is read
-
-1. The realised **`ρ = (entry_fill − or_lo)/w` distribution** — median and IQR — which is
-   the unit every cost figure in §8 depends on and which cannot be estimated without bars.
-2. The realised **median `w`** (opening-range width as a fraction of price) across the 24
-   symbols pre-sealed, against F3's 0.80% kill line on `d`.
-3. The realised **entry rate** per symbol-session, replacing §3.5's synthetic figure, and a
-   re-read of every §5 label against §3.5's sensitivity band.
-4. A **clustered / block bootstrap** (month blocks and symbol blocks) alongside the gate-4
-   iid CI, per map §4.3 — a stricter reported statistic, permitted under R4, never a gate
-   change.
-5. The **exit-reason mix**, specifically the share of entries at `since_open ∈ {14, 15, 16}`
-   whose time stop lands after the close and which are therefore carried overnight (§5).
-
-### 12.4 Variant budget and stopping rule
-
-§9, in full: 0 strategy variants; bar size 1; history depth 1; gate-5 grid 1; unlimited
-scratch dry runs; **exactly one irreversible evaluation against the live database**. Hard
-stop if F1, F4, F5 or F7 holds — all four hold today.
-
-### 12.5 Lead snapshot and sealed-look accounting
-
-Lead snapshot: **`universe_24_ex_meta_intraday_15m`**, with the four daily draws disclosed
-alongside and version 1's zero contribution to them stated (§10.2). Any first intraday
-sealed test is reported simultaneously as **`strategy_sealed_test` row 21**, **program
-look 6** (k = 5 baseline), and **version 1's own look 1**, with the map's §0.1-vs-§4.2
-numbering contradiction flagged to the operator (§10.1). Looks this design adds: **zero**.
+**Re-entry condition, pre-registered.** All three, together:
+(i) a **real-time** (not `DELAYED`) U.S. equities entitlement verified by
+`data/entitlements.py`; (ii) a **measured** effective opening-auction spread for the
+universe (today blocked by the NBBO `403`); (iii) an **operator decision** to change
+the EOD-only policy. Absent all three the answer is stable and **should not be
+revisited per quarter**.
 
 ---
 
-## 13. Implementation checklist (only if the operator authorises §14 Q1)
+## 12. Pre-registration block (consolidated, before any run)
 
-Nothing in this list may begin before an affirmative answer to Q1. Items are ordered; each
-is blocking on the ones above it.
+Everything in this section is fixed **now**, before any intraday bar exists.
 
-### 13.1 Files touched
+### 12.1 Gate-5 axes
+`{"or_bars": [2, 3, 4], "target_range_mult": [1.25, 1.5, 1.75]}` — §6. Coverage 2 of
+5 `ORBParams` fields, declared. No `stop_atr` axis exists. Void unless the three no-op
+assertions in §6 hold.
 
-| Area | File | Change |
+### 12.2 Run configuration
+Bar size **15 m**; source **`massive`**; `session == "rth"`; symbols = snapshot 3's
+24; snapshot key **`universe_24_ex_meta_intraday_15m`** (explicit, never unkeyed);
+**`allow_short = False`**; history **option C** (2016-10-17), or **option B**
+(2021-09-08) if the API/storage budget forbids C; cost model unchanged (11.0 bps).
+
+### 12.3 Falsification criteria
+F1, F1b, F2, F3, F4, F5, F6, F7, F8 — §4, each with its four-snapshot statement.
+
+### 12.4 Variant budget and stopping rule (whole strategy)
+0 strategy variants / 0 evaluations / 0 sealed looks in this design; conditional
+budget of 1 bar size, 1 depth, 1 configuration, 1 grid and 0 v0.1.0 evaluations if
+Q1 is answered yes — §9. Hard stop on F1b, F4, F5 or F8.
+
+### 12.5 Lead snapshot (R1)
+`universe_24_ex_meta_intraday_15m`, with all four daily draws disclosed alongside and
+the fact that version 1 contributes none of them stated explicitly — §10.
+
+### 12.6 Sealed-look accounting
+Baseline **k = 5** (program convention; map self-contradiction flagged in §10). This
+design adds **0** looks. The first admissible future evaluation (a v0.2.0) would be
+**program look 6 and version 1's own look 1**, both stated together.
+
+### 12.7 Post-ingest diagnostics that must run before any gate is scored
+1. median **λ·w** and its distribution across the universe (F3 — the single input the
+   whole cost argument turns on);
+2. measured **entry rate** per symbol-session, replacing §3.5's synthetic bracket;
+3. measured **session-block `deff`** on OOS trades (F7), reported alongside gate 4's
+   iid CI as a diagnostic (explicitly permitted by R4: "adding a stricter reported
+   statistic is never a weakening");
+4. measured single-pass wall clock, to score F4 as a ratio;
+5. count of trades on the 19 long-tradeable bear sessions (F6).
+
+---
+
+## 13. Implementation checklist (only if the operator authorises)
+
+### 13.1 Files to change
+
+| File | Change | Item |
 |---|---|---|
-| Adapter | `src/signalforge/data/adapters/massive.py` | add `fetch_intraday_bars` satisfying `IntradayBarAdapter` (`adapters/base.py:138-149`); declare `BAR_INTRADAY` in `capabilities()` (`:86-100`); calendar chunking (the daily path rejects `next_url` at `:186`); RTH-only window |
-| Load | `src/signalforge/data/series.py` | **B7** — `load_intraday` (`:105-136`) must filter `session` and `is_simulated` |
-| Validate | `src/signalforge/data/validate.py` | **B3** — add `validate_intraday` beside `validate_daily` (`:66`) |
-| Promotion | `src/signalforge/research/promotion.py` | **§2.2** gate 0 (`:512-534`); **B1** `:386`, `:586`, `:708`; **B2** `:744` *(as a rider on `diagnostics/pipeline_hardening_spec.md` §1.5 Change A — one patch, not two)*; **B4** `:249-267`; **B5** `:161-210`; **B3** wiring at `:808` |
-| Features | `src/signalforge/research/features/intraday.py` | **B6** — precompute session boundaries; `opening_range` (`:38`) must not rescan `range(t+1)` |
-| CLI / snapshot | `src/signalforge/cli.py`, `research/fb_meta_universe_comparison.resolve_variant` | **B8** — an explicit intraday dataset variant minting `universe_24_ex_meta_intraday_15m`; never allow the unkeyed path (`promotion.py:505`) for an intraday run |
-| **Not touched** | `research/strategies/intraday_orb.py`, `config/research.py:93-123`, `backtest/costs.py:11-16`, `research/approved_scope_scan.py`, `alerts/dispatch.py` | strategy unchanged (`VERSION = "0.1.0"`); no threshold, no cost-model change (R4); the two policy surfaces are out of scope for this program (map §2.4) |
+| `src/signalforge/data/adapters/massive.py` | `fetch_intraday_bars` + `BAR_INTRADAY`/`DELAYED` capability + calendar chunking | §2.4, B9 |
+| `src/signalforge/data/series.py` | `load_intraday` filters `session == "rth"` | **B7** |
+| `src/signalforge/data/validate.py` | `validate_intraday` | **B3** |
+| `src/signalforge/research/features/intraday.py` | per-session index cache (behaviour-identical) | **B6** |
+| `src/signalforge/research/promotion.py` | gate 0 real query + fall-through (§2.2); thread `intraday`/`bar_size` at `:586` and `:386` (**B1**); `_as_date` at `:744` (**B2**); intraday features in `_leakage_self_check` (**B4**); `intraday_orb` branch in `_sensitivity_plan` (**B5**); horizon dispatch at gate 8 (**B3**) | B1–B5 |
+| `src/signalforge/research/sensitivity.py` | thread `intraday`/`bar_size` at `:148` | **B1** |
+| `src/signalforge/research/portfolio_metrics.py` | horizon-aware `exposure_days` **as a diagnostic only** | **B8** |
+| `src/signalforge/cli.py` | `ingest-intraday --since/--until`; `evaluate-promotion --dataset-key` | **B9, B10** |
+| `src/signalforge/research/strategies/intraday_orb.py` | **NOT in this scope** — the regime lag is a v0.2.0 with its own design document | §7 |
 
-### 13.2 Tests
+### 13.2 Tests to add
 
-- `tests/data/test_intraday.py` — extend: RTH-only load, `is_simulated` exclusion, the UTC
-  `_session_date` post-market misassignment case, early-close bar counts.
-- `tests/data/test_massive.py` — the new adapter: pacing, calendar chunking, `next_url`
-  absence, capability declaration.
-- `tests/backtest/test_engine.py` — a session-boundary case: an entry at `since_open = 16`
-  whose 12-bar time stop lands past the close.
-- `tests/research/test_promotion.py` — gate 0 passing and failing on each of conditions
-  (a)–(e); gate 6 bucketing an intraday `datetime` `entry_date` correctly after B2; gate 5
-  no longer hard-failing for the `intraday_orb` prefix.
-- `tests/research/test_sensitivity.py` — the `intraday_orb` grid factory round-trips
-  `ORBParams` (a renamed field must raise `TypeError` loudly, `promotion.py:50`).
-- `tests/research/test_backtest_runner.py` — `intraday=`/`bar_size=` threading from the
-  promotion call sites.
-- Full gate: `make check` (`lint` + `test`), plus `make safety` and `make secrets`.
+- `tests/data/test_series_intraday_session.py` — `load_intraday` drops `pre`/`post`
+  rows (B7); an EST post-market bar does not leak into the next session's opening
+  range.
+- `tests/data/test_validate_intraday.py` — session completeness, bars-per-session
+  (26 full / 14 half-day), duplicate `bar_start`, non-positive prices,
+  `source`/`bar_size`/`session` purity (B3).
+- `tests/research/test_promotion_intraday_gate0.py` — gate 0 fails on: no rows;
+  partial coverage; wrong bar size; `is_simulated=True`; wrong source; a non-RTH row;
+  a stale latest bar; and a span shorter than `MIN_PRESEALED_DAYS` (the fall-through,
+  §2.2 (e)).
+- `tests/research/test_promotion_intraday_gate6.py` — with `datetime` entry stamps,
+  buckets are non-zero after `_as_date` and `0/0/0` before it (B2, F2).
+- `tests/research/test_sensitivity_intraday_grid.py` — the `intraday_orb` branch
+  returns a 3 × 3 grid; **the no-op assertions of §6** (nine cells not identical;
+  `or_bars` moves `n_trades`; `target_range_mult` moves `expectancy_r`).
+- `tests/research/test_intraday_features_perf.py` — B6 produces **byte-identical
+  trades** to the pre-optimisation path on a fixture series, and is sub-quadratic.
+- `tests/data/test_massive_intraday.py` — capability declaration, pacing, calendar
+  chunking, `next_url` handling.
+- `tests/research/test_approved_scope_intraday_unchanged.py` — `approved_horizons`
+  still excludes INTRADAY and `dispatch` still skips it (the policy must not drift as
+  a side effect of research plumbing).
 
-### 13.3 Blocking pre-integration checks
+### 13.3 Three pre-integration guards (each must be a test, not a habit)
 
-1. **No-op grid check (§6).** Run the 3 × 3 grid on the scratch database and assert the nine
-   `(n_trades, expectancy_r)` pairs are not all identical, that `or_bars ∈ {2, 4}` moves
-   `n_trades`, and that `target_range_mult ∈ {1.25, 1.75}` moves `expectancy_r`. **Gate 5's
-   result is void until this passes.**
-2. **Sealed-test staleness guard (R3, map §4.3, §A.1).** Before the single live evaluation,
-   assert `SELECT count(*) FROM strategy_sealed_test WHERE strategy_version_id = 1` is
-   **0**. Afterwards, assert exactly one row exists and that it was created by that run
-   (compare `id` against the pre-run `max(id) = 20` and the recorded
-   `dataset_snapshot_id`). If a row already exists, **stop**: the look is already spent and
-   any number produced is a replay.
-3. **Spec-hash non-disturbance (R7).** Before and after, record
-   `approval_scope.current_spec_json_hash()` for version 2 and version 5 and assert both are
-   unchanged; nothing here touches a `StrategySpec`, so any movement means an unintended
-   edit. Re-record the R7b state (v2 → sealed test 11; v5 → sealed test 14; both scopes on
-   snapshot 3) and confirm the probation dashboard still shows those after the run — a new
-   passing evaluation on a *different* snapshot would make `scopes[0]`
-   (`paper_probation.py:118`, `approval_scope.py:45-66`, no `order_by`) order-dependent.
-4. **Snapshot-key check (B8).** Assert `universe_24_ex_meta_intraday_15m` does not collide
-   with any `universe_auto_*` (`promotion.py:339`) or `liquid_us_*` (`screen.py:259`) row —
-   FACT: ten `data_snapshot` rows exist today, ids 1–10 — and that the run resolves to it
-   rather than to snapshot 3 (`reusable_by_new_evaluations = 1`).
-5. **Worker stopped, maintenance window open** before any ingest touches
-   `data/signalforge.sqlite`.
+1. **No-op grid check (§6).** Assert the nine `(n_trades, expectancy_r)` pairs are not
+   all identical and that each axis moves its named statistic. If it fails, gate 5's
+   result is **void**, reported as void.
+2. **Sealed-test staleness guard (`MAP.md` §4.3, R3).** After any evaluation, assert
+   `StrategySealedTest.strategy_version_id` refers to a `StrategyVersion` row created
+   by **this** run, and that the run's `git_sha`/`spec_json` match the code under
+   test. `upsert_strategy_version` (`persistence.py:46-93`) refreshes those fields on
+   the **same row** when `version` is unchanged, which would silently replay an old
+   sealed result against new code.
+3. **Spec-hash non-disturbance (R7 / R7b).** Before and after the change, assert
+   `approval_scope.current_spec_json_hash()` is **unchanged** for v2
+   (`trend_continuation.short_swing`) and v5 (`relative_strength.medium_swing`), and
+   re-record that each still has exactly two passing evaluations, both on snapshot 3
+   → sealed tests **11** and **14**, so `paper_probation.py:113-122`'s `scopes[0]`
+   selection stays deterministic. Any new passing evaluation on a different snapshot
+   activates the ordering hazard.
 
-### 13.4 Exact commands the validation phase runs — SCRATCH DATABASE ONLY
+### 13.4 Exact validation commands — **SCRATCH database only**
 
-Every command below runs against a copy. Nothing in this phase may write
-`data/signalforge.sqlite`.
+A live paper probation and a background worker run against
+`data/signalforge.sqlite`. Nothing below may touch it.
 
 ```bash
 cd /Users/louisbrailey/signal-forge
 
-# 0. Scratch copy (repeat from a fresh copy for each clean run).
-cp data/signalforge.sqlite "$TMPDIR/scratch-orb.sqlite"
-export DATABASE_URL="sqlite+pysqlite:///$TMPDIR/scratch-orb.sqlite"
-.venv/bin/python -c "import os;print(os.environ['DATABASE_URL'])"   # confirm before anything else
+# 0. Scratch copy (the ONLY database any writing command may see).
+cp data/signalforge.sqlite "$TMPDIR/scratch-intraday-orb.sqlite"
+export DATABASE_URL="sqlite+pysqlite:///$TMPDIR/scratch-intraday-orb.sqlite"
 
-# 1. Static gates (no DB).
+# 1. Repo gates, before anything else.
 make lint
 make test
-make safety
-make secrets
+make secrets          # check-only; never rewrite .secrets.baseline
+make safety           # S1-S10 invariants
 
-# 2. Ingest into the SCRATCH copy only (requires the new adapter; paced, ~48 min for option C).
-.venv/bin/signalforge ingest-intraday --bar-size 15m --days 3620 \
-  --symbols "$(.venv/bin/python -c "
-import sqlite3,json
-c=sqlite3.connect('file:data/signalforge.sqlite?mode=ro',uri=True)
-print(','.join(json.loads(c.execute(\"select symbols_json from data_snapshot where key='universe_24_ex_meta'\").fetchone()[0])))")"
+# 2. Targeted suites for the bundle.
+.venv/bin/python -m pytest -q \
+  tests/data/test_series_intraday_session.py \
+  tests/data/test_validate_intraday.py \
+  tests/data/test_massive_intraday.py \
+  tests/research/test_promotion_intraday_gate0.py \
+  tests/research/test_promotion_intraday_gate6.py \
+  tests/research/test_sensitivity_intraday_grid.py \
+  tests/research/test_intraday_features_perf.py \
+  tests/research/test_approved_scope_intraday_unchanged.py
 
-# 3. Post-ingest diagnostics (§12.3) — read-only, in-process, no writes.
-.venv/bin/python scripts/orb_post_ingest_diagnostics.py     # rho, w, entry rate, clustered bootstrap, exit mix
+# 3. Gate 0 must STILL FAIL on the scratch DB before any ingest
+#    (0 rows in ohlcv_intraday -> condition (a) fails). This is the
+#    regression that proves the new query is not a fabricated pass.
+.venv/bin/signalforge evaluate-promotion --strategy intraday_orb \
+  --dataset ex_meta --since 2016-10-17 --until 2026-09-08
 
-# 4. Gate-5 no-op check (§6, §13.3 item 1) — must pass before any gate-5 verdict is read.
-.venv/bin/python scripts/orb_grid_noop_check.py
+# 4. Backfill into the SCRATCH database only (operator-authorised, paced,
+#    ~240 calls / ~48 min). Requires B9.
+.venv/bin/signalforge ingest-intraday --bar-size 15m \
+  --since 2016-10-17 --until 2026-09-08 \
+  --symbols "$(.venv/bin/python -c 'from signalforge.config import get_settings; print(",".join(get_settings().research.universe))')"
 
-# 5. Full 10-gate dry run on the scratch copy — as many times as needed.
-.venv/bin/signalforge evaluate-promotion \
-  --strategy intraday_orb --dataset ex_meta_intraday_15m \
+# 5. Post-ingest diagnostics (§12.7) BEFORE any gate is scored.
+.venv/bin/python scripts/intraday_orb_diagnostics.py   # lambda*w, entry rate, deff, wall clock, bear-session trades
+
+# 6. The keyed snapshot + single evaluation (requires B10; in-process because
+#    the CLI's --dataset accepts three fixed names only).
+.venv/bin/python scripts/evaluate_intraday_orb.py \
+  --dataset-key universe_24_ex_meta_intraday_15m \
   --since 2016-10-17 --until 2026-09-08
 
-# 6. Staleness / spec-hash / snapshot checks (§13.3 items 2-4) against the scratch copy,
-#    then re-run them against a FRESH copy to confirm they are deterministic.
-.venv/bin/python scripts/orb_preintegration_checks.py
+# 7. Guards.
+.venv/bin/python scripts/check_spec_hash_unchanged.py   # R7/R7b, §13.3 item 3
+.venv/bin/python scripts/check_sealed_test_freshness.py # R3,    §13.3 item 2
+
+# 8. Confirm the live database was never touched.
+shasum -a 256 data/signalforge.sqlite   # compare against the value taken at step 0
 ```
 
-Only after every item in §13.3 passes on the scratch copy, and only with the operator's
-explicit go-ahead on the record, is `DATABASE_URL` unset and step 5 run **exactly once**
-against `data/signalforge.sqlite` — with the worker stopped. That single run is
-irreversible (§A.1).
-
-*(`scripts/orb_*.py` are new files created by the implementation phase; they are named here
-so the plan is auditable, and each is read-only against the database except for the
-promotion command itself.)*
+**Step 6 is only ever run against a v0.2.0 (§7).** Running it against v0.1.0 is
+forbidden by this pre-registration.
 
 ---
 
 ## 14. What the operator must approve, and what is reported if it fails
 
-### 14.1 Approvals required before any implementation begins
+### 14.1 Approvals required before any implementation
 
-| # | Approval | Why it is the operator's call, not research's |
+| # | Approval | Why it is the operator's, not research's |
 |---|---|---|
-| **A1** | **Buy a real-time (not `DELAYED`) U.S. equities entitlement**, or accept that the modelled fill is unattainable live | A spend decision, and the precondition for everything else. Without it, a passing backtest describes a fill the system cannot obtain (§0 finding 2, F5) |
-| **A2** | **~240 paced provider API calls (~48 min) for the option-C intraday backfill** | This is the W1-equivalent sign-off the map §4.0 requires for any paced API work; it is the only item here that spends provider budget |
-| **A3** | **Accept ~0.53 GB added to the live database (0.38 GB → ~0.91 GB, ~2.4×), inside a maintenance window with the worker stopped**, or direct the intraday bars to a sidecar store instead | It is the same SQLite file a live paper probation and a background worker use |
-| **A4** | **Spend version 1's only sealed look**, knowing the first run past gate 0 locks it irreversibly whatever gates 1–8 do (§A.1) | This is a one-way door and it is not recoverable by re-running |
-| **A5** | **Change the EOD-only operating policy**, or accept that a passing intraday strategy still cannot produce a live candidate | `approved_scope_scan.py:81` (`:19-22` policy comment) and `alerts/dispatch.py:241` are policy surfaces, out of scope for this program (map §2.4) |
-| **A6** | **Authorise a `v0.2.0` for the same-session regime lookahead** (§7 item 1) before any intraday number is believed | It is a genuine lookahead the ladder structurally cannot catch, and fixing it is behavioural, hence a version bump and a further look |
-| **A7** | **Rule on the two open map items**: gate 7's docstring-vs-code divergence (`config/research.py:111-113` vs `promotion.py:775`), and the §0.1-vs-§4.2 sealed-look numbering contradiction (§10.1) | Both are program-wide; the second changes how every strategy's report numbers its looks |
+| **A1** | **Buy a real-time U.S. equities entitlement** (Q1) | Without it the modelled fill is unattainable (§0.1, F5) and every number produced is about a strategy that cannot be traded. This is a spend decision. |
+| **A2** | **Change the EOD-only operating policy** (Q1) | `approved_scope_scan.py:19-22, :81` and `alerts/dispatch.py:241` enforce it structurally; `ResearchConfig.enabled_horizons` contradicts them. These are policy surfaces, explicitly out of scope for this program (`MAP.md` §2.4). |
+| **A3** | **~240 paced provider API calls / ~48 min of quota** (the W1-equivalent sign-off) | An external, metered resource. Option B is 120 calls / ~24 min. |
+| **A4** | **+0.53 GB in the operational database, or a sidecar** (Q4) | Grows a live 0.382 GB file to 0.91 GB (2.39×) and needs a maintenance window with the worker stopped. |
+| **A5** | **Authorise a v0.2.0 design** for the regime lag (and optionally the leash/target defects) | The only admissible evaluable artifact (§7). It is a new design document with its own variant budget under R5. |
+| **A6** | **Decide `allow_short`** (Q6) | It changes the gate-6 bear supply from 19 to 267 sessions and is a variant under R5. |
+| **A7** | **Resolve gate 7's docstring/code divergence** (Q5) | `config/research.py:111-113` says OOS; `promotion.py:775` computes all pre-sealed. An intraday run at 1,500–3,000 trades/yr makes the Sharpe annualisation far more consequential than for a 100-trade/yr swing strategy. |
 
-**The recommendation is that A1 is answered "no", in which case A2–A7 do not arise and §11
-is the outcome.**
+Absent **A1 and A2**, the answer to Q1 is no and §11 is the outcome. **A3–A7 are not
+reached.**
 
-### 14.2 The operator questions, restated
+### 14.2 What is reported if it proceeds and fails
 
-- **Q1 (decisive) — do you want intraday operation at all, given the policy is currently
-  also an entitlement fact?** Relaxing the EOD-only policy does **not** make intraday
-  operable, because the entitled feed is `DELAYED` and no `REALTIME` equities feed exists on
-  this plan. The real question is *"will you buy a real-time equities entitlement?"* Until
-  that is yes, the honest answer to Q1 is **no**.
-- **Q2 — convert gate 0 to a real data query (R4-permissible)?** Recommendation: **only
-  bundled with B1–B8, or not at all.** Alone it converts a truthful, self-explaining hard
-  fail into zero-trade gate failures that read as strategy defects **and** exposes the
-  sealed-lock trap (§A.1). It buys nothing while blocks 2 and 3 stand.
-- **Q3 — history depth, if Q1 is yes?** Option A is **not viable** (0 bear, 0 range
-  sessions; gate 6 arithmetically unreachable). Option B (2021-09) is the minimum admitting
-  any bear coverage (16 sessions). Option C (2016-10, parity with the daily program) gives
-  19. **Recommendation if proceeding: C.**
-- **Q4 — operational risk to the live probation?** §3.3 and A3.
-- **Q5 — gate 7's docstring/code divergence?** Open from map §0.2; an intraday run at
-  ~1,500 trades/year makes the `√(trades_per_year)` annualisation
-  (`portfolio_metrics.py:110`) far more consequential than for a 100-trade/year swing
-  strategy — see §5, where it makes gate 7 an expected but uninformative pass.
+The failure is pre-classified so the report cannot be reshaped after the fact:
 
-### 14.3 What is reported if this fails
+- **Fails at gate 0** → the backfill is incomplete. Report which of §2.2 (a)–(e)
+  failed, per symbol. **Not** a strategy finding. Fix the data or stop; **do not
+  relax (b), (c) or (d)** — they are frozen (§2.2).
+- **Fails at gate 3** (the forecast outcome) → report the measured **λ·w** and the
+  measured cost in R beside the §8 forecast, the realised payoff ratio against the
+  nominal 1.5, and the realised hit rate against the break-even table. Verdict:
+  **"does not pass — the frozen cost model exceeds the measured gross edge"**, filed
+  as an *evidence* failure (unlike §11's capability failure) and stated as
+  **program look 6 / version 1's own look 1** if gate 9 was reached.
+- **Fails at gate 4 only** → report the iid CI **and** the session-block `deff` and
+  clustered CI side by side (F7), and state plainly that the iid gate is the one the
+  ladder scores and the clustered one is the honest statistic.
+- **Fails at gate 6** → report the three buckets, the **unbucketed trade count**, the
+  19-session supply, and the 2.19 %-per-symbol-session threshold. Say explicitly
+  whether the shortfall is supply (calendar) or rate (signal) — F6 decides it.
+- **Gate 5 void** (no-op check fails) → report the gate as **void**, never as a pass,
+  and do not score the evaluation.
+- **Passes every gate** → it is still **not operable**: report the pass, then report
+  that `approved_scope_scan.py:81` and `alerts/dispatch.py:241` would refuse to scan
+  or alert on it, and that the modelled fill is one bar earlier than the entitlement
+  permits. A pass here is a research result, not a deployment.
 
-Three distinct failure reports are pre-registered, so that none of them can be presented as
-another:
-
-1. **If Q1 is answered "no" (the expected outcome).** The §11 record is filed:
-   *`intraday_orb.intraday` v0.1.0 — **DOES NOT OPERATE**, a capability finding, not an
-   evidence finding.* It carries the six blocks of §11, states `0 variants / 0 sealed looks
-   consumed`, keeps status `EXPERIMENTAL`, changes no database row, and carries the
-   pre-registered re-entry condition so the question is not reopened quarterly.
-2. **If the pipeline is authorised and the single evaluation fails a gate.** The report is a
-   documented **"does not pass"** naming the binding gate, the trade set it was measured on
-   (map §0.2), the realised `ρ`, `w`, entry rate and cost wedge against §8's forecast, the
-   gate-4 hurdle at both the iid and the measured clustered design effect, gate 6's three
-   buckets **and** its unbucketed count, and the disclosure that the result is **row 21 /
-   program look 6 / version 1's look 1** with the four daily draws alongside. It states
-   explicitly that this is version 1's only look and that it is spent.
-3. **If the pipeline is authorised and the run is invalidated by a defect** (a bundle item
-   missed, gate 0 passing on contaminated bars, the sealed row already locked by an earlier
-   run). The report is a **process failure**, not a strategy result: it names the defect, it
-   does **not** quote the gate numbers as evidence about the strategy, and it records that
-   the look is spent and cannot be recovered without a `VERSION` bump or a new snapshot key —
-   each of which costs a further look. §13.3's checks exist to make this outcome
-   detectable rather than silent.
+In every branch the report states: **k = 5 baseline**, the look number in both
+conventions, the variant count from §9 verbatim, the lead snapshot from §12.5, and
+the fact that the same-session regime lookahead forced a v0.2.0.
 
 ---
 
-*Design of record, `intraday_orb.intraday` v0.1.0. Read-only: no strategy code, no
+## Operator questions
+
+**Q1 (decisive) — do you want intraday operation at all, given that the policy is
+currently also an entitlement fact?** EOD-only is enforced structurally in three
+places (`approved_scope_scan.py:81`, `alerts/dispatch.py:241`, `MassiveAdapter`'s
+hard-wired `END_OF_DAY`) and contradicted in a fourth (`enabled_horizons`). Relaxing
+the policy does **not** make intraday operable, because the entitled feed is
+`DELAYED` ≥ 15 min against a 15-minute bar. The real question is *"will you buy a
+real-time equities entitlement?"* — and until that is yes, the honest answer to Q1 is
+**no**, and §11 is the outcome.
+
+**Q2 — convert gate 0 to a real data query (R4-permissible, §2.2)?**
+Recommendation: **only bundled with B1–B10, or not at all.** Alone it converts a
+truthful, self-explaining hard fail into zero-trade gate failures that read as
+strategy defects (verified: 0 trades on daily bars).
+
+**Q3 — history depth, if Q1 is yes.** Option A (2024-09-22) is **dead under every
+configuration** (0 bear *and* 0 range labelled sessions, F1b). Option B (2021-09) is
+the minimum viable under the pre-registered long-only configuration (16 bear
+sessions). Option C (2016-10, parity with the daily program) gives 19.
+**Recommendation if proceeding: C.**
+
+**Q4 — operational risk to the live probation.** Option C at 15 m RTH inserts
+1,551,264 rows (+0.53 GB) into the same SQLite file a live paper probation and a
+background worker use, taking it from 0.382 GB to 0.91 GB (**2.39×**). It needs a
+maintenance window with the worker stopped, and a decision on whether intraday bars
+belong in this database at all rather than in a sidecar.
+
+**Q5 — gate 7's docstring/code divergence** (`config/research.py:111-113` says OOS;
+`promotion.py:775` computes all pre-sealed) remains open from `MAP.md` §0.2. Not
+specific to this strategy, but an intraday run at ~1,500–3,000 trades/yr makes the
+`sqrt(trades_per_year)` annualisation (`portfolio_metrics.py:110`) and the clamped
+exposure (`:119`) far more consequential.
+
+**Q6 (new) — `allow_short`: which configuration is the ladder supposed to test?**
+The ladder is hard-wired long-only (`allow_short` never passed at `promotion.py:586`,
+`:386`, `sensitivity.py:148`); the **live scan path passes it**
+(`research/scan.py:271`, `cli.py:903`) from an operator-togglable setting
+(`config/research.py:296`, dashboard `:332`). For `intraday_orb` this is not cosmetic:
+it moves gate 6's bear supply from **19** to **267** sessions. The pre-registration
+here is `allow_short = False`; changing it is a variant under R5 and needs your
+decision **before** any run. It also means that, today, the ladder and the live
+scanner could disagree about what a promoted strategy would trade — worth resolving
+independently of this strategy.
+
+**Q7 (new) — the CLI gaps.** `ingest-intraday` has no `--since/--until` and
+`evaluate-promotion` cannot select a custom snapshot key (§A.2). Both must be built
+before any keyed intraday evaluation is possible, and the second is what stops an
+unkeyed run from silently attaching to **snapshot id 3**, the daily snapshot both
+live approvals sit on.
+
+---
+
+*Design synthesis, `intraday_orb.intraday` v0.1.0. Read-only: no strategy code, no
 configuration, no database row and no gate threshold was changed in producing this
-document. No provider API was called. Every number is a `SELECT` result, a `file:line`
-citation, an in-process read-only computation, or an arithmetic derivation whose inputs are
-stated.*
+document. No provider API was called. Every number is a `SELECT` result, a
+`file:line` citation, an in-process read-only computation, or an arithmetic
+derivation whose inputs are stated.*

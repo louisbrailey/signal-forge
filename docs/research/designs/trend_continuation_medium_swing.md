@@ -246,6 +246,9 @@ program's nominal 2 SE because of the search that precedes it (§12.2).
 | "95.07 sealed-year round trips" | **95 sealed trades**; `95.07` is `turnover_per_year` in sealed test id 12's `metrics_json` (verified) — the two are different quantities and must not be conflated | null option §8 |
 | `P(sealed mean < 0 \| pre-sealed, n = 95)` | **4.2%** at the measured sd 1.7259; **4.3%** at map §0.3's CI-inverted sd 1.741. Cite the sd with the figure | null option (attributed 4.2% to §0.3, which says 4.3%) |
 | "2× / 5× modelled spread" | The map's own formula `round_trip = 2 × (3.0 + spread_bps/2)` makes 26 and 66 bps round trip correspond to **20 and 60 bps quoted spread** (4× and 12× the modelled 5 bps quoted), not 2× and 5× of it. The 26/66 bps figures are retained for §4.2 item 8 compliance; the **label** is corrected to round-trip bps and the map's mislabel is raised as an operator item | all three proposals (inherited from map §0.4) |
+| `_is_neighbour` behaviour when the baseline lacks a grid axis value | It **does not raise**: `values.index(baseline[axis])` throws `ValueError`, which is **caught and returns `False`** (`sensitivity.py:106-110`). The consequence is worse than a crash — `neighbours` comes back empty, so the ≥75% guard at `sensitivity.py:194` never fires and the neighbour test is **silently skipped** (§6.2) | an earlier draft of this synthesis; corrected here |
+| `approved_scope` as a database table | **No such table exists** (verified against the live schema). `ApprovedScope` is a frozen dataclass derived at read time from *passing* `StrategyPromotionEvaluation` rows (`approval_scope.py:36-66`), so the R7b pre-state to record is the set of passing evaluations and their `dataset_snapshot_id`s (§2, §13.1 step 1) | an earlier draft of this synthesis; corrected here |
+| The live approvals' stored spec hashes | Present on `strategy_promotion_evaluation.spec_json_hash`: v2 (evals 20, 32) `2ed9743170bd3bbd…`, v5 (evals 23, 35) `dfe696b662dd02b8…`. Both reproduce **exactly** from live code today, and a module-level `VERSION` bump moves v2's to `8447205d7592b531…` — **executed read-only for this synthesis**, which is the direct confirmation of the exits proposal's most dangerous defect. §13.1 step 2 is consequently a mechanical assertion, not an eyeball check | exits & risk V-A's diff (which would have broken it) |
 
 ---
 
@@ -360,9 +363,15 @@ change" is a claim that must be auditable:
 hashes `TrendParams`. Because `spec()` does not change, v2's stored hash `2ed97431…` and v5's
 `dfe696b6…` (on the passing evaluations scoping the two live approvals: evals 20 & 32, 23 & 35)
 are untouched, `scan_scope_matches` (`approval_scope.py:69-94`) keeps returning `True`, and
-the live probation is undisturbed. No new passing evaluation is created on any snapshot, so no
-new `ApprovedScope` row appears and the R7b `scopes[0]` selection stays deterministic
-(v2 → sealed id 11, v5 → sealed id 14, both snapshot 3). **This safety claim is scoped to the
+the live probation is undisturbed. **FACT, verified for this synthesis:** there is no
+`approved_scope` table — an `ApprovedScope` is a frozen dataclass **derived at read time** from
+that version's *passing* `StrategyPromotionEvaluation` rows (`approval_scope.py:36-66`). So the
+operative statement is: no new **passing evaluation** is created on any snapshot, therefore no
+new scope exists, and the R7b `scopes[0]` selection stays deterministic (v2 → sealed id 11,
+v5 → sealed id 14, both snapshot 3). The two live approvals' stored hashes are
+`2ed9743170bd3bbd…` (v2, evals 20 & 32) and `dfe696b662dd02b8…` (v5, evals 23 & 35), read from
+`strategy_promotion_evaluation.spec_json_hash` and re-computed identically from live code
+today. **This safety claim is scoped to the
 do-nothing branch and does *not* extend to Route A; see §5.4.**
 
 FACT: v3 remains `EXPERIMENTAL` and therefore carries **zero live-trading risk by
@@ -746,13 +755,20 @@ the 15-trade-per-cell floor, and that same constant is gate 1's per-fold floor.
   count.
 - **Dispatch:** `_sensitivity_plan` **must** be changed to discriminate by version (dispatch on
   `spec.versioned_key`, or an explicit per-version grid) as part of the same diff. Leaving it
-  on the shared prefix is not a neutral option: with the new fields defaulted onto
-  `TrendParams`, `is_base` is False for every point (no baseline anchor,
-  `baseline_expectancy_r` falls back to 0.0) and `_is_neighbour` raises on `values.index(None)`
-  (`sensitivity.py:100-112`) so the ≥75% neighbour test is **silently skipped**, while every
-  cell runs *with* the trailing rule on — i.e. gate 5 stops testing the shipped v0.1.0/v2 rule
-  entirely. Without the fields defaulted, `_replace` raises `TypeError` and v2's evaluation
-  fails outright.
+  on the shared prefix is not a neutral option. **Mechanism, verified line by line for this
+  synthesis:** with the new fields defaulted onto `TrendParams`, v2's baseline carries
+  `trail_arm_r = None` while the grid axis holds `[0.75, 1.0, 1.25]`, so (i)
+  `is_base = all(overrides[a] == baseline.get(a) for a in axes)` (`sensitivity.py:163`) is
+  **False for every point**, `baseline_point` is `None` and `baseline_exp` falls back to
+  **0.0** (`:181-182`) — no baseline anchor; and (ii) `_is_neighbour` hits
+  `values.index(None)` → `ValueError`, which is **caught and returns `False`**
+  (`sensitivity.py:106-110` — it does *not* raise; the source claim that it raises is
+  corrected here), so `neighbours` is **empty**, `nb_frac` is 0.0, and the guard
+  `if neighbours and nb_frac < neighbour_fraction_min` (`:194`) **never fires** — the ≥75%
+  neighbour test is silently skipped. Meanwhile every cell runs *with* the trailing rule on,
+  so gate 5 stops testing the shipped v0.1.0/v2 rule entirely. Without the fields defaulted,
+  `_replace` raises `TypeError` (`promotion.py:50`) and v2's evaluation fails outright. Both
+  branches are unacceptable; the dispatch change is therefore mandatory, not optional.
 - **No-op assertion (mandatory, blocking):** at least **7 of 9** cells along each new axis must
   differ from the baseline cell in `oos_expectancy_r` by > 1e-6, and **no two cells** may be
   byte-identical in `(n_trades, oos_expectancy_r)`. Plus the sharper case the map does not yet
@@ -1136,23 +1152,45 @@ cp /Users/louisbrailey/signal-forge/data/signalforge.sqlite "$SCRATCH"
 export DATABASE_URL="sqlite+pysqlite:///$SCRATCH"
 export SF=/Users/louisbrailey/signal-forge/.venv/bin
 
-# 1. Record the pre-state (sealed rows, evaluations, versions, R7b scope selection).
+# 1. Record the pre-state. NOTE (verified): there is NO `approved_scope` table — an
+#    ApprovedScope is a dataclass derived at read time from PASSING
+#    strategy_promotion_evaluation rows (approval_scope.py:36-66). The R7b pre-state is
+#    therefore the set of passing evaluations and their dataset_snapshot_ids.
 $SF/python - <<'PY'
 import os, sqlite3
 c = sqlite3.connect(os.environ["SCRATCH"])
-for t in ("strategy_sealed_test","strategy_promotion_evaluation","strategy_version","approved_scope"):
+for t in ("strategy_sealed_test","strategy_promotion_evaluation","strategy_version"):
     print(t, c.execute(f"select count(*) from {t}").fetchone()[0])
 for r in c.execute("select id,strategy_version_id,dataset_snapshot_id,passed from strategy_sealed_test order by id"):
     print(r)
+print("--- R7b: passing evaluations (these ARE the scopes) ---")
+for r in c.execute("select id,strategy_version_id,dataset_snapshot_id,spec_json_hash "
+                   "from strategy_promotion_evaluation where passed=1 order by strategy_version_id,id"):
+    print(r)
 PY
 
-# 2. Spec-hash non-disturbance for the two LIVE approvals (v2, v5) — must be byte-identical
-#    to the hashes stored on the passing evaluations 20/32 (v2) and 23/35 (v5).
+# 2. Spec-hash non-disturbance for the two LIVE approvals (v2, v5) — asserted mechanically
+#    against the hashes stored on their passing evaluations (v2: 20, 32; v5: 23, 35), not
+#    eyeballed. Verified present in strategy_promotion_evaluation.spec_json_hash.
 $SF/python - <<'PY'
+import os, sqlite3
 from signalforge.research.persistence import spec_json_hash
 from signalforge.research.strategies import default_strategies
+STORED = {  # verified read-only for this design, 2026-09-10
+    "trend_continuation.short_swing":   "2ed9743170bd3bbdb450ea03a004a7ffaeb64ccbbe6075db312ffd544072f382",
+    "relative_strength.medium_swing":   "dfe696b662dd02b8fa3a02ce5b987c6eade84a40d88c1a2d8d52e206cb6f6c32",
+}
+c = sqlite3.connect(os.environ["SCRATCH"])
+db = dict(c.execute("select strategy_version_id, spec_json_hash from strategy_promotion_evaluation "
+                    "where id in (20,23,32,35)").fetchall())
+assert db[2] == STORED["trend_continuation.short_swing"], db
+assert db[5] == STORED["relative_strength.medium_swing"], db
 for s in default_strategies():
-    print(s.spec().name, s.spec().version, spec_json_hash(s.spec()))
+    h = spec_json_hash(s.spec())
+    if s.spec().name in STORED:
+        assert h == STORED[s.spec().name], f"LIVE APPROVAL SCOPE BROKEN: {s.spec().name} {h}"
+    print(s.spec().name, s.spec().version, h[:16])
+print("live approval spec hashes undisturbed")
 PY
 
 # 3. Re-run the writing entry point on the UNCHANGED v0.1.0, on the scratch DB only.
@@ -1164,10 +1202,12 @@ import os, sqlite3
 c = sqlite3.connect(os.environ["SCRATCH"])
 n_sealed = c.execute("select count(*) from strategy_sealed_test").fetchone()[0]
 assert n_sealed == 20, f"a new sealed test was created: {n_sealed}"          # no new look
-row = c.execute("select expectancy_r_from_metrics from (select json_extract(metrics_json,'$.expectancy_r') "
-                "as expectancy_r_from_metrics from strategy_sealed_test where id=12)").fetchone()
-assert abs(row[0] + 0.0294) < 1e-9, row                                       # gate 9 replayed, not recomputed
-print("sealed rows:", n_sealed, "| id 12 expectancy:", row[0])
+n_ver = c.execute("select count(*) from strategy_version").fetchone()[0]
+assert n_ver == 6, f"a new StrategyVersion row was created: {n_ver}"         # no new version
+exp, = c.execute("select json_extract(metrics_json,'$.expectancy_r') "
+                 "from strategy_sealed_test where id=12").fetchone()          # query form verified
+assert abs(exp + 0.0294) < 1e-9, exp                                          # gate 9 replayed, not recomputed
+print("sealed rows:", n_sealed, "| versions:", n_ver, "| id 12 expectancy:", exp)
 PY
 
 # 5. Discard the scratch DB.
