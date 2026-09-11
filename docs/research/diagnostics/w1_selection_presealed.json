@@ -48,7 +48,6 @@
   "INTC",
   "XOM",
   "BAC",
-  "SMCI",
   "WMT",
   "BA",
   "MA",
@@ -105,7 +104,6 @@
   "ETN",
   "SCHW",
   "CMG",
-  "LIN",
   "SBUX",
   "SNPS",
   "MARA",
@@ -113,13 +111,10 @@
   "DHR",
   "LMT",
   "BSX",
-  "WBD",
   "HON",
   "ABT",
   "GILD",
   "PYPL",
-  "ELV",
-  "RTX",
   "CMCSA",
   "RCL",
   "NEE",
@@ -130,7 +125,6 @@
   "LOW",
   "BX",
   "TTD",
-  "NBIS",
   "SHW",
   "DE",
   "AMGN",
@@ -148,20 +142,16 @@
   "NXPI",
   "FSLR",
   "REGN",
-  "XYZ",
   "BMY",
   "CHTR",
   "FCX",
   "JCI",
   "STX",
-  "TT",
   "CSX",
   "CDNS",
   "MCK",
   "SLB",
-  "HBAN"
- ],
- "reserve": [
+  "HBAN",
   "UAL",
   "CI",
   "MMM",
@@ -169,7 +159,9 @@
   "NSC",
   "EBAY",
   "USB",
-  "AMT",
+  "AMT"
+ ],
+ "reserve": [
   "ZTS",
   "FTNT",
   "KKR",
@@ -3981,5 +3973,49 @@
   },
   "survivorship": "massive_grouped is a pure survivor archive: no instrument has a last session earlier than 2026-09-08; effect size unmeasurable",
   "adjustment": "bars split-adjusted as of fetch date, not point-in-time; validate.py adjustment_behaviour is a no-op because massive.py:212 sets adj_close=close"
+ },
+ "w1_complete": {
+  "drops": [
+   {
+    "symbol": "SMCI",
+    "reason": "(b) 14.0% missing sessions",
+    "replacement": "UAL"
+   },
+   {
+    "symbol": "LIN",
+    "reason": "(c) first massive bar after 2018-09-08",
+    "replacement": "CI"
+   },
+   {
+    "symbol": "WBD",
+    "reason": "(c) first massive bar after 2018-09-08",
+    "replacement": "MMM"
+   },
+   {
+    "symbol": "ELV",
+    "reason": "(c) first massive bar after 2018-09-08",
+    "replacement": "MO"
+   },
+   {
+    "symbol": "RTX",
+    "reason": "(c) first massive bar after 2018-09-08",
+    "replacement": "NSC"
+   },
+   {
+    "symbol": "NBIS",
+    "reason": "(c) first massive bar after 2018-09-08",
+    "replacement": "EBAY"
+   },
+   {
+    "symbol": "XYZ",
+    "reason": "(c) first massive bar after 2018-09-08",
+    "replacement": "USB"
+   },
+   {
+    "symbol": "TT",
+    "reason": "(c) first massive bar after 2018-09-08",
+    "replacement": "AMT"
+   }
+  ]
  }
 }
