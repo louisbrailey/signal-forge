@@ -114,7 +114,7 @@ Three properties of that copy, each load-bearing (D1 §7.7 fix 2):
 * its copy timestamp belongs in the run notes. Record it here when you take it:
 
   ```
-  io2_bulk.sqlite copied at: ____________________  (UTC)
+  io2_bulk.sqlite copied at: 2026-09-12T09:19:29Z  (UTC; online `.backup` API — a consistent snapshot taken WITHOUT stopping the worker, so no checkpoint+cp was needed)
   ```
 
 ### 3.2 Nightly windows
@@ -331,3 +331,9 @@ one. The exclusion counts may widen or narrow the *underlying set* and may
 motivate a *finer pre-registered rung set* before the next stage — they may not
 be used to loosen a pre-registered constant, and the list of constants that may
 never be loosened is in D1 §12.
+
+## 10. Run log
+
+| Date (UTC) | Pass | Command | Outcome |
+|---|---|---|---|
+| 2026-09-12 09:20 | Stage A pass 1 (SPY, QQQ, IWM; 102 units) | `options cycle-backfill --underlyings SPY,QQQ,IWM --since 2023-09-04 --until 2026-09-04 --to-database data/io2_bulk.sqlite --max-minutes 590 --yes` | started 05:20 ET (outside the 20:00–06:00 ET window by design: the bulk route has no live-DB writer and the 590-min bound ends ~15:30 ET, before the 17:30 ET jobs); corp-actions run #16 done first (422 dividends, 11 splits, 6 underlyings) |
