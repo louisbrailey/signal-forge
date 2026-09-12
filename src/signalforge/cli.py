@@ -1001,6 +1001,15 @@ def options_evaluate_promotion_cmd(
             f"the D5 pre-registration file is missing ({prereg}); an options evaluation may not "
             "run without the document that froze its parameters (R1)"
         )
+    if confirm and not grid:
+        # Ruling R-2 (docs/research/DECISIONS_2026-09-12_wave3.md): a sealed look is
+        # consumed exactly once per family index, so spending one on an automatic
+        # gate-5 failure ("no sensitivity summary") would waste it. --confirm needs
+        # --grid; --dry-run without --grid stays informative.
+        refusals.append(
+            "--confirm without --grid would spend a sealed look on an automatic gate-5 "
+            "failure; run the sensitivity grid in the same invocation (--grid)"
+        )
     if confirm:
         holder = worker_lock_holder()
         if holder:

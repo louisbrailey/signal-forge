@@ -130,6 +130,24 @@ def test_confirm_refuses_while_the_worker_holds_the_write_lock(
     assert session.scalar(select(func.count()).select_from(StrategyPromotionEvaluation)) == 0
 
 
+def test_confirm_without_the_grid_is_refused_before_anything_is_assembled(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R-2: a sealed look may not be spent on an automatic gate-5 failure."""
+    seed_everything(session)
+    import signalforge.worker_lock as wl
+
+    monkeypatch.setattr(wl, "worker_lock_holder", lambda path=None: None)
+    res = runner.invoke(
+        app, [*_ARGS, "--snapshot-key", "options_w3b_test", "--confirm", *_window_args()]
+    )
+    assert res.exit_code == 2
+    assert "--confirm without --grid" in res.output
+    session.expire_all()
+    assert session.scalar(select(func.count()).select_from(StrategySealedTest)) == 0
+    assert session.scalar(select(func.count()).select_from(StrategyPromotionEvaluation)) == 0
+
+
 def test_dry_run_prints_the_ladder_and_writes_nothing(session: Session) -> None:
     seed_everything(session, ["SPY"])
     res = runner.invoke(app, [*_ARGS, "--snapshot-key", "options_w3b_test", *_window_args()])
