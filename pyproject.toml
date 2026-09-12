@@ -219,6 +219,35 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+# S11a NAMES the options engine's LLM-freedom instead of leaving it to be inherited
+# by the accident of package placement (D2 §2.1).  S3 already covers
+# signalforge.backtest and signalforge.research, but NOT signalforge.data — so
+# option_chain.py and options_calendar.py were unconstrained, and options_calendar
+# is precisely the module the OMS must cross-check its broker clock against
+# (program map §6.4).  This contract ships INSIDE I-O3, the commit that creates
+# those modules: under any later placement there is no sequencing that guarantees
+# the contract exists when the module does.
+#
+# signalforge.execution does not exist yet and must not be importable from here if
+# it ever does — import-linter ignores a forbidden module that is absent, so the
+# name is listed now rather than added in the commit that would need it.
+name = "S11a: the options engine/calendar are off the LLM and alert paths, and off the order path"
+type = "forbidden"
+source_modules = [
+    "signalforge.backtest.options_engine",
+    "signalforge.backtest.options_pricing",
+    "signalforge.backtest.options_costs",
+    "signalforge.backtest.options_leakage",
+    "signalforge.data.option_chain",
+    "signalforge.data.options_calendar",
+]
+forbidden_modules = [
+    "signalforge.llm",
+    "signalforge.alerts",
+    "signalforge.execution",
+]
+
+[[tool.importlinter.contracts]]
 name = "S12: news never drives a recommendation or risk decision"
 type = "forbidden"
 source_modules = [
