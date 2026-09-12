@@ -1207,3 +1207,129 @@ def _alert_type_states(session: Session) -> dict[str, bool]:
     from signalforge.alerts.dispatch import alert_type_states
 
     return alert_type_states(session)
+
+
+def _last_close_for(session: Session, symbol: str, on: date) -> float | None:
+    from signalforge.data.repository import get_daily_bars
+
+    bars = get_daily_bars(session, symbol, on - timedelta(days=15), on)
+    return float(bars[-1].close) if bars else None
+
+
+def grid_context(session: Session, *, trade_limit: int = 50) -> dict[str, Any]:
+    """Read-model for /grid — the mechanical grid's live (paper) state.
+
+    Read-only. The grid is NOT a promotion-gated strategy: it produces no
+    candidate, no alert, and never touches the research paper account.
+    """
+    from signalforge.db.models import GridPosition, GridTradeRow, PaperAccount
+    from signalforge.grid.live import params_from_config
+
+    cfg = effective_research_config(session).grid
+    params = params_from_config(cfg)
+    acct = session.scalar(select(PaperAccount).where(PaperAccount.name == cfg.account_name))
+    ctx: dict[str, Any] = {
+        "enabled": cfg.enabled,
+        "account_name": cfg.account_name,
+        "exists": acct is not None,
+        "params": params.to_dict(),
+        "costs_label": params.costs_label,
+        "budget_if_every_symbol_capped": params.max_committed_usd,
+        "budget_is_consistent": params.budget_is_consistent,
+        "source": cfg.source,
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "positions": [],
+        "trades": [],
+        "cash": 0.0,
+        "initial_cash": 0.0,
+        "market_value": 0.0,
+        "equity": 0.0,
+        "total_return_pct": 0.0,
+        "unrealized_pnl": 0.0,
+        "cost_basis": 0.0,
+        "n_positions": 0,
+        "n_tracked": 0,
+        "n_trades": 0,
+        "symbols_at_cap": 0,
+        "last_session": None,
+    }
+    if acct is None:
+        return ctx
+
+    rows = list(session.scalars(select(GridPosition).where(GridPosition.account_id == acct.id)))
+    on = date.today()
+    market_value = 0.0
+    cost_basis = 0.0
+    positions: list[dict[str, Any]] = []
+    for row in rows:
+        qty = float(row.qty)
+        basis = float(row.cost_basis)
+        cost_basis += basis
+        if qty <= 0:
+            continue
+        last = _last_close_for(session, row.symbol, on)
+        mv = qty * last if last is not None else basis
+        market_value += mv
+        positions.append(
+            {
+                "symbol": row.symbol,
+                "qty": qty,
+                "cost_basis": basis,
+                "anchor_price": float(row.anchor_price),
+                "last_close": last,
+                "market_value": mv,
+                "unrealized_pnl": mv - basis,
+                "at_cap": basis + float(cfg.buy_usd) > float(cfg.per_symbol_cap),
+            }
+        )
+    positions.sort(key=lambda p: float(p["market_value"]), reverse=True)
+
+    trades = list(
+        session.scalars(
+            select(GridTradeRow)
+            .where(GridTradeRow.account_id == acct.id)
+            .order_by(GridTradeRow.session_date.desc(), GridTradeRow.id.desc())
+            .limit(trade_limit)
+        )
+    )
+    n_trades = int(
+        session.scalar(
+            select(func.count(GridTradeRow.id)).where(GridTradeRow.account_id == acct.id)
+        )
+        or 0
+    )
+    cash = float(acct.cash)
+    equity = cash + market_value
+    initial = float(acct.initial_cash)
+    ctx.update(
+        {
+            "cash": cash,
+            "initial_cash": initial,
+            "market_value": market_value,
+            "cost_basis": cost_basis,
+            "equity": equity,
+            "total_return_pct": ((equity / initial - 1.0) * 100.0) if initial > 0 else 0.0,
+            "unrealized_pnl": market_value - cost_basis,
+            "n_positions": len(positions),
+            "n_tracked": len(rows),
+            "n_trades": n_trades,
+            "symbols_at_cap": sum(1 for p in positions if p["at_cap"]),
+            "last_session": trades[0].session_date.isoformat() if trades else None,
+            "positions": positions,
+            "trades": [
+                {
+                    "symbol": t.symbol,
+                    "side": t.side,
+                    "qty": float(t.qty),
+                    "price": float(t.price),
+                    "usd": float(t.usd),
+                    "anchor_before": float(t.anchor_before),
+                    "anchor_after": float(t.anchor_after),
+                    "session_date": t.session_date.isoformat(),
+                    "created_at": t.created_at.isoformat(timespec="seconds"),
+                }
+                for t in trades
+            ],
+        }
+    )
+    return ctx

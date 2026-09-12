@@ -2013,6 +2013,214 @@ def universe_status_cmd() -> None:
     typer.echo(_json.dumps(st, indent=2, default=str))
 
 
+grid_app = typer.Typer(
+    help=(
+        "Mechanical grid strategy (SIMULATED). Not a promotion-gated strategy — "
+        "no candidates, no alerts, no brokerage."
+    )
+)
+app.add_typer(grid_app, name="grid")
+
+
+@grid_app.command("backtest")
+def grid_backtest_cmd(
+    universe: Annotated[
+        str, typer.Option(help="top1000 | top100 | topN | all | a .json/.txt file | A,B,C")
+    ] = "top1000",
+    top: Annotated[
+        int, typer.Option(help="Slice the resolved universe to the top N (0 = all).")
+    ] = 0,
+    source: Annotated[
+        str, typer.Option(help="ohlcv_daily.source — massive | massive_grouped (always explicit).")
+    ] = "massive_grouped",
+    since: Annotated[
+        str, typer.Option(help="Start YYYY-MM-DD (default: earliest available).")
+    ] = "",
+    until: Annotated[str, typer.Option(help="End YYYY-MM-DD (default: today).")] = "",
+    starting_cash: Annotated[float, typer.Option(help="Starting cash.")] = 5_000.0,
+    per_symbol_cap: Annotated[float, typer.Option(help="Max cost basis per symbol.")] = 50.0,
+    buy_usd: Annotated[float, typer.Option(help="Dollars bought per BUY trigger.")] = 5.0,
+    sell_usd: Annotated[float, typer.Option(help="Dollars sold per SELL trigger.")] = 10.0,
+    drop_pct: Annotated[float, typer.Option(help="Buy trigger as a FRACTION (0.05 = 5%).")] = 0.05,
+    rise_pct: Annotated[float, typer.Option(help="Sell trigger as a FRACTION (0.05 = 5%).")] = 0.05,
+    min_order_usd: Annotated[float, typer.Option(help="Skip orders below this notional.")] = 1.0,
+    benchmark: Annotated[str, typer.Option(help="Buy-and-hold benchmark symbol.")] = "SPY",
+    snapshot_key: Annotated[
+        str, typer.Option(help="Take the symbol list from this DataSnapshot key instead.")
+    ] = "",
+    symbols: Annotated[
+        str, typer.Option(help="Explicit comma-separated symbols; overrides --universe.")
+    ] = "",
+    rank_by_universe: Annotated[
+        bool,
+        typer.Option(help="Order the symbols by the grid universe file's liquidity ranking."),
+    ] = True,
+    out: Annotated[str, typer.Option(help="Report directory (default docs/research/grid).")] = "",
+    slug: Annotated[str, typer.Option(help="Report filename stem.")] = "",
+    title: Annotated[str, typer.Option(help="Report title.")] = "",
+    notes: Annotated[str, typer.Option(help="Extra markdown appended to the report.")] = "",
+    trades_in_json: Annotated[
+        bool, typer.Option(help="Include every trade + the daily curve in the JSON report.")
+    ] = True,
+) -> None:
+    """READ-ONLY grid backtest over a large daily-close universe.
+
+    Never writes a row: it loads bars through the existing data access and
+    writes only the markdown/JSON report. Symbols with no bars in the window
+    are reported, not silently dropped.
+    """
+    from datetime import date as _date
+
+    from signalforge.db.session import session_scope
+    from signalforge.gitinfo import git_sha
+    from signalforge.grid.config import GridParams
+    from signalforge.grid.data import load_grid_series
+    from signalforge.grid.engine import run_grid_backtest
+    from signalforge.grid.report import write_report
+    from signalforge.grid.universe import GridUniverse, load_universe, order_by_rank
+
+    end = _date.fromisoformat(until) if until else _date.today()
+    start = _date.fromisoformat(since) if since else _date(1990, 1, 1)
+    if start > end:
+        typer.secho("--since is after --until", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+
+    with session_scope() as session:
+        if symbols:
+            uni = load_universe(
+                symbols=[s for s in symbols.replace(",", " ").split() if s], top=top or None
+            )
+        elif snapshot_key:
+            from sqlalchemy import select as _select
+
+            from signalforge.db.models import DataSnapshot
+
+            snap = session.scalar(_select(DataSnapshot).where(DataSnapshot.key == snapshot_key))
+            if snap is None:
+                typer.secho(f"no DataSnapshot with key {snapshot_key!r}", fg=typer.colors.RED)
+                raise typer.Exit(code=2)
+            syms = [str(s).strip().upper() for s in snap.symbols_json]
+            if rank_by_universe:
+                try:
+                    syms = order_by_rank(syms, top=top or None)
+                    note = (
+                        "ordered by the grid universe file's 60-session median-dollar-volume rank"
+                    )
+                except (FileNotFoundError, ValueError) as exc:
+                    typer.secho(
+                        f"ranking unavailable ({exc}); keeping snapshot order",
+                        fg=typer.colors.YELLOW,
+                    )
+                    syms = syms[:top] if top else syms
+                    note = "snapshot order (ranking file unavailable)"
+            else:
+                syms = syms[:top] if top else syms
+                note = "snapshot order"
+            uni = GridUniverse(
+                name=f"snapshot:{snapshot_key}",
+                symbols=tuple(syms),
+                source=f"DataSnapshot #{snap.id} {snapshot_key!r}",
+                ranking_note=note,
+                requested_size=top or len(syms),
+            )
+        else:
+            uni = load_universe(universe, top=top or None)
+
+        params = GridParams(
+            starting_cash=starting_cash,
+            per_symbol_cap=per_symbol_cap,
+            buy_usd=buy_usd,
+            sell_usd=sell_usd,
+            drop_pct=drop_pct,
+            rise_pct=rise_pct,
+            min_order_usd=min_order_usd,
+            universe_name=uni.name,
+            universe_size=len(uni.symbols),
+        )
+        if not params.budget_is_consistent:
+            typer.secho(
+                f"note: {len(uni.symbols)} symbols x ${per_symbol_cap:,.0f} cap = "
+                f"${params.max_committed_usd:,.0f} of budget against "
+                f"${starting_cash:,.0f} of cash — cash will bind before the caps do.",
+                fg=typer.colors.YELLOW,
+            )
+
+        typer.echo(f"loading {len(uni.symbols)} symbols from source={source!r} ...")
+        series, _missing = load_grid_series(session, uni.symbols, start, end, source=source or None)
+        bench = None
+        if benchmark:
+            bser, _ = load_grid_series(session, [benchmark], start, end, source=source or None)
+            bench = bser.get(benchmark.upper())
+
+    result = run_grid_backtest(
+        series,
+        params,
+        symbols=list(uni.symbols),
+        requested=list(uni.symbols),
+        benchmark=bench,
+        benchmark_symbol=benchmark.upper() if benchmark else "SPY",
+    )
+
+    stem = (
+        slug
+        or f"grid_{uni.name.replace(':', '_')}_{int(per_symbol_cap)}cap_{int(starting_cash)}cash"
+    )
+    md, js = write_report(
+        result,
+        slug=stem,
+        title=title
+        or f"Grid backtest — {uni.name} (cap ${per_symbol_cap:,.0f}, cash ${starting_cash:,.0f})",
+        out_dir=out or None,
+        universe=uni,
+        source=source,
+        notes=notes,
+        git_sha=git_sha(),
+        include_trades=trades_in_json,
+    )
+
+    m, b = result.metrics, result.benchmark
+    typer.secho(
+        f"grid {uni.name}: {len(result.symbols)} symbols with bars "
+        f"({len(result.skipped_symbols)} skipped), {result.start} → {result.end}",
+        fg=typer.colors.CYAN,
+    )
+    typer.echo(
+        f"  total return {m.total_return_pct:+.2f}%  CAGR {m.cagr_pct:+.2f}%  "
+        f"maxDD {m.max_drawdown_pct:.2f}%  trades {m.n_trades:,} "
+        f"({m.n_buys:,}b/{m.n_sells:,}s)  exposure {m.exposure:.1%}"
+    )
+    typer.echo(
+        f"  end equity ${m.end_equity:,.2f}  final cash ${result.final_cash:,.2f}  "
+        f"symbols at cap {result.symbols_at_cap:,}"
+    )
+    if b.available:
+        typer.echo(
+            f"  {b.symbol} buy-and-hold: {b.total_return_pct:+.2f}%  CAGR {b.cagr_pct:+.2f}%  "
+            f"maxDD {b.max_drawdown_pct:.2f}%  "
+            f"(grid − benchmark {m.total_return_pct - b.total_return_pct:+.2f} pp)"
+        )
+    else:
+        typer.secho(f"  benchmark unavailable: {b.detail}", fg=typer.colors.YELLOW)
+    typer.secho(f"reports: {md}  {js}", fg=typer.colors.GREEN)
+    typer.echo("Hypothetical research output — no order was placed.")
+
+
+@grid_app.command("status")
+def grid_status_cmd() -> None:
+    """Live (paper) grid state: flag, params, cash, positions, recent trades."""
+    import json as _json
+
+    from signalforge.app.views import grid_context
+    from signalforge.db.session import session_scope
+
+    with session_scope() as session:
+        ctx = grid_context(session, trade_limit=10)
+    ctx.pop("positions", None)
+    ctx.pop("trades", None)
+    typer.echo(_json.dumps(ctx, indent=2, default=str))
+    typer.echo("Research signal only — no order was placed.")
+
+
 agents_app = typer.Typer(help="Bounded research agents — read-only reports (contract S14).")
 app.add_typer(agents_app, name="agents")
 
@@ -2402,7 +2610,8 @@ def run_job(
         str,
         typer.Argument(
             help="daily_eod_update | paper_mtm | feed_probe | health_check | news_poll | "
-            "daily_briefing | alerts | strategy_health | approved_scope_scan | agents_daily"
+            "daily_briefing | alerts | strategy_health | approved_scope_scan | agents_daily | "
+            "universe_update | grid_daily"
         ),
     ],
 ) -> None:

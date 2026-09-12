@@ -21,6 +21,7 @@ from signalforge.app.templating import templates
 from signalforge.app.views import (
     agents_context,
     candidate_context,
+    grid_context,
     journal_context,
     ops_status_context,
     overview_context,
@@ -230,6 +231,12 @@ def universe_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
 def agents_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
     """Research agents — read-only reports; no actions."""
     return _page(request, user, "agents.html", agents_context(db))
+
+
+@router.get("/grid", response_class=HTMLResponse)
+def grid_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
+    """Mechanical grid strategy — read-only; SIMULATED paper fills only."""
+    return _page(request, user, "grid.html", grid_context(db))
 
 
 @router.get("/settings", response_class=HTMLResponse)
