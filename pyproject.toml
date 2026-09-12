@@ -219,6 +219,7 @@ source_modules = [
     "signalforge.data.options_backfill",
     "signalforge.data.options_cycles",
     "signalforge.data.options_corporate_actions",
+    "signalforge.data.options_merge",
 ]
 forbidden_modules = [
     "signalforge.alerts",
