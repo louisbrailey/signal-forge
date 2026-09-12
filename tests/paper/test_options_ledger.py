@@ -7,7 +7,7 @@ live database.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -165,7 +165,7 @@ def test_the_collateral_entry_and_the_mark_are_immutable(session: Session) -> No
     nxt = _sessions_after(fx.FILL_SESSION, 1)[0]
     fx.option_prints(session, sessions=[nxt])
     mark_options_to_market(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=nxt, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=nxt, pricing=fx.resolver()
     )
     reconcile_options_collateral(session, account_name=fx.OPTIONS_ACCOUNT, as_of=nxt)
     session.commit()
@@ -330,7 +330,7 @@ def test_a_mark_values_the_structure_and_records_the_honesty_counters(
     fx.option_prints(session, sessions=[nxt])
 
     res = mark_options_to_market(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=nxt, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=nxt, pricing=fx.resolver()
     )
     assert res.checked == 1 and res.closed == 0
     assert res.synthetic_marked == 0 and res.iv_unavailable == 0
@@ -350,7 +350,7 @@ def test_a_missing_leg_print_marks_synthetic_and_never_fills(session: Session) -
     fx.option_prints(session, sessions=[nxt], skip=(fx.LONG_TICKER,))
 
     res = mark_options_to_market(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=nxt, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=nxt, pricing=fx.resolver()
     )
     assert res.synthetic_marked == 1
     assert res.closed == 0
@@ -371,7 +371,7 @@ def test_a_profit_target_is_observed_at_the_close_and_filled_at_t_plus_1(
     fx.option_prints(session, sessions=[s1, s2], short_close=0.30, long_close=0.20)
 
     first = mark_options_to_market(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s1, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s1, pricing=fx.resolver()
     )
     assert first.closed == 0  # observed, not filled
     position = session.scalar(select(OptionsPosition))
@@ -380,7 +380,7 @@ def test_a_profit_target_is_observed_at_the_close_and_filled_at_t_plus_1(
     assert position.closed_at is None
 
     second = mark_options_to_market(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s2, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s2, pricing=fx.resolver()
     )
     assert second.closed == 1
     session.refresh(position)
@@ -398,10 +398,14 @@ def test_a_stop_is_struck_against_the_credit_received_not_the_underlying(
     # cost to close more than doubles: 2x the credit received is the stop
     fx.option_prints(session, sessions=[s1, s2], short_close=3.00, long_close=0.50)
 
-    mark_options_to_market(session, account_name=fx.OPTIONS_ACCOUNT, as_of=s1, pricing=fx.pricing())
+    mark_options_to_market(
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s1, pricing=fx.resolver()
+    )
     position = session.scalar(select(OptionsPosition))
     assert position is not None and position.exit_signalled_at == s1
-    mark_options_to_market(session, account_name=fx.OPTIONS_ACCOUNT, as_of=s2, pricing=fx.pricing())
+    mark_options_to_market(
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s2, pricing=fx.resolver()
+    )
     session.refresh(position)
     assert position.exit_reason == "stop"
     assert float(position.realized_pnl) < 0
@@ -417,9 +421,11 @@ def test_an_exit_fill_DEFERS_when_a_leg_stops_printing(session: Session) -> None
     fx.option_prints(session, sessions=[s2], short_close=0.30, skip=(fx.LONG_TICKER,))
     fx.option_prints(session, sessions=[s3], short_close=0.30, long_close=0.20)
 
-    mark_options_to_market(session, account_name=fx.OPTIONS_ACCOUNT, as_of=s1, pricing=fx.pricing())
+    mark_options_to_market(
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s1, pricing=fx.resolver()
+    )
     deferred = mark_options_to_market(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s2, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s2, pricing=fx.resolver()
     )
     assert deferred.deferred == 1 and deferred.closed == 0
     position = session.scalar(select(OptionsPosition))
@@ -427,7 +433,7 @@ def test_an_exit_fill_DEFERS_when_a_leg_stops_printing(session: Session) -> None
     assert position.closed_at is None
 
     filled = mark_options_to_market(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s3, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s3, pricing=fx.resolver()
     )
     assert filled.closed == 1
     session.refresh(position)
@@ -445,7 +451,7 @@ def test_a_time_stop_fills_on_its_own_session_because_it_is_calendar_knowable(
     on = fx.EXPIRY - timedelta(days=position.time_stop_dte)
     fx.option_prints(session, sessions=[on])
     res = mark_options_to_market(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=on, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=on, pricing=fx.resolver()
     )
     assert res.closed == 1
     session.refresh(position)
@@ -463,10 +469,10 @@ def test_closing_works_while_the_kill_switch_is_engaged(session: Session) -> Non
     get_kill_switch().engage(reason="test", actor="test")
     try:
         mark_options_to_market(
-            session, account_name=fx.OPTIONS_ACCOUNT, as_of=s1, pricing=fx.pricing()
+            session, account_name=fx.OPTIONS_ACCOUNT, as_of=s1, pricing=fx.resolver()
         )
         res = mark_options_to_market(
-            session, account_name=fx.OPTIONS_ACCOUNT, as_of=s2, pricing=fx.pricing()
+            session, account_name=fx.OPTIONS_ACCOUNT, as_of=s2, pricing=fx.resolver()
         )
         assert res.closed == 1
         rec = reconcile_options_collateral(session, account_name=fx.OPTIONS_ACCOUNT, as_of=s2)
@@ -499,7 +505,7 @@ def test_a_structure_force_closes_at_expiry_minus_one(session: Session) -> None:
     fx.option_prints(session, sessions=[fc], short_close=0.05, long_close=0.02)
 
     report = process_option_expiries(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=fc, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=fc, pricing=fx.resolver()
     )
     assert report.force_closed == 1
     assert report.forced_close_no_print == 0
@@ -522,7 +528,7 @@ def test_a_force_close_with_no_print_settles_at_the_intrinsic_floor_and_is_flagg
     fc = options_calendar.force_close_session(fx.EXPIRY)  # no option prints at all
 
     report = process_option_expiries(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=fc, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=fc, pricing=fx.resolver()
     )
     assert report.force_closed == 1 and report.forced_close_no_print == 1
     position = session.scalar(select(OptionsPosition))
@@ -541,7 +547,7 @@ def test_a_structure_that_reaches_expiry_out_of_the_money_expires_worthless(
     last = options_calendar.last_trade_session(fx.EXPIRY)
     # SPY closes at 450: both 430/428 puts are far out of the money.
     report = process_option_expiries(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=last, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=last, pricing=fx.resolver()
     )
     assert report.expired_worthless == 1 and report.assigned == 0
     position = session.scalar(select(OptionsPosition))
@@ -574,7 +580,7 @@ def test_a_short_leg_in_the_money_at_expiry_is_settled_at_intrinsic_and_flagged(
     session.flush()
 
     report = process_option_expiries(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=last, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=last, pricing=fx.resolver()
     )
     assert report.assigned == 1 and report.expired_worthless == 0
     position = session.scalar(select(OptionsPosition))
@@ -604,7 +610,7 @@ def test_an_unresolvable_expiry_raises_rather_than_guessing(session: Session) ->
     session.flush()
     with pytest.raises(OptionExpiryUnhandled, match="does not guess"):
         process_option_expiries(
-            session, account_name=fx.OPTIONS_ACCOUNT, as_of=last, pricing=fx.pricing()
+            session, account_name=fx.OPTIONS_ACCOUNT, as_of=last, pricing=fx.resolver()
         )
 
 
@@ -615,10 +621,10 @@ def test_expiry_processing_is_idempotent(session: Session) -> None:
     _open(session, cand)
     last = options_calendar.last_trade_session(fx.EXPIRY)
     first = process_option_expiries(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=last, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=last, pricing=fx.resolver()
     )
     second = process_option_expiries(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=last, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=last, pricing=fx.resolver()
     )
     assert first.checked == 1 and second.checked == 0
     assert session.scalar(select(func.count()).select_from(OptionsPosition)) == 1
@@ -645,7 +651,7 @@ def test_reconciliation_is_clean_on_a_healthy_book_and_round_trips_to_zero(
     fc = options_calendar.force_close_session(fx.EXPIRY)
     fx.option_prints(session, sessions=[fc], short_close=0.05, long_close=0.02)
     process_option_expiries(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=fc, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=fc, pricing=fx.resolver()
     )
     closed_report = reconcile_options_collateral(session, account_name=fx.OPTIONS_ACCOUNT, as_of=fc)
     assert closed_report.clean
@@ -741,7 +747,7 @@ def test_a_second_release_is_refused_and_the_audit_figure_survives_the_close(
     fc = options_calendar.force_close_session(fx.EXPIRY)
     fx.option_prints(session, sessions=[fc], short_close=0.05, long_close=0.02)
     process_option_expiries(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=fc, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=fc, pricing=fx.resolver()
     )
     position = session.get(OptionsPosition, res.position_id)  # type: ignore[attr-defined]
     assert position is not None
@@ -823,9 +829,11 @@ def test_a_divergent_reconciliation_blocks_OPENING_and_never_closing(
 
     # closing still works
     fx.option_prints(session, sessions=[s1, s2], short_close=0.30, long_close=0.20)
-    mark_options_to_market(session, account_name=fx.OPTIONS_ACCOUNT, as_of=s1, pricing=fx.pricing())
+    mark_options_to_market(
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s1, pricing=fx.resolver()
+    )
     res = mark_options_to_market(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s2, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s2, pricing=fx.resolver()
     )
     assert res.closed == 1
 
@@ -874,7 +882,7 @@ def test_the_status_snapshot_reports_both_books_side_by_side_never_merged(
     nxt = _sessions_after(fx.FILL_SESSION, 1)[0]
     fx.option_prints(session, sessions=[nxt])
     mark_options_to_market(
-        session, account_name=fx.OPTIONS_ACCOUNT, as_of=nxt, pricing=fx.pricing()
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=nxt, pricing=fx.resolver()
     )
     reconcile_options_collateral(session, account_name=fx.OPTIONS_ACCOUNT, as_of=nxt)
 
@@ -915,3 +923,253 @@ def test_a_structure_from_a_position_round_trips_its_legs(session: Session) -> N
     assert structure.strike_width == pytest.approx(2.0)
     assert structure.short_leg is not None and structure.short_leg.strike == fx.SHORT_STRIKE
     assert structure.contract_sides == 2
+
+
+# --------------------------------------------------------------------------- #
+# W5b — pricing resolved PER UNDERLYING (decision 11)
+# --------------------------------------------------------------------------- #
+
+
+def _open_second_name(session: Session, first: Candidate) -> Candidate:
+    """A second open structure, on a SECOND underlying, through the real door.
+
+    Built with the guard and the acceptance rather than by hand: a position row
+    conjured directly would carry no collateral entry and would make the
+    reconciler fail for a reason that has nothing to do with what is under test.
+    """
+    from signalforge.db.models import StrategyVersion
+
+    version = session.get(StrategyVersion, first.strategy_version_id)
+    assert version is not None
+    inst = fx.underlying(session, symbol=fx.UNDERLYING_2)
+    fx.contracts(session, symbol=fx.UNDERLYING_2)
+    fx.option_prints(session, sessions=[fx.SIGNAL_SESSION, fx.FILL_SESSION], symbol=fx.UNDERLYING_2)
+    cand = fx.options_candidate(session, instrument=inst, version=version, symbol=fx.UNDERLYING_2)
+    fx.approve_scope(session, cand, version, universe=(fx.UNDERLYING_2,))
+    _open(session, cand)
+    return cand
+
+
+def test_a_multi_underlying_book_marks_each_name_with_ITS_OWN_q(session: Session) -> None:
+    """The defect W5b repairs, stated as an assertion.
+
+    Before this, one ``OptionsPricingContext`` served a whole call, so a two-name
+    book would have been marked with one name's dividend yield applied to both —
+    and the chain refused the whole run rather than do it. Now each structure is
+    marked under the context resolved for ITS underlying, and the row says which.
+    """
+    first, _ = _world(session)
+    _open(session, first)
+    _open_second_name(session, first)
+
+    nxt = _sessions_after(fx.FILL_SESSION, 1)[0]
+    fx.option_prints(session, sessions=[nxt])
+    fx.option_prints(session, sessions=[nxt], symbol=fx.UNDERLYING_2)
+
+    res = mark_options_to_market(
+        session,
+        account_name=fx.OPTIONS_ACCOUNT,
+        as_of=nxt,
+        pricing=fx.resolver(
+            contexts={
+                fx.UNDERLYING: fx.pricing(dividend_yield=0.0130, q_source="fixture:spy_ttm"),
+                fx.UNDERLYING_2: fx.pricing(dividend_yield=0.0750, q_source="fixture:iwm_ttm"),
+            }
+        ),
+    )
+    assert res.checked == 2 and res.unpriceable == 0
+    assert res.unpriceable_underlyings == []
+
+    marks = {}
+    for position in session.scalars(select(OptionsPosition)):
+        mark = session.scalar(
+            select(OptionsMark).where(
+                OptionsMark.position_id == position.id, OptionsMark.as_of == nxt
+            )
+        )
+        assert mark is not None
+        marks[position.underlying_symbol] = mark
+
+    assert set(marks) == {fx.UNDERLYING, fx.UNDERLYING_2}
+    assert marks[fx.UNDERLYING].dividend_yield == pytest.approx(0.0130)
+    assert marks[fx.UNDERLYING_2].dividend_yield == pytest.approx(0.0750)
+    assert marks[fx.UNDERLYING].q_source == "fixture:spy_ttm"
+    assert marks[fx.UNDERLYING_2].q_source == "fixture:iwm_ttm"
+    # ...and the greeks differ, which is the reason the q had to: same prints,
+    # same strikes, same spot, different dividend yield.
+    assert marks[fx.UNDERLYING].net_delta_shares != marks[fx.UNDERLYING_2].net_delta_shares
+
+
+def test_a_name_with_no_dividend_series_is_REFUSED_BY_NAME_and_the_rest_is_marked(
+    session: Session,
+) -> None:
+    first, _ = _world(session)
+    _open(session, first)
+    _open_second_name(session, first)
+
+    nxt = _sessions_after(fx.FILL_SESSION, 1)[0]
+    fx.option_prints(session, sessions=[nxt])
+    fx.option_prints(session, sessions=[nxt], symbol=fx.UNDERLYING_2)
+
+    res = mark_options_to_market(
+        session,
+        account_name=fx.OPTIONS_ACCOUNT,
+        as_of=nxt,
+        pricing=fx.resolver(
+            contexts={fx.UNDERLYING_2: fx.pricing()},
+            unpriceable={fx.UNDERLYING: "no recorded dividend series"},
+        ),
+    )
+    assert res.checked == 2
+    assert res.unpriceable == 1
+    assert res.unpriceable_underlyings == [fx.UNDERLYING]
+
+    marked = list(session.scalars(select(OptionsMark).where(OptionsMark.as_of == nxt)))
+    assert len(marked) == 1, "the priceable name is still marked"
+    position = session.get(OptionsPosition, marked[0].position_id)
+    assert position is not None and position.underlying_symbol == fx.UNDERLYING_2
+
+
+def test_a_name_with_no_close_is_refused_by_the_recorded_series_resolver(
+    session: Session,
+) -> None:
+    """``resolve_underlying_pricing`` is the production resolver, and it refuses
+    on either missing input — naming which, and naming the underlying."""
+    from signalforge.db.models import DividendEvent
+    from signalforge.paper.options_marks import (
+        UnderlyingNotPriceable,
+        resolve_underlying_pricing,
+    )
+
+    session.add(
+        DividendEvent(
+            symbol=fx.UNDERLYING,
+            ex_dividend_date=date(2025, 12, 18),
+            cash_amount=1.50,
+            source="massive_options",
+            ingested_at=datetime.now(UTC),
+        )
+    )
+    session.flush()
+    with pytest.raises(UnderlyingNotPriceable, match=r"SPY: no ohlcv_daily close") as exc:
+        resolve_underlying_pricing(
+            session,
+            fx.UNDERLYING,
+            fx.FILL_SESSION,
+            cost_model=fx.cost_model(),
+            risk_free_rate=0.04,
+        )
+    assert exc.value.underlying == fx.UNDERLYING
+
+    # with bars, the SAME call resolves and records the source it used
+    fx.underlying(session)
+    ctx = resolve_underlying_pricing(
+        session,
+        fx.UNDERLYING,
+        fx.FILL_SESSION,
+        cost_model=fx.cost_model(),
+        risk_free_rate=0.04,
+    )
+    assert ctx.q_source == "vendor_dividends"
+    assert ctx.dividend_yield == pytest.approx(1.50 / fx.SPOT)
+    assert ctx.risk_free_rate == 0.04
+
+
+def test_an_unmarked_structure_makes_the_session_reconciliation_dirty(session: Session) -> None:
+    """Reconcile check 11, and the exemption that keeps it honest.
+
+    A structure opened ON the session is exempt — condition M required every leg
+    to print on its fill session, so the entry is its valuation. One carried into
+    a later session with no mark could not be valued, and the report says so.
+    """
+    cand, _ = _world(session)
+    _open(session, cand)
+
+    # opened on the fill session: exempt, and the report is clean
+    entry_day = reconcile_options_collateral(
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=fx.FILL_SESSION
+    )
+    assert entry_day.clean
+
+    nxt = _sessions_after(fx.FILL_SESSION, 1)[0]
+    unmarked = reconcile_options_collateral(session, account_name=fx.OPTIONS_ACCOUNT, as_of=nxt)
+    assert not unmarked.clean
+    assert {f["check"] for f in unmarked.findings} == {"11_open_structure_marked_this_session"}
+    assert fx.UNDERLYING in unmarked.findings[0]["detail"]
+
+    # mark a LATER session and that session reconciles clean
+    later = _sessions_after(nxt, 1)[0]
+    fx.option_prints(session, sessions=[later])
+    mark_options_to_market(
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=later, pricing=fx.resolver()
+    )
+    assert reconcile_options_collateral(session, account_name=fx.OPTIONS_ACCOUNT, as_of=later).clean
+
+
+def test_a_close_records_the_q_it_was_valued_under(session: Session) -> None:
+    """The immutable trade carries the pricing block, per underlying."""
+    cand, _ = _world(session)
+    _open(session, cand)
+    s1, s2 = _sessions_after(fx.FILL_SESSION, 2)
+    fx.option_prints(session, sessions=[s1, s2], short_close=0.30, long_close=0.20)
+    resolver = fx.resolver(
+        contexts={fx.UNDERLYING: fx.pricing(dividend_yield=0.0211, q_source="fixture:spy_ttm")}
+    )
+    mark_options_to_market(session, account_name=fx.OPTIONS_ACCOUNT, as_of=s1, pricing=resolver)
+    res = mark_options_to_market(
+        session, account_name=fx.OPTIONS_ACCOUNT, as_of=s2, pricing=resolver
+    )
+    assert res.closed == 1
+
+    trade = session.scalar(
+        select(OptionsTrade)
+        .where(OptionsTrade.decision == PaperDecision.ACCEPTED)
+        .order_by(OptionsTrade.id.desc())
+    )
+    assert trade is not None
+    block = trade.signal_snapshot_json["close"]["pricing"]
+    assert block["underlying"] == fx.UNDERLYING
+    assert block["q_source"] == "fixture:spy_ttm"
+    assert block["dividend_yield"] == pytest.approx(0.0211)
+    assert block["risk_free_rate"] == 0.04
+
+
+def test_an_expiry_settlement_records_its_q_and_skips_an_unpriceable_name(
+    session: Session,
+) -> None:
+    from signalforge.data import options_calendar
+
+    cand, _ = _world(session)
+    _open(session, cand)
+    fc = options_calendar.force_close_session(fx.EXPIRY)
+    fx.option_prints(session, sessions=[fc], short_close=0.05, long_close=0.02)
+
+    # refused: nothing settles, and the name is reported
+    refused = process_option_expiries(
+        session,
+        account_name=fx.OPTIONS_ACCOUNT,
+        as_of=fc,
+        pricing=fx.resolver(contexts={}, unpriceable={fx.UNDERLYING: "no dividend series"}),
+    )
+    assert refused.force_closed == 0
+    assert refused.unpriceable == 1 and refused.unpriceable_underlyings == [fx.UNDERLYING]
+    still_open = session.scalar(select(OptionsPosition))
+    assert still_open is not None and still_open.closed_at is None
+
+    # priceable: it settles, and the trade records the q it settled under
+    ok = process_option_expiries(
+        session,
+        account_name=fx.OPTIONS_ACCOUNT,
+        as_of=fc,
+        pricing=fx.resolver(
+            contexts={fx.UNDERLYING: fx.pricing(dividend_yield=0.019, q_source="fixture:spy_ttm")}
+        ),
+    )
+    assert ok.force_closed == 1 and ok.unpriceable == 0
+    trade = session.scalar(
+        select(OptionsTrade)
+        .where(OptionsTrade.decision == PaperDecision.ACCEPTED)
+        .order_by(OptionsTrade.id.desc())
+    )
+    assert trade is not None
+    assert trade.signal_snapshot_json["close"]["pricing"]["q_source"] == "fixture:spy_ttm"

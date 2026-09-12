@@ -4,6 +4,8 @@ All five wave-2 tracks are merged on `main` (I-E3 paper_reference adapter, I-E4 
 dead man / reconciliation / calendar / guarded cycle, I-O2 short-commit backfill loop,
 I-O4+I-O5 options gate ladder + O3 short vertical v0.1.0, I-O6 options paper mechanics).
 Migration `b9d41e07c6aa` is applied live. Nothing is scheduled or armed by any of them.
+W5b adds migration `c1e8f0a4d7b3` (two columns on `options_mark`); it is **not** applied
+live yet and the options paper account holds no structure, so there is nothing to migrate.
 
 ## Pre-registration defects found by the implementers (D5 amendments needed, k = 0)
 
@@ -44,12 +46,50 @@ Migration `b9d41e07c6aa` is applied live. Nothing is scheduled or armed by any o
   the options chain runs **only in the CLI-launched worker**, never in an API process with
   `APP_RUN_SCHEDULER=true`, and `default_job_specs()` stays byte-identical to main.
   `paper.options_eod` is named in S11/S11b/S13/S14/S15/S16 as the fourth options sibling.
-  **Still open:** the chain refuses (`OptionsEodUnpriceable`) a book spanning
+  ~~**Still open:** the chain refuses (`OptionsEodUnpriceable`) a book spanning
   more than one underlying, because `mark_options_to_market` /
   `process_option_expiries` / `auto_simulate_options_scan_runs` each take ONE
   `OptionsPricingContext` per call and one `q` cannot honestly serve two names
   (decision 11). Widening that needs a per-underlying pricing resolver in
-  `paper/options_marks.py`, which W3c deliberately did not open.
+  `paper/options_marks.py`, which W3c deliberately did not open.~~
+  **CLOSED by W5b (branch `options-w5b-per-underlying-pricing`, same day.)** The
+  three jobs now take a `PricingContextResolver` — a callable
+  `(underlying, as_of) -> OptionsPricingContext` — instead of one context, so a
+  **multi-underlying book is priceable** and each name carries its own `q`.
+  `resolve_underlying_pricing()` sources decision 11 **rank 1 only**: that name's
+  own trailing-twelve-month declared yield from `dividend_event`, expressed
+  against that name's `ohlcv_daily` close for the session; `r` comes from
+  `OptionsEvaluationConfig.risk_free_rate`, the same constant the backtest engine
+  reads, and the pre-registered cost model is shared because neither is a
+  property of an underlying. There is still **no `q = 0.0` fallback and no
+  substituted `q`**: a name with no sourceable series or no close raises
+  `UnderlyingNotPriceable` (which `OptionsEodUnpriceable` is now an alias of), and
+  the refusal **names the underlying**.
+  What changed is the blast radius, not the strictness. `_options_eod_pricing`
+  resolves every name independently inside the survey reader and returns a
+  `ResolvedPricing` pinned to that session (asking it for another session is a
+  loud `ValueError` — `q` and its reference close are point-in-time). A refused
+  name's structures are **left unmarked and unsettled** and reported by name
+  (`OptionsMarkResult.unpriceable_underlyings`, `ExpiryReport.unpriceable_
+  underlyings`, and an error log naming each reason); every other structure is
+  marked as usual. An unmarked structure is then a **new reconcile check 11**
+  (`11_open_structure_marked_this_session`), so the session's
+  `OptionsReconcileReport` is **not clean** and the second guard's condition
+  **AA** refuses every acceptance on it — the auto-simulation step still runs, so
+  the refusal is a recorded decision naming AA rather than an absence. A
+  structure opened ON the session is exempt from check 11: condition M already
+  required every leg to print on its fill session, so the entry is its valuation.
+  A candidate whose own name cannot be priced is **skipped, not rejected** —
+  `_already_decided` never re-decides a candidate, and a reference-data gap is
+  not a permanent judgement about a candidate.
+  Recording (decision 11's second half): migration **`c1e8f0a4d7b3`** adds
+  `options_mark.q_source` and `options_mark.dividend_yield` — `op.add_column`, not
+  a batch rebuild, because `options_mark` is append-only and a copy-and-swap
+  would drop its two S9 immutability triggers. `dividend_yield` is NULL when the
+  number is not finite, never 0.0. Closes and expiry settlements carry the same
+  pair in the immutable `options_trade` snapshot under `close.pricing` (a JSON
+  field that already existed, so no column was added for them), and
+  `options_portfolio_snapshot` surfaces both on each structure's `last_mark`.
 - The real options backfill (~29,376 requests, ~98.7 h) has not started; runbook
   `docs/research/options_designs/IO2_RUNBOOK.md` (nightly `--max-minutes 590`, never in the
   17:30–19:00 ET window, coverage-summary-only rule).

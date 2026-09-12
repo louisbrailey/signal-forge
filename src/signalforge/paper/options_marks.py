@@ -18,19 +18,35 @@ signal and may **never set a fill price**. When an exit is signalled on a sessio
 where any leg lacks a print, the structure records ``exit_signalled_at`` and
 ``exit_deferred_sessions`` increments each session until every leg prints. The
 deferral is a cost that is borne, recorded, and reported — never assumed away.
+
+**Pricing is resolved PER UNDERLYING (W5b, decision 11).** These jobs take a
+:class:`PricingContextResolver`, not one :class:`OptionsPricingContext`: ``q`` is
+a property of a NAME, so one context for a whole call would apply SPY's dividend
+yield to every other underlying in the book. The resolver answers per
+``(underlying, as_of)`` or refuses that underlying by name
+(:class:`UnderlyingNotPriceable`) — it never substitutes another name's ``q`` and
+never defaults to ``0.0``. A refusal is scoped to the structures on that name:
+everything else is still marked, and the refusal is recorded rather than
+absorbed. An unmarked structure then makes the session's reconciliation dirty
+(check 11), which is what keeps the second guard's condition AA from offering an
+acceptance against a book that could not be valued.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from math import isfinite
+from typing import Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from signalforge.backtest.options_costs import OptionCostModel
 from signalforge.data import options_calendar
+from signalforge.data.options_corporate_actions import trailing_dividend_yield
 from signalforge.db.models import (
     OptionsCollateralEntry,
     OptionsMark,
@@ -67,11 +83,16 @@ from signalforge.settings_store import effective_research_config
 __all__ = [
     "ExpiryReport",
     "OptionsMarkResult",
+    "PricingContextResolver",
     "ReconcileReport",
+    "ResolvedPricing",
+    "UnderlyingNotPriceable",
     "mark_options_to_market",
     "options_portfolio_snapshot",
     "process_option_expiries",
     "reconcile_options_collateral",
+    "resolve_pricing_by_underlying",
+    "resolve_underlying_pricing",
 ]
 
 _log = get_logger("paper.options_marks")
@@ -79,13 +100,194 @@ _log = get_logger("paper.options_marks")
 _PHASE1_SHARES_PER_CONTRACT = 100
 
 
+# --------------------------------------------------------------------------- #
+# Per-underlying pricing (W5b, decision 11: "source and record q per underlying")
+# --------------------------------------------------------------------------- #
+
+
+class UnderlyingNotPriceable(RuntimeError):
+    """ONE underlying's pricing inputs cannot be SOURCED — named, never guessed.
+
+    Raised instead of returning a context built on a substituted ``q``, on a
+    defaulted ``q = 0.0``, or on another name's dividend yield. It names the
+    underlying because "the book is unpriceable" is not actionable and "SPY has
+    no recorded dividend series at 2026-02-18" is.
+
+    Scope is deliberately ONE name: the caller marks every other structure and
+    records this one, rather than abandoning a whole book over one gap.
+    """
+
+    def __init__(self, underlying: str, reason: str) -> None:
+        self.underlying = underlying
+        self.reason = reason
+        super().__init__(f"{underlying}: {reason}")
+
+
+class PricingContextResolver(Protocol):
+    """``(underlying, as_of) -> OptionsPricingContext``, or a named refusal.
+
+    Structural on purpose: the EOD chain passes a :class:`ResolvedPricing` frozen
+    over one session's survey, and a caller that has its own sourcing may pass
+    any callable of this shape. What it may NOT do is hand one context to a
+    multi-name book — that is the defect this protocol replaces.
+    """
+
+    def __call__(self, underlying: str, as_of: date) -> OptionsPricingContext: ...
+
+
+def resolve_underlying_pricing(
+    session: Session,
+    underlying: str,
+    as_of: date,
+    *,
+    cost_model: OptionCostModel,
+    risk_free_rate: float,
+    beta_to_spy: float = 1.0,
+) -> OptionsPricingContext:
+    """Source ONE underlying's pricing context from the recorded series.
+
+    Three inputs, none of them defaulted into existence:
+
+    * the underlying's **close** for that session, from ``ohlcv_daily`` (the
+      reference price the trailing yield is expressed against, and the spot every
+      greek is taken at). Absent -> refuse, by name.
+    * ``q`` — decision 11 **rank 1** only: the trailing twelve-month declared
+      yield from the recorded ``dividend_event`` series for THIS name. Rank 2
+      (put-call parity) is not built, and ``q = 0.0`` is forbidden, so an
+      unresolvable ``q`` refuses by name rather than borrowing a number.
+    * ``risk_free_rate`` — passed in by the caller from the same place the
+      backtest engine reads it (``OptionsEvaluationConfig.risk_free_rate``, whose
+      ``r_source`` is recorded and hashed into ``options_config_hash``), so the
+      paper marks and the evaluations that approved the strategy cannot drift
+      apart silently.
+    """
+    spot = _underlying_close(session, underlying, as_of)
+    if spot is None or spot <= 0.0:
+        raise UnderlyingNotPriceable(
+            underlying,
+            f"no ohlcv_daily close on or before {as_of.isoformat()}; a structure cannot be "
+            "valued against an unknown spot",
+        )
+    q = trailing_dividend_yield(session, underlying, as_of, reference_close=spot)
+    if q is None:
+        raise UnderlyingNotPriceable(
+            underlying,
+            f"no recorded dividend series at {as_of.isoformat()} — decision 11 rank 1 "
+            "unresolved and rank 2 (put-call parity) is not built; q = 0.0 is forbidden "
+            "because it biases a short-premium result in its own favour",
+        )
+    return OptionsPricingContext(
+        cost_model=cost_model,
+        risk_free_rate=risk_free_rate,
+        dividend_yield=q.q,
+        q_source=q.source,
+        beta_to_spy=beta_to_spy,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedPricing:
+    """One session's per-underlying resolution, frozen into a resolver.
+
+    The EOD chain resolves inside its read-only survey and then runs four SHORT
+    write transactions (docs/SQLITE_CONCURRENCY.md rule 4), so the resolver must
+    not hold a ``Session``: it carries the ANSWERS, per name, plus the named
+    reason every refused name was refused for.
+
+    ``as_of`` is pinned and checked. ``q`` and the spot it is expressed against
+    are point-in-time measurements; silently reusing them for another session
+    would be the same class of substitution this type exists to stop, so a
+    mismatch is a loud ``ValueError`` rather than a refusal the caller absorbs.
+    """
+
+    as_of: date
+    contexts: Mapping[str, OptionsPricingContext]
+    unpriceable: Mapping[str, str]
+
+    def __call__(self, underlying: str, as_of: date) -> OptionsPricingContext:
+        if as_of != self.as_of:
+            raise ValueError(
+                f"pricing was resolved for {self.as_of.isoformat()} and was asked for "
+                f"{as_of.isoformat()}; q and its reference close are point-in-time"
+            )
+        ctx = self.contexts.get(underlying)
+        if ctx is not None:
+            return ctx
+        raise UnderlyingNotPriceable(
+            underlying,
+            self.unpriceable.get(underlying, "no pricing context was resolved for this underlying"),
+        )
+
+    @property
+    def unpriceable_underlyings(self) -> tuple[str, ...]:
+        return tuple(sorted(self.unpriceable))
+
+
+def resolve_pricing_by_underlying(
+    session: Session,
+    underlyings: frozenset[str],
+    as_of: date,
+    *,
+    cost_model: OptionCostModel,
+    risk_free_rate: float,
+    beta_to_spy: float = 1.0,
+) -> ResolvedPricing:
+    """Resolve every name INDEPENDENTLY; one refusal never refuses the others.
+
+    A multi-underlying book is priceable — that is the whole point. Each name
+    gets its own ``q`` from its own recorded series, and a name that cannot be
+    sourced is carried as a named reason rather than as an exception that would
+    take the rest of the book down with it.
+    """
+    contexts: dict[str, OptionsPricingContext] = {}
+    unpriceable: dict[str, str] = {}
+    for symbol in sorted(underlyings):
+        try:
+            contexts[symbol] = resolve_underlying_pricing(
+                session,
+                symbol,
+                as_of,
+                cost_model=cost_model,
+                risk_free_rate=risk_free_rate,
+                beta_to_spy=beta_to_spy,
+            )
+        except UnderlyingNotPriceable as exc:
+            unpriceable[symbol] = exc.reason
+            _log.error(
+                "paper.options_pricing_unsourceable",
+                underlying=symbol,
+                as_of=as_of.isoformat(),
+                reason=exc.reason,
+            )
+    return ResolvedPricing(as_of=as_of, contexts=contexts, unpriceable=unpriceable)
+
+
+def _q_record(pricing: OptionsPricingContext) -> dict[str, Any]:
+    """What was used, on the row: the source AND the number it produced.
+
+    ``dividend_yield`` is written as ``None`` when it is not finite. A NaN would
+    serialise as the non-standard JSON token ``NaN``, and a reader that coerced
+    it back to a float would have a number where there was a measurement's
+    absence.
+    """
+    q = pricing.dividend_yield
+    return {
+        "q_source": pricing.q_source,
+        "dividend_yield": round(q, 10) if isfinite(q) else None,
+        "risk_free_rate": pricing.risk_free_rate,
+        "iv_source": pricing.iv_source,
+        "greeks_source": pricing.greeks_source,
+    }
+
+
 @dataclass(slots=True)
 class OptionsMarkResult:
     """Deliberately WIDER than ``MarkToMarketResult``.
 
-    The four extra counters — deferrals, synthetic marks, unavailable IVs, and
-    the unpriced-leg count — are the honesty of the model and must not be
-    summarised away into "checked / closed".
+    The five extra counters — deferrals, synthetic marks, unavailable IVs, the
+    unpriced-leg count and the structures whose underlying could not be priced at
+    all — are the honesty of the model and must not be summarised away into
+    "checked / closed".
     """
 
     checked: int = 0
@@ -93,11 +295,14 @@ class OptionsMarkResult:
     deferred: int = 0
     synthetic_marked: int = 0
     iv_unavailable: int = 0
+    unpriceable: int = 0
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
     net_delta_notional: float = 0.0
     net_vega_per_vol_pt: float = 0.0
     closed_position_ids: list[int] = field(default_factory=list)
+    #: underlyings whose pricing inputs could not be sourced, BY NAME.
+    unpriceable_underlyings: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -107,8 +312,10 @@ class ExpiryReport:
     expired_worthless: int = 0
     assigned: int = 0
     forced_close_no_print: int = 0
+    unpriceable: int = 0
     realized_pnl: float = 0.0
     closed_position_ids: list[int] = field(default_factory=list)
+    unpriceable_underlyings: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -196,6 +403,7 @@ def _close_position(
     exit_reason: str,
     as_of: date,
     actor: str,
+    pricing: OptionsPricingContext,
     note: str,
     forced_close_no_print: bool = False,
     pin_risk: bool = False,
@@ -207,6 +415,13 @@ def _close_position(
     crash between the trade write and the release leaves a closed structure with
     its collateral still reserved — conservative, capacity-blocking, and caught by
     reconcile check 5. The opposite ordering is the fail-open one.
+
+    ``pricing`` is the context resolved for THIS structure's underlying, and it is
+    recorded in the immutable snapshot (``close.pricing``) whether or not ``q``
+    entered the number: on an intrinsic settlement it did not, and a reader can
+    see that from ``exit_reason`` — what a reader cannot reconstruct later is
+    which ``q``, from which source, the session's greeks and exit trigger were
+    computed under.
     """
     entry_comm = float(position.entry_costs) - _entry_spread_cost(position)
     realized = float(position.entry_net_premium) + exit_cash - entry_comm - exit_commission_fees
@@ -249,6 +464,8 @@ def _close_position(
                     "assignment_risk_flag": assignment_risk,
                     "exit_deferred_sessions": position.exit_deferred_sessions,
                     "collateral_released": float(position.collateral_reserved),
+                    # Per UNDERLYING (decision 11), never one context per run.
+                    "pricing": _q_record(pricing) | {"underlying": position.underlying_symbol},
                     "legs": [
                         {
                             "option_ticker": leg.option_ticker,
@@ -297,13 +514,17 @@ def mark_options_to_market(
     *,
     account_name: str,
     as_of: date,
-    pricing: OptionsPricingContext,
+    pricing: PricingContextResolver,
     actor: str = "options_mtm",
 ) -> OptionsMarkResult:
     """Value every open structure and close the ones whose exit is due.
 
     Per structure, per session:
 
+    0. Resolve the pricing context for **this structure's underlying** (decision
+       11). A name whose ``q`` or whose close cannot be sourced is counted,
+       named, and LEFT UNMARKED — never marked against another name's dividend
+       yield. Every other structure in the book is still marked.
     1. Mark each leg from **its own print** (``OptionAggregateDaily.close``, a
        last-trade print, never a mid).
     2. No print means the mark is incomplete: record ``synthetic`` /
@@ -326,10 +547,28 @@ def mark_options_to_market(
     for position in open_positions(session, account):
         result.checked += 1
         structure = structure_from_position(position)
-        quotes = _quotes(session, structure, as_of=as_of, pricing=pricing)
+        try:
+            ctx = pricing(structure.underlying_symbol, as_of)
+        except UnderlyingNotPriceable as exc:
+            # NOT marked, NOT closed, NOT guessed. The structure stays open with
+            # no mark for this session, which reconcile check 11 turns into a
+            # finding — so the second guard's condition AA cannot offer an
+            # acceptance against a book with a hole in it.
+            result.unpriceable += 1
+            if exc.underlying not in result.unpriceable_underlyings:
+                result.unpriceable_underlyings.append(exc.underlying)
+            _log.error(
+                "paper.options_mark_unpriceable",
+                position=position.id,
+                underlying=exc.underlying,
+                as_of=as_of.isoformat(),
+                reason=exc.reason,
+            )
+            continue
+        quotes = _quotes(session, structure, as_of=as_of, pricing=ctx)
         priced = [t for t, q in quotes.items() if q.priced]
         net_premium = _net_premium_at_print(structure, quotes)
-        greeks = structure_greeks(structure, quotes, beta_to_spy=pricing.beta_to_spy)
+        greeks = structure_greeks(structure, quotes, beta_to_spy=ctx.beta_to_spy)
         synthetic = len(priced) < len(structure.legs)
         iv_unavailable = not greeks.complete
         if synthetic:
@@ -371,7 +610,12 @@ def mark_options_to_market(
                     iv_unavailable=iv_unavailable,
                     legs_priced=len(priced),
                     legs_total=len(structure.legs),
-                    iv_source=pricing.iv_source if not iv_unavailable else "",
+                    iv_source=ctx.iv_source if not iv_unavailable else "",
+                    # Decision 11: which q, from which source, for THIS name.
+                    # Recorded on every mark — including a synthetic one, whose
+                    # greeks are exactly the ones a wrong q would distort.
+                    q_source=ctx.q_source[:48],
+                    dividend_yield=(ctx.dividend_yield if isfinite(ctx.dividend_yield) else None),
                     exit_reason=trigger,
                 )
             )
@@ -396,7 +640,7 @@ def mark_options_to_market(
         exit_fill = fill_structure(
             structure,
             quotes,
-            cost_model=pricing.cost_model,
+            cost_model=ctx.cost_model,
             as_of=as_of,
             opening=False,
             apply_intrinsic_floor=True,
@@ -414,6 +658,7 @@ def mark_options_to_market(
             exit_reason=trigger,
             as_of=as_of,
             actor=actor,
+            pricing=ctx,
             note=f"SIMULATED options close ({trigger}). {NOTICE}",
             assignment_risk=_assignment_risk(structure, quotes),
         )
@@ -468,7 +713,7 @@ def process_option_expiries(
     *,
     account_name: str,
     as_of: date,
-    pricing: OptionsPricingContext,
+    pricing: PricingContextResolver,
     actor: str = "options_expiry",
 ) -> ExpiryReport:
     """Force-close at ``expiry - 1``; settle anything that reached expiry.
@@ -491,6 +736,13 @@ def process_option_expiries(
     Anything it cannot resolve — no underlying close on the settlement session —
     raises :class:`OptionExpiryUnhandled` rather than guessing a P&L.
 
+    A structure whose UNDERLYING cannot be priced at all (decision 11: no
+    sourceable ``q``, or no close) is counted, named and left alone — the same
+    treatment ``mark_options_to_market`` gives it, for the same reason, and one
+    name's gap never stops the other names from settling. That is a visible,
+    recorded deferral, and the session's reconciliation is dirty because of it
+    (check 11), so nothing opens on the back of it.
+
     Idempotent: keyed on ``(position, as_of)`` through ``closed_at``, so a re-run
     on the same session is a no-op. Both catch-up paths re-invoke this.
     """
@@ -499,6 +751,20 @@ def process_option_expiries(
     for position in open_positions(session, account):
         report.checked += 1
         structure = structure_from_position(position)
+        try:
+            ctx = pricing(structure.underlying_symbol, as_of)
+        except UnderlyingNotPriceable as exc:
+            report.unpriceable += 1
+            if exc.underlying not in report.unpriceable_underlyings:
+                report.unpriceable_underlyings.append(exc.underlying)
+            _log.error(
+                "paper.options_expiry_unpriceable",
+                position=position.id,
+                underlying=exc.underlying,
+                as_of=as_of.isoformat(),
+                reason=exc.reason,
+            )
+            continue
         expiry = position.expiration_date
         try:
             last_trade = options_calendar.last_trade_session(expiry)
@@ -511,7 +777,7 @@ def process_option_expiries(
 
         if as_of >= last_trade:
             report_kind = _settle_at_expiry(
-                session, account, position, structure, as_of=as_of, pricing=pricing, actor=actor
+                session, account, position, structure, as_of=as_of, pricing=ctx, actor=actor
             )
             if report_kind == "expired_worthless":
                 report.expired_worthless += 1
@@ -524,12 +790,12 @@ def process_option_expiries(
         if as_of < force_close:
             continue
 
-        quotes = _quotes(session, structure, as_of=as_of, pricing=pricing)
+        quotes = _quotes(session, structure, as_of=as_of, pricing=ctx)
         if all(q.priced for q in quotes.values()):
             exit_fill = fill_structure(
                 structure,
                 quotes,
-                cost_model=pricing.cost_model,
+                cost_model=ctx.cost_model,
                 as_of=as_of,
                 opening=False,
                 apply_intrinsic_floor=True,
@@ -547,6 +813,7 @@ def process_option_expiries(
                 exit_reason="forced_pre_expiry",
                 as_of=as_of,
                 actor=actor,
+                pricing=ctx,
                 note=f"SIMULATED force close at expiry-1. {NOTICE}",
                 pin_risk=_pin_risk(session, structure, as_of),
                 assignment_risk=_assignment_risk(structure, quotes),
@@ -571,6 +838,7 @@ def process_option_expiries(
                 exit_reason="forced_pre_expiry",
                 as_of=as_of,
                 actor=actor,
+                pricing=ctx,
                 note=(
                     "SIMULATED force close at expiry-1 with NO PRINT on at least one leg; "
                     f"closed at the intrinsic floor. {NOTICE}"
@@ -638,6 +906,7 @@ def _settle_at_expiry(
         exit_reason="expired_worthless" if worthless else "assigned",
         as_of=as_of,
         actor=actor,
+        pricing=pricing,
         note=(
             f"SIMULATED expiry settlement at intrinsic (underlying close {spot}). "
             f"{outcome_note} {NOTICE}"
@@ -646,6 +915,17 @@ def _settle_at_expiry(
         pin_risk=_pin_risk(session, structure, as_of),
     )
     return "expired_worthless" if worthless else "assigned"
+
+
+def _has_mark(session: Session, position_id: int, as_of: date) -> bool:
+    return (
+        session.scalar(
+            select(OptionsMark.id)
+            .where(OptionsMark.position_id == position_id, OptionsMark.as_of == as_of)
+            .limit(1)
+        )
+        is not None
+    )
 
 
 def _pin_risk(session: Session, structure: StructureSpec, as_of: date) -> bool:
@@ -671,7 +951,15 @@ def reconcile_options_collateral(
     account_name: str,
     as_of: date,
 ) -> ReconcileReport:
-    """Ten named checks over the collateral ledger. READ-ONLY except its own row.
+    """Eleven named checks over the book. READ-ONLY except its own row.
+
+    Checks 1-10 are the collateral ledger (D3 §3.4). Check **11** is W5b's
+    addition and is about VALUATION rather than collateral: a structure carried
+    into this session that has no mark for it could not be valued, and a book
+    with an unvalued structure in it is not a reconciled book. It is here rather
+    than in the chain because this row is what the second guard's condition AA
+    reads — putting the finding anywhere else would leave AA saying "clean" about
+    a session in which a structure was never priced.
 
     A reconciler that silently repairs is a reconciler that hides the bug it
     found, so nothing here mutates a balance or a structure. The row it writes is
@@ -740,6 +1028,20 @@ def reconcile_options_collateral(
                     f"position {position.id} leg {leg.option_ticker} carries "
                     f"shares_per_contract={leg.shares_per_contract}",
                 )
+        # 11 — every structure CARRIED INTO this session is marked for it (W5b).
+        #      A structure opened ON this session is exempt: condition M required
+        #      every leg to print on its fill session, so the entry IS its
+        #      valuation and there is nothing a mark would add. Anything older
+        #      with no mark could not be valued — the per-underlying pricing
+        #      resolver refused its name — and an unvalued structure must not be
+        #      reported as a reconciled one, because condition AA reads this row.
+        opened_this_session = position.fill_session is not None and position.fill_session >= as_of
+        if not opened_this_session and not _has_mark(session, position.id, as_of):
+            fail(
+                "11_open_structure_marked_this_session",
+                f"position {position.id} on {position.underlying_symbol} carries no mark for "
+                f"{as_of.isoformat()}; it could not be valued this session",
+            )
 
     closed_rows = list(
         session.scalars(
@@ -915,6 +1217,9 @@ def options_portfolio_snapshot(
                         "synthetic": mark.synthetic,
                         "iv_unavailable": mark.iv_unavailable,
                         "legs_priced": f"{mark.legs_priced}/{mark.legs_total}",
+                        # Which q, from which source, for THIS name (decision 11).
+                        "q_source": mark.q_source,
+                        "dividend_yield": mark.dividend_yield,
                     }
                     if mark is not None
                     else None

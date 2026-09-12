@@ -58,7 +58,7 @@ def _run(session: Session, cand: Candidate) -> object:
         session,
         [cand.scan_run_id],
         account_name=fx.OPTIONS_ACCOUNT,
-        pricing=fx.pricing(),
+        pricing=fx.resolver(),
         signal_session=fx.SIGNAL_SESSION,
         fill_session=fx.FILL_SESSION,
         now=NOW,

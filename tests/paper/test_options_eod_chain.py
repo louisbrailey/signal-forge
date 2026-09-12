@@ -17,7 +17,7 @@ Three things are pinned here and nothing else:
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 
 import pytest
 from sqlalchemy import func, select
@@ -58,15 +58,14 @@ def _pin_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(eod, "last_completed_session", lambda: fx.FILL_SESSION)
 
 
-def _pin_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Use the fixture's explicit, non-defaulted pricing context.
+def _pin_pricing(monkeypatch: pytest.MonkeyPatch, resolver: object | None = None) -> None:
+    """Use the fixture's explicit, non-defaulted per-underlying RESOLVER.
 
     ``_options_eod_pricing`` has its own tests below; pinning it here keeps these
     tests about ORDERING and the guard, not about sourcing a dividend yield.
     """
-    monkeypatch.setattr(
-        eod, "_options_eod_pricing", lambda session, *, underlyings, as_of: fx.pricing()
-    )
+    pinned = resolver if resolver is not None else fx.resolver()
+    monkeypatch.setattr(eod, "_options_eod_pricing", lambda session, *, underlyings, as_of: pinned)
 
 
 def _row_counts(session: Session) -> dict[str, int]:
@@ -419,58 +418,244 @@ def test_condition_aa_still_refuses_without_a_same_session_reconciliation(
 
 
 # --------------------------------------------------------------------------- #
+# W5b: a partial mark is a dirty session, and a dirty session opens nothing
+# --------------------------------------------------------------------------- #
+def _open_on_the_fill_session(session: Session, cand):  # type: ignore[no-untyped-def]
+    """Open one structure through the guard, at the fixture's fill session.
+
+    ``_world`` here does not write the dated reconciliation the guard's condition
+    AA needs (the CHAIN writes it), so the fixture's row is added for this one
+    entry — the same thing ``test_options_ledger._world`` does.
+    """
+    from signalforge.db.models import PaperAccount
+    from tests.paper.test_options_ledger import _open
+
+    acct = session.scalar(select(PaperAccount).where(PaperAccount.name == fx.OPTIONS_ACCOUNT))
+    assert acct is not None
+    if (
+        session.scalar(
+            select(OptionsReconcileReport).where(OptionsReconcileReport.as_of == fx.FILL_SESSION)
+        )
+        is None
+    ):
+        fx.clean_reconcile_report(session, acct, as_of=fx.FILL_SESSION)
+    return _open(session, cand)
+
+
+def test_a_structure_whose_underlying_cannot_be_priced_is_left_unmarked_and_named(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The chain marks everything it can and records the hole under its own name.
+
+    The structure is carried INTO the session (opened on the fill session, marked
+    on the one after), so its absence of a mark is a real gap and not the
+    exemption reconcile check 11 grants an entry.
+    """
+    from tests.paper.test_options_ledger import _sessions_after
+
+    cand = _world(session)  # armed, so nothing here is an artefact of the switch
+    _open_on_the_fill_session(session, cand)
+    later = _sessions_after(fx.FILL_SESSION, 1)[0]
+    fx.option_prints(session, sessions=[later])
+    _enable_chain(session)
+    session.commit()
+
+    monkeypatch.setattr(eod, "last_completed_session", lambda: later)
+    _pin_pricing(
+        monkeypatch,
+        fx.resolver(contexts={}, unpriceable={fx.UNDERLYING: "fixture: no dividend series"}),
+    )
+    eod.job_options_paper_eod()
+
+    session.expire_all()
+    # nothing was marked, and nothing was invented
+    assert session.scalar(select(func.count()).select_from(OptionsMark)) == 0
+    position = session.scalar(select(OptionsPosition))
+    assert position is not None and position.closed_at is None
+    # ...and the session's reconciliation says so, by check name and by SYMBOL
+    report = session.scalar(
+        select(OptionsReconcileReport).where(OptionsReconcileReport.as_of == later)
+    )
+    assert report is not None
+    assert report.clean is False
+    checks = {f["check"] for f in report.findings_json}
+    assert checks == {"11_open_structure_marked_this_session"}
+    assert fx.UNDERLYING in report.findings_json[0]["detail"]
+
+
+def test_condition_aa_still_refuses_after_a_PARTIAL_mark(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A book with an unmarked structure in it is not a reconciled book.
+
+    The chain does NOT skip the auto-simulation step — it runs it, and condition
+    AA refuses on the dirty report, so the refusal is a recorded decision naming
+    the condition rather than an absence nobody can audit later.
+    """
+    from signalforge.db.models import StrategyVersion
+    from tests.paper.test_options_ledger import _sessions_after
+
+    first = _world(session)  # armed: the guard would otherwise allow an open
+    _open_on_the_fill_session(session, first)
+    later = _sessions_after(fx.FILL_SESSION, 1)[0]
+    fx.option_prints(session, sessions=[later])
+    version = session.get(StrategyVersion, first.strategy_version_id)
+    assert version is not None
+
+    # A SECOND candidate, on a SECOND name, signalled at the fill session so the
+    # chain's t -> t+1 walk finds it on ``later``. Its own name IS priceable.
+    inst2 = fx.underlying(session, symbol=fx.UNDERLYING_2)
+    fx.contracts(session, symbol=fx.UNDERLYING_2)
+    fx.option_prints(session, sessions=[fx.FILL_SESSION, later], symbol=fx.UNDERLYING_2)
+    second = fx.options_candidate(
+        session, instrument=inst2, version=version, symbol=fx.UNDERLYING_2
+    )
+    fx.approve_scope(session, second, version, universe=(fx.UNDERLYING_2,))
+    run = session.get(ScanRun, second.scan_run_id)
+    assert run is not None
+    run.started_at = datetime.combine(fx.FILL_SESSION, time(22, 30), tzinfo=UTC)
+    _enable_chain(session)
+    session.commit()
+
+    monkeypatch.setattr(eod, "last_completed_session", lambda: later)
+    # SPY refuses; IWM prices. The IWM candidate is therefore fully priceable and
+    # the ONLY thing standing between it and an acceptance is the dirty session.
+    _pin_pricing(
+        monkeypatch,
+        fx.resolver(
+            contexts={fx.UNDERLYING_2: fx.pricing(q_source="fixture:iwm", dividend_yield=0.008)},
+            unpriceable={fx.UNDERLYING: "fixture: no dividend series"},
+        ),
+    )
+    eod.job_options_paper_eod()
+
+    session.expire_all()
+    trade = session.scalar(select(OptionsTrade).where(OptionsTrade.candidate_id == second.id))
+    assert trade is not None
+    assert trade.decision is PaperDecision.REJECTED
+    assert trade.refused_condition == "AA"
+    assert "11_open_structure_marked_this_session" in trade.note
+    # exactly one structure on the book: the pre-existing one, still open
+    assert session.scalar(select(func.count()).select_from(OptionsPosition)) == 1
+
+
+# --------------------------------------------------------------------------- #
 # Pricing: refuse rather than guess
 # --------------------------------------------------------------------------- #
-def test_pricing_with_nothing_in_play_never_passes_a_number_off_as_a_measurement(
-    session: Session,
-) -> None:
-    import math
-
-    ctx = eod._options_eod_pricing(session, underlyings=frozenset(), as_of=fx.FILL_SESSION)
-    assert math.isnan(ctx.dividend_yield)
-    assert ctx.q_source == "unused:no_underlying_in_play"
-    assert ctx.cost_model.spread_pct_of_last_print > 0.0  # never a zero-cost model
-
-
-def test_pricing_refuses_a_book_spanning_more_than_one_underlying(session: Session) -> None:
-    with pytest.raises(eod.OptionsEodUnpriceable, match="cannot honestly price"):
-        eod._options_eod_pricing(
-            session, underlyings=frozenset({"SPY", "QQQ"}), as_of=fx.FILL_SESSION
-        )
-
-
-def test_pricing_refuses_an_unsourceable_dividend_yield(session: Session) -> None:
-    """Decision 11: ``q = 0`` is not a measurement, it is the assumption that
-    biases a short-premium result in its own favour."""
-    fx.underlying(session)
-    session.flush()
-    with pytest.raises(eod.OptionsEodUnpriceable, match="no trailing dividend history"):
-        eod._options_eod_pricing(
-            session, underlyings=frozenset({fx.UNDERLYING}), as_of=fx.FILL_SESSION
-        )
-
-
-def test_pricing_sources_q_from_the_rank_one_dividend_history(session: Session) -> None:
+def _dividends(session: Session, symbol: str, *, cash: float) -> None:
+    """Four quarterly payments of ``cash`` in the trailing year."""
     from signalforge.db.models import DividendEvent
 
-    fx.underlying(session)
     for month, day in ((3, 20), (6, 19), (9, 18), (12, 18)):
         session.add(
             DividendEvent(
-                symbol=fx.UNDERLYING,
+                symbol=symbol,
                 ex_dividend_date=date(2025, month, day),
-                cash_amount=1.50,
+                cash_amount=cash,
                 source="massive_options",
                 ingested_at=datetime.now(UTC),
             )
         )
     session.flush()
-    ctx = eod._options_eod_pricing(
+
+
+def test_pricing_with_nothing_in_play_resolves_to_an_empty_resolver(session: Session) -> None:
+    """W5b REPLACES I-O6's NaN-context assertion.
+
+    The old chain built ONE context per run, so with nothing in play it still had
+    to return a context, and it used ``dividend_yield = NaN`` to stop a future
+    caller mistaking a placeholder for a measurement. A resolver has a better
+    answer available: hold no context at all, and refuse BY NAME if anyone ever
+    asks. There is no number to mistake for a reading.
+    """
+    resolved = eod._options_eod_pricing(session, underlyings=frozenset(), as_of=fx.FILL_SESSION)
+    assert resolved.contexts == {}
+    assert resolved.unpriceable_underlyings == ()
+    with pytest.raises(eod.OptionsEodUnpriceable, match="SPY"):
+        resolved(fx.UNDERLYING, fx.FILL_SESSION)
+
+
+def test_pricing_prices_a_book_spanning_MORE_THAN_ONE_underlying(session: Session) -> None:
+    """W5b REPLACES I-O6's ``test_pricing_refuses_a_book_spanning_more_than_one_underlying``.
+
+    That refusal existed only because one context was applied to a whole call, so
+    a two-name book would have been marked against ONE name's dividend yield.
+    Decision 11 says ``q`` is sourced per underlying; now it is, so the book is
+    priceable and each name carries its own number.
+    """
+    fx.underlying(session, symbol=fx.UNDERLYING, close=fx.SPOT)
+    fx.underlying(session, symbol=fx.UNDERLYING_2, close=fx.SPOT)
+    _dividends(session, fx.UNDERLYING, cash=1.50)
+    _dividends(session, fx.UNDERLYING_2, cash=0.75)
+
+    resolved = eod._options_eod_pricing(
+        session, underlyings=frozenset({fx.UNDERLYING, fx.UNDERLYING_2}), as_of=fx.FILL_SESSION
+    )
+    assert resolved.unpriceable_underlyings == ()
+    spy = resolved(fx.UNDERLYING, fx.FILL_SESSION)
+    iwm = resolved(fx.UNDERLYING_2, fx.FILL_SESSION)
+    assert spy.dividend_yield == pytest.approx(6.0 / fx.SPOT)
+    assert iwm.dividend_yield == pytest.approx(3.0 / fx.SPOT)
+    assert spy.dividend_yield != iwm.dividend_yield  # the whole point
+    assert spy.q_source == iwm.q_source == "vendor_dividends"
+    # ...and the two inputs that are NOT properties of a name are shared
+    assert spy.risk_free_rate == iwm.risk_free_rate
+    assert spy.cost_model == iwm.cost_model
+    assert spy.cost_model.spread_pct_of_last_print > 0.0  # never a zero-cost model
+
+
+def test_pricing_refuses_an_unsourceable_dividend_yield_BY_NAME(session: Session) -> None:
+    """Decision 11: ``q = 0`` is not a measurement, it is the assumption that
+    biases a short-premium result in its own favour. The refusal names the
+    underlying, and takes only that underlying down with it."""
+    fx.underlying(session, symbol=fx.UNDERLYING, close=fx.SPOT)
+    fx.underlying(session, symbol=fx.UNDERLYING_2, close=fx.SPOT)
+    _dividends(session, fx.UNDERLYING_2, cash=0.75)  # IWM only
+
+    resolved = eod._options_eod_pricing(
+        session, underlyings=frozenset({fx.UNDERLYING, fx.UNDERLYING_2}), as_of=fx.FILL_SESSION
+    )
+    assert resolved.unpriceable_underlyings == (fx.UNDERLYING,)
+    assert "no recorded dividend series" in resolved.unpriceable[fx.UNDERLYING]
+    with pytest.raises(eod.OptionsEodUnpriceable, match=r"SPY: no recorded dividend series"):
+        resolved(fx.UNDERLYING, fx.FILL_SESSION)
+    # the OTHER name is still priced — one gap is not a book-wide refusal
+    assert resolved(fx.UNDERLYING_2, fx.FILL_SESSION).dividend_yield > 0.0
+
+
+def test_pricing_refuses_a_missing_underlying_close_BY_NAME(session: Session) -> None:
+    """No close means no spot, and no spot means no value — for THAT name."""
+    _dividends(session, fx.UNDERLYING, cash=1.50)  # dividends, but no bars at all
+    resolved = eod._options_eod_pricing(
         session, underlyings=frozenset({fx.UNDERLYING}), as_of=fx.FILL_SESSION
     )
+    assert resolved.unpriceable_underlyings == (fx.UNDERLYING,)
+    assert "no ohlcv_daily close" in resolved.unpriceable[fx.UNDERLYING]
+
+
+def test_pricing_sources_q_from_the_rank_one_dividend_history(session: Session) -> None:
+    fx.underlying(session)
+    _dividends(session, fx.UNDERLYING, cash=1.50)
+    resolved = eod._options_eod_pricing(
+        session, underlyings=frozenset({fx.UNDERLYING}), as_of=fx.FILL_SESSION
+    )
+    ctx = resolved(fx.UNDERLYING, fx.FILL_SESSION)
     # four quarterly $1.50 payments against a $450 close
     assert ctx.dividend_yield == pytest.approx(6.0 / fx.SPOT)
     assert ctx.q_source == "vendor_dividends"
+
+
+def test_a_resolved_context_is_pinned_to_the_session_it_was_measured_on(session: Session) -> None:
+    """``q`` and the close it is expressed against are point-in-time. Reusing one
+    session's resolution for another is the same substitution this type exists to
+    stop, so it is a loud error and not a refusal a caller could absorb."""
+    fx.underlying(session)
+    _dividends(session, fx.UNDERLYING, cash=1.50)
+    resolved = eod._options_eod_pricing(
+        session, underlyings=frozenset({fx.UNDERLYING}), as_of=fx.FILL_SESSION
+    )
+    with pytest.raises(ValueError, match="point-in-time"):
+        resolved(fx.UNDERLYING, fx.SIGNAL_SESSION)
 
 
 def test_the_previous_trading_session_is_the_calendar_s_answer() -> None:

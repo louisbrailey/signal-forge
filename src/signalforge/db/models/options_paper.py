@@ -292,6 +292,13 @@ class OptionsMark(Base, IntPK, CreatedAt):
     The four honesty counters (``synthetic``, ``iv_unavailable``, ``legs_priced``
     vs ``legs_total``) are on the row rather than summarised away: a mark taken
     from a modelled surface may trigger a signal and may never set a fill price.
+
+    ``q_source`` / ``dividend_yield`` are the same honesty applied to the input
+    decision 11 requires per UNDERLYING (W5b). There is no JSON column on this
+    table to hide them in, and they cannot be inferred from the position row:
+    ``options_position.q_source`` records what was used at ENTRY, while a mark is
+    a different session with its own trailing-twelve-month window. A NULL
+    ``dividend_yield`` means the number was not finite, never that it was zero.
     """
 
     __tablename__ = "options_mark"
@@ -312,6 +319,8 @@ class OptionsMark(Base, IntPK, CreatedAt):
     legs_priced: Mapped[int] = mapped_column(Integer, default=0)
     legs_total: Mapped[int] = mapped_column(Integer, default=0)
     iv_source: Mapped[str] = mapped_column(String(32), default="")
+    q_source: Mapped[str] = mapped_column(String(48), default="", server_default="")
+    dividend_yield: Mapped[float | None] = mapped_column(Float, default=None)
     surface_contracts_used: Mapped[int | None] = mapped_column(Integer, default=None)
     exit_reason: Mapped[str | None] = mapped_column(String(32), default=None)
 

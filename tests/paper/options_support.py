@@ -13,6 +13,8 @@ limit tests meaningful rather than incidental.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -43,6 +45,7 @@ from signalforge.paper.options_ledger import (
     OPTIONS_STRUCTURE_KIND,
     OptionsPricingContext,
 )
+from signalforge.paper.options_marks import UnderlyingNotPriceable
 
 UNDERLYING = "SPY"
 SPOT = 450.0
@@ -53,6 +56,17 @@ SHORT_STRIKE = 430.0
 LONG_STRIKE = 428.0
 SHORT_TICKER = "O:SPY260320P00430000"
 LONG_TICKER = "O:SPY260320P00428000"
+
+#: A SECOND name, for the multi-underlying book W5b's resolver exists to price.
+#: Same strikes and same prints, so any difference a test observes between the
+#: two books comes from the pricing context and from nothing else.
+UNDERLYING_2 = "IWM"
+
+
+def tickers_for(symbol: str) -> tuple[str, str]:
+    """``(short, long)`` OCC tickers for ``symbol`` at the fixture's strikes."""
+    return (f"O:{symbol}260320P00430000", f"O:{symbol}260320P00428000")
+
 
 #: Sessions used by the tests. 2026-02-17 and 2026-02-18 are a Tuesday and a
 #: Wednesday (2026-02-16 is Presidents' Day), so signal -> fill is t -> t+1.
@@ -79,14 +93,70 @@ def cost_model(*, spread_multiplier: float = 1.0) -> OptionCostModel:
     )
 
 
-def pricing(*, spread_multiplier: float = 1.0, beta_to_spy: float = 1.0) -> OptionsPricingContext:
+def pricing(
+    *,
+    spread_multiplier: float = 1.0,
+    beta_to_spy: float = 1.0,
+    dividend_yield: float = 0.013,
+    q_source: str = "fixture:trailing_12m_yield",
+) -> OptionsPricingContext:
+    """ONE underlying's context — what the guard and the acceptance take.
+
+    A candidate has exactly one underlying, so a single context is the honest
+    shape there. The MARK, EXPIRY and AUTO-SIM jobs take a
+    :class:`PricingContextResolver` instead, because they span a book: use
+    :func:`resolver` for those.
+    """
     return OptionsPricingContext(
         cost_model=cost_model(spread_multiplier=spread_multiplier),
         risk_free_rate=0.04,
-        dividend_yield=0.013,
-        q_source="fixture:trailing_12m_yield",
+        dividend_yield=dividend_yield,
+        q_source=q_source,
         beta_to_spy=beta_to_spy,
     )
+
+
+@dataclass(frozen=True)
+class FixtureResolver:
+    """A hand-built :class:`PricingContextResolver`, per underlying.
+
+    Deliberately NOT ``ResolvedPricing``: that type pins the session it was
+    resolved for, which is right in production and wrong in a fixture that marks
+    the same book on half a dozen sessions. Everything else is the same contract
+    — a name it does not carry is refused BY NAME, never answered with another
+    name's ``q``.
+    """
+
+    contexts: Mapping[str, OptionsPricingContext]
+    unpriceable: Mapping[str, str] = field(default_factory=dict)
+
+    def __call__(self, underlying: str, as_of: date) -> OptionsPricingContext:
+        ctx = self.contexts.get(underlying)
+        if ctx is not None:
+            return ctx
+        raise UnderlyingNotPriceable(
+            underlying,
+            self.unpriceable.get(underlying, "fixture: no context was built for this underlying"),
+        )
+
+    @property
+    def unpriceable_underlyings(self) -> tuple[str, ...]:
+        return tuple(sorted(self.unpriceable))
+
+
+def resolver(
+    *,
+    spread_multiplier: float = 1.0,
+    beta_to_spy: float = 1.0,
+    contexts: Mapping[str, OptionsPricingContext] | None = None,
+    unpriceable: Mapping[str, str] | None = None,
+) -> FixtureResolver:
+    """The default one-name book: SPY, with the fixture's explicit context."""
+    if contexts is None:
+        contexts = {
+            UNDERLYING: pricing(spread_multiplier=spread_multiplier, beta_to_spy=beta_to_spy)
+        }
+    return FixtureResolver(contexts=dict(contexts), unpriceable=dict(unpriceable or {}))
 
 
 def options_account(session: Session, *, cash: Decimal = OPTIONS_ACCOUNT_CASH) -> PaperAccount:
@@ -135,12 +205,19 @@ def underlying(session: Session, *, symbol: str = UNDERLYING, close: float = SPO
     return inst
 
 
-def contracts(session: Session, *, shares_per_contract: int = 100, style: str = "american") -> None:
-    for ticker, strike in ((SHORT_TICKER, SHORT_STRIKE), (LONG_TICKER, LONG_STRIKE)):
+def contracts(
+    session: Session,
+    *,
+    shares_per_contract: int = 100,
+    style: str = "american",
+    symbol: str = UNDERLYING,
+) -> None:
+    short_ticker, long_ticker = tickers_for(symbol)
+    for ticker, strike in ((short_ticker, SHORT_STRIKE), (long_ticker, LONG_STRIKE)):
         session.add(
             OptionContract(
                 option_ticker=ticker,
-                underlying_symbol=UNDERLYING,
+                underlying_symbol=symbol,
                 contract_type="put",
                 strike_price=strike,
                 expiration_date=EXPIRY,
@@ -160,17 +237,19 @@ def option_prints(
     short_close: float = 1.20,
     long_close: float = 0.70,
     skip: tuple[str, ...] = (),
+    symbol: str = UNDERLYING,
 ) -> None:
     """Write one daily bar per contract per session. ``skip`` names tickers that
     DO NOT print — absence is a first-class liquidity fact, never a zero."""
+    short_ticker, long_ticker = tickers_for(symbol)
     for d in sessions:
-        for ticker, close in ((SHORT_TICKER, short_close), (LONG_TICKER, long_close)):
+        for ticker, close in ((short_ticker, short_close), (long_ticker, long_close)):
             if ticker in skip:
                 continue
             session.add(
                 OptionAggregateDaily(
                     option_ticker=ticker,
-                    underlying_symbol=UNDERLYING,
+                    underlying_symbol=symbol,
                     session_date=d,
                     open=close,
                     high=close,
@@ -187,11 +266,12 @@ def option_prints(
 
 
 def legs_json(
-    *, shares_per_contract: int = 100, style: str = "american"
+    *, shares_per_contract: int = 100, style: str = "american", symbol: str = UNDERLYING
 ) -> list[dict[str, object]]:
+    short_ticker, long_ticker = tickers_for(symbol)
     return [
         {
-            "option_ticker": SHORT_TICKER,
+            "option_ticker": short_ticker,
             "right": "put",
             "strike": SHORT_STRIKE,
             "expiration": EXPIRY.isoformat(),
@@ -200,7 +280,7 @@ def legs_json(
             "exercise_style": style,
         },
         {
-            "option_ticker": LONG_TICKER,
+            "option_ticker": long_ticker,
             "right": "put",
             "strike": LONG_STRIKE,
             "expiration": EXPIRY.isoformat(),
@@ -247,6 +327,7 @@ def options_candidate(
     shares_per_contract: int = 100,
     style: str = "american",
     with_structure_row: bool = True,
+    symbol: str = UNDERLYING,
 ) -> Candidate:
     run = ScanRun(
         horizon=Horizon.POSITION,
@@ -293,9 +374,11 @@ def options_candidate(
             CandidateOptionStructure(
                 candidate_id=cand.id,
                 structure_type=structure_type,
-                underlying_symbol=UNDERLYING,
+                underlying_symbol=symbol,
                 contracts=contracts_n,
-                legs_json=legs_json(shares_per_contract=shares_per_contract, style=style),
+                legs_json=legs_json(
+                    shares_per_contract=shares_per_contract, style=style, symbol=symbol
+                ),
                 net_premium=50.0,
                 max_loss_dollars=150.0,
                 max_gain_dollars=50.0,
@@ -335,12 +418,16 @@ def approve_scope(
     version: StrategyVersion,
     *,
     snapshot_key: str = "fixture-options-snapshot",
+    universe: tuple[str, ...] = (UNDERLYING,),
 ) -> None:
     """Make the five-part equity scope match pass for this candidate's scan.
 
     The scope machinery compares a live scan against a PASSING promotion
     evaluation on dataset snapshot, config hash, spec hash, source and the exact
     universe. Everything here is a fixture row; nothing is a real evaluation.
+
+    ``universe`` is EXACT, not a superset: the scan and the evaluation must name
+    the same symbols, so a two-name book has to pass both names here.
     """
     from sqlalchemy import select
 
@@ -349,13 +436,13 @@ def approve_scope(
 
     snap = session.scalar(select(DataSnapshot).where(DataSnapshot.key == snapshot_key))
     if snap is None:
-        snap = DataSnapshot(key=snapshot_key, symbols_json=[UNDERLYING])
+        snap = DataSnapshot(key=snapshot_key, symbols_json=list(universe))
         session.add(snap)
         session.flush()
     run = session.get(ScanRun, cand.scan_run_id)
     assert run is not None
     run.dataset_snapshot_id = snap.id
-    run.universe_json = [UNDERLYING]
+    run.universe_json = list(universe)
     session.add(
         StrategyPromotionEvaluation(
             strategy_version_id=version.id,
@@ -365,7 +452,7 @@ def approve_scope(
             dataset_snapshot_id=snap.id,
             config_hash=run.config_hash,
             spec_json_hash=current_spec_json_hash(session, version.id) or "",
-            universe_json=[UNDERLYING],
+            universe_json=list(universe),
             window_start=SIGNAL_SESSION - timedelta(days=365),
             window_end=SIGNAL_SESSION,
             data_provenance_json={"sources": [run.source]},

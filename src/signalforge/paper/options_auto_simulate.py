@@ -47,14 +47,20 @@ from datetime import UTC, date, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from signalforge.db.models import AuditLog, Candidate, OptionsPosition, OptionsTrade
+from signalforge.db.models import (
+    AuditLog,
+    Candidate,
+    CandidateOptionStructure,
+    Instrument,
+    OptionsPosition,
+    OptionsTrade,
+)
 from signalforge.domain import Direction, PaperDecision, QualityGate
 from signalforge.killswitch import ensure_not_engaged
 from signalforge.observability import get_logger
 from signalforge.paper.options_ledger import (
     OPTIONS_STRUCTURE_KIND,
     OptionsAutoSimulateForbidden,
-    OptionsPricingContext,
     accept_options_candidate,
     assert_options_auto_simulate_allowed,
     options_auto_simulate_enabled,
@@ -62,6 +68,7 @@ from signalforge.paper.options_ledger import (
     record_options_decision,
     resolve_options_account,
 )
+from signalforge.paper.options_marks import PricingContextResolver, UnderlyingNotPriceable
 
 _log = get_logger("paper.options_auto_simulate")
 
@@ -135,12 +142,32 @@ def accepted_today(session: Session, account_id: int, now: datetime) -> int:
     )
 
 
+def _candidate_underlying(session: Session, cand: Candidate) -> str | None:
+    """The name this candidate's ``q`` must be sourced for.
+
+    The STRUCTURE row is the authority — its ``underlying_symbol`` is what
+    ``structure_from_candidate`` builds the legs against. ``Candidate.instrument``
+    is the fallback for a candidate that carries no structure row: the guard
+    refuses that on condition C, and refusing it with the candidate's own name
+    priced is better than refusing it with nothing recorded.
+    """
+    symbol = session.scalar(
+        select(CandidateOptionStructure.underlying_symbol).where(
+            CandidateOptionStructure.candidate_id == cand.id
+        )
+    )
+    if symbol:
+        return symbol
+    inst = session.get(Instrument, cand.instrument_id)
+    return inst.symbol if inst is not None else None
+
+
 def auto_simulate_options_scan_runs(
     session: Session,
     scan_run_ids: list[int],
     *,
     account_name: str,
-    pricing: OptionsPricingContext,
+    pricing: PricingContextResolver,
     signal_session: date,
     fill_session: date,
     now: datetime | None = None,
@@ -151,6 +178,15 @@ def auto_simulate_options_scan_runs(
     Does nothing at all unless ``auto_simulate_options_enabled`` is ON — which it
     is not, on a fresh install or on the live database. Equity candidates are
     never considered here: the query filters on ``structure_kind``.
+
+    ``pricing`` resolves PER UNDERLYING (decision 11, W5b): a scan carrying
+    candidates on three names gets three contexts, each with its own ``q`` from
+    its own recorded dividend series. A candidate whose underlying cannot be
+    sourced is **skipped**, not rejected — a REJECTED ``options_trade`` is a
+    permanent decision (``_already_decided`` never re-decides a candidate), and
+    a gap in reference data is not a judgement about the candidate. Skipping
+    opens nothing, which is the safe direction, and leaves the candidate
+    decidable once the data exists.
     """
     if not options_auto_simulate_enabled(session):
         return OptionsAutoSimReport(enabled=False)
@@ -180,6 +216,23 @@ def auto_simulate_options_scan_runs(
         try:
             if _already_decided(session, cand.id):
                 report.skipped.append((cand.id, "candidate already has an options decision"))
+                continue
+            # Decision 11: this candidate's OWN underlying, at the FILL session.
+            # Resolved before the guard, because the guard prices the entry.
+            underlying = _candidate_underlying(session, cand)
+            if underlying is None:
+                report.skipped.append((cand.id, "candidate has no underlying to price"))
+                continue
+            try:
+                ctx = pricing(underlying, fill_session)
+            except UnderlyingNotPriceable as exc:
+                report.skipped.append((cand.id, f"pricing unavailable — {exc}"))
+                _log.error(
+                    "paper.options_auto_simulate_unpriceable",
+                    candidate=cand.id,
+                    underlying=exc.underlying,
+                    reason=exc.reason,
+                )
                 continue
             if _has_open_structure_on_underlying(session, account.id, cand.instrument_id):
                 reason = (
@@ -217,7 +270,7 @@ def auto_simulate_options_scan_runs(
                     session,
                     cand,
                     account_name=account_name,
-                    pricing=pricing,
+                    pricing=ctx,
                     signal_session=signal_session,
                     fill_session=fill_session,
                     now=now,
@@ -232,7 +285,7 @@ def auto_simulate_options_scan_runs(
                     note=reason,
                     actor=OPTIONS_AUTO_SIM_ACTOR,
                     refused_condition=exc.condition,
-                    pricing=pricing,
+                    pricing=ctx,
                 )
                 report.rejected.append((cand.id, reason))
                 session.commit()
@@ -243,7 +296,7 @@ def auto_simulate_options_scan_runs(
                 cand.id,
                 account_name=account_name,
                 plan=plan,
-                pricing=pricing,
+                pricing=ctx,
                 actor=OPTIONS_AUTO_SIM_ACTOR,
                 note=ACCEPT_NOTE,
             )

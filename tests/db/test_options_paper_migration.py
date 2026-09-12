@@ -41,10 +41,49 @@ def test_the_migration_chain_still_has_a_single_head(db_url: str) -> None:
 def test_the_options_paper_revision_is_chained_from_the_options_data_revision(
     db_url: str,
 ) -> None:
+    """The I-O6 revision's own place in the chain, which no later work may move.
+
+    The head assertion moved to :func:`test_the_w5b_revision_is_chained_from_the_
+    options_paper_revision` when W5b added a revision on top; what is pinned here
+    is the LINK — I-O6 still follows I-O1 and nothing was re-parented.
+    """
     script = ScriptDirectory.from_config(alembic_config(db_url))
     rev = script.get_revision("b9d41e07c6aa")  # pragma: allowlist secret
     assert rev.down_revision == "a7f3c2b8e451"  # pragma: allowlist secret
-    assert list(script.get_heads()) == ["b9d41e07c6aa"]  # pragma: allowlist secret
+
+
+def test_the_w5b_revision_is_chained_from_the_options_paper_revision(db_url: str) -> None:
+    """W5b adds ``options_mark.q_source`` / ``.dividend_yield`` — the ``q`` each
+    mark was taken under, per underlying (decision 11). One revision, chained
+    from the single head that existed, and still a single head afterwards."""
+    script = ScriptDirectory.from_config(alembic_config(db_url))
+    rev = script.get_revision("c1e8f0a4d7b3")  # pragma: allowlist secret
+    assert rev.down_revision == "b9d41e07c6aa"  # pragma: allowlist secret
+    assert list(script.get_heads()) == ["c1e8f0a4d7b3"]  # pragma: allowlist secret
+
+
+def test_the_mark_records_the_q_it_used_and_nothing_else_changed(db_url: str) -> None:
+    """Additive on a table that is APPEND-ONLY and trigger-guarded.
+
+    ``op.add_column`` rather than a batch rebuild, so ``options_mark``'s two
+    immutability triggers survive: a copy-and-swap would leave the rebuilt table
+    without them, which is the S9 mechanism itself.
+    """
+    cfg = alembic_config(db_url)
+    command.upgrade(cfg, "head")
+    engine = create_engine(db_url)
+    insp = inspect(engine)
+
+    cols = {c["name"]: c for c in insp.get_columns("options_mark")}
+    assert cols["q_source"]["nullable"] is False  # defaulted to '' on every old row
+    assert cols["dividend_yield"]["nullable"] is True  # NULL means "not a number", never 0.0
+
+    with engine.begin() as conn:
+        triggers = set(
+            conn.execute(text("SELECT name FROM sqlite_master WHERE type = 'trigger'")).scalars()
+        )
+    assert {"options_mark_no_update", "options_mark_no_delete"} <= triggers
+    engine.dispose()
 
 
 def test_the_migration_is_additive_on_a_fresh_database(db_url: str) -> None:

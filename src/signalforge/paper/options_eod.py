@@ -39,7 +39,6 @@ needs a THIRD switch of its own (``auto_simulate_options_enabled``, off, cap
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -48,11 +47,12 @@ from typing import TYPE_CHECKING
 from signalforge.db.retry import DEFAULT_ATTEMPTS, DEFAULT_BACKOFF_S, retry_on_lock
 from signalforge.jobspec import JobSpec
 from signalforge.observability import get_logger
+from signalforge.paper.options_marks import UnderlyingNotPriceable
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     from sqlalchemy.orm import Session
 
-    from signalforge.paper.options_ledger import OptionsPricingContext
+    from signalforge.paper.options_marks import ResolvedPricing
 
 _log = get_logger("paper.options_eod")
 
@@ -86,14 +86,22 @@ OPTIONS_EOD_DESCRIPTION = (
 OPTIONS_EOD_JOB = "options_paper_eod"
 
 
-class OptionsEodUnpriceable(RuntimeError):
-    """The chain refuses to price rather than guess an input.
-
-    Decision 11 forbids a silent ``q = 0``; D2 §7.4 forbids a zero-cost model.
-    When an input for a structure or candidate that is actually in play cannot
-    be SOURCED, the job fails loudly and leaves a named ``JobRun`` failure — it
-    never marks a book against an assumed number.
-    """
+#: The chain refuses to price rather than guess an input.
+#:
+#: Decision 11 forbids a silent ``q = 0``; D2 §7.4 forbids a zero-cost model.
+#: When an input cannot be SOURCED the refusal is raised rather than absorbed.
+#:
+#: W5b turned this from a CHAIN-level failure into a PER-UNDERLYING one, and the
+#: name is kept pointing at the class that now carries it
+#: (``paper.options_marks.UnderlyingNotPriceable``) so callers catching
+#: ``OptionsEodUnpriceable`` still catch exactly the refusal they meant. What
+#: changed is the blast radius: one name that cannot be sourced no longer takes
+#: the whole run down with it. Its structures are left unmarked and named, the
+#: rest of the book is marked, the session's reconciliation is dirty because of
+#: the hole (reconcile check 11), and the second guard's condition AA therefore
+#: refuses every acceptance on that session — which is the outcome the old
+#: whole-run failure was reaching for, without giving up the marks.
+OptionsEodUnpriceable = UnderlyingNotPriceable
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,8 +110,8 @@ class OptionsEodPlan:
 
     account_name: str
     #: underlyings of OPEN structures (mark + expiry) and of options CANDIDATES
-    #: (auto-simulation), unioned: one pricing context serves the whole run, so
-    #: every one of them has to resolve or none of them is priced.
+    #: (auto-simulation), unioned. Each is resolved INDEPENDENTLY (W5b): a name
+    #: that cannot be sourced is refused by name and the others are still priced.
     underlyings: frozenset[str]
     #: scan runs of ``signal_session`` that actually carry an options candidate.
     #: EMPTY on the live database today, and that is correct:
@@ -171,68 +179,51 @@ def _options_eod_plan(session: Session, *, signal_session: date) -> OptionsEodPl
 
 def _options_eod_pricing(
     session: Session, *, underlyings: frozenset[str], as_of: date
-) -> OptionsPricingContext:
-    """Build the run's single pricing context, or refuse.
+) -> ResolvedPricing:
+    """Resolve a pricing context PER UNDERLYING, or refuse that name (W5b).
 
     Three inputs, none of them defaulted into existence:
 
     * ``cost_model`` — D5 §2.4's frozen, pre-registered model at BASELINE spread
-      (``spread_multiplier = 1.0``). D2 §7.4 forbids a zero-cost model.
+      (``spread_multiplier = 1.0``). D2 §7.4 forbids a zero-cost model. The same
+      model for every name, because it is a model of the SPREAD convention and
+      not a property of an underlying.
     * ``risk_free_rate`` — ``OptionsEvaluationConfig``'s recorded constant, with
-      its own ``r_source``; it is hashed into ``options_config_hash``.
+      its own ``r_source``; it is hashed into ``options_config_hash``. The same
+      for every name, and the same place the backtest engine reads it, so the
+      paper marks and the evaluations that approved the strategy cannot drift.
     * ``dividend_yield`` — decision 11 rank 1 ONLY (the trailing twelve-month
-      declared yield). Rank 2 (put-call parity) is not built; a silent ``q = 0``
-      is forbidden, so an unresolvable ``q`` RAISES.
+      declared yield), sourced **per underlying** from that name's own recorded
+      ``dividend_event`` series. Rank 2 (put-call parity) is not built and a
+      silent ``q = 0`` is forbidden, so a name whose ``q`` cannot be sourced is
+      refused BY NAME.
 
-    Phase 1 limitation, enforced rather than assumed: ``mark_options_to_market``,
-    ``process_option_expiries`` and ``auto_simulate_options_scan_runs`` each take
-    ONE pricing context for the whole call, so one ``q`` would be applied to every
-    underlying in play. A book spanning more than one underlying therefore cannot
-    be priced honestly here and is REFUSED, loudly, instead of being marked
-    against another name's dividend yield. (``q`` reaches the IV inversion and the
-    greeks, never a fill price — but a wrong greek is a wrong cap evaluation.)
+    A multi-underlying book is priceable, and that is the W5b change: the
+    previous cut applied one context to a whole call, so one ``q`` would have
+    reached every name, and it refused the entire run rather than do that.
+    Nothing here raises. A refused name is carried in
+    :attr:`ResolvedPricing.unpriceable` and refuses only when it is asked for —
+    so the rest of the book is marked, the hole is recorded under the name it
+    belongs to, and reconcile check 11 turns the unmarked structure into a
+    finding that condition AA will not open against. (``q`` reaches the IV
+    inversion and the greeks, never a fill price — but a wrong greek is a wrong
+    cap evaluation, which is why substituting one is not an option.)
     """
     from signalforge.config.research import OptionsEvaluationConfig
-    from signalforge.data.options_corporate_actions import trailing_dividend_yield
-    from signalforge.data.repository import get_daily_bars
-    from signalforge.paper.options_ledger import OptionsPricingContext
+    from signalforge.paper.options_marks import resolve_pricing_by_underlying
     from signalforge.research.options_strategies.short_vertical import PREREGISTERED_COST_MODEL
 
     evaluation = OptionsEvaluationConfig()
-    if not underlyings:
-        # Nothing is priced on this path: no structure is open and no options
-        # candidate exists, so no leg is ever quoted. NaN rather than 0.0 so
-        # that a future caller which DID consult it could not mistake it for a
-        # measurement — every greek derived from it would be NaN on its face.
-        return OptionsPricingContext(
-            cost_model=PREREGISTERED_COST_MODEL,
-            risk_free_rate=evaluation.risk_free_rate,
-            dividend_yield=math.nan,
-            q_source="unused:no_underlying_in_play",
-        )
-    if len(underlyings) > 1:
-        raise OptionsEodUnpriceable(
-            "one pricing context cannot honestly price "
-            f"{sorted(underlyings)} — a single dividend yield would be applied to "
-            "every one of them (D3 Phase 1 limitation; decision 11 forbids a "
-            "substituted q)"
-        )
-    symbol = next(iter(underlyings))
-    bars = get_daily_bars(session, symbol, as_of - timedelta(days=10), as_of)
-    spot = float(bars[-1].close) if bars else 0.0
-    if spot <= 0.0:
-        raise OptionsEodUnpriceable(f"no underlying close for {symbol} on {as_of.isoformat()}")
-    q = trailing_dividend_yield(session, symbol, as_of, reference_close=spot)
-    if q is None:
-        raise OptionsEodUnpriceable(
-            f"no trailing dividend history for {symbol} at {as_of.isoformat()} — decision 11 "
-            "rank 1 unresolved and rank 2 (put-call parity) is not built; q = 0 is forbidden"
-        )
-    return OptionsPricingContext(
+    # An empty survey resolves to an EMPTY resolver, not to a context carrying a
+    # placeholder number. Nothing is open and no options candidate exists, so no
+    # leg is ever quoted; if some future caller did ask it for a name it would be
+    # refused by name rather than handed a NaN it could mistake for a reading.
+    return resolve_pricing_by_underlying(
+        session,
+        underlyings,
+        as_of,
         cost_model=PREREGISTERED_COST_MODEL,
         risk_free_rate=evaluation.risk_free_rate,
-        dividend_yield=q.q,
-        q_source=q.source,
     )
 
 
@@ -318,6 +309,15 @@ def job_options_paper_eod() -> None:
     it. A candidate signalled at yesterday's close fills at today's close, on
     today's reconciliation — which is what makes condition AA satisfiable at all.
 
+    Pricing is resolved PER UNDERLYING in the survey reader and then used by all
+    four steps (W5b, decision 11). A multi-name book is priced; a name whose
+    ``q`` or close cannot be sourced is named in the log, its structures are left
+    UNMARKED, and the reconciliation for the session is dirty because of them
+    (reconcile check 11) — so the auto-simulation step still runs and condition
+    AA still refuses every acceptance. The refusal is scoped to the session, not
+    to the name: a hole anywhere in the book means the book's collateral and
+    capacity cannot be trusted, and opening against it is what must not happen.
+
     SQLite (docs/SQLITE_CONCURRENCY.md): one SHORT ``session_scope(write=True)``
     per unit of the chain, each retried on lock contention per unit, and no write
     lock is held across the survey or the pricing resolution. The job is in
@@ -353,6 +353,16 @@ def job_options_paper_eod() -> None:
     with session_scope() as session:
         plan = _options_eod_plan(session, signal_session=signal_session)
         pricing = _options_eod_pricing(session, underlyings=plan.underlyings, as_of=as_of)
+    if pricing.unpriceable:
+        # Named, at error level, BEFORE anything is written. The run continues:
+        # every other name is marked, and the hole this leaves behind is what
+        # reconcile check 11 refuses to call a clean session.
+        _log.error(
+            "options_eod.unpriceable_underlyings",
+            as_of=as_of.isoformat(),
+            underlyings=list(pricing.unpriceable_underlyings),
+            reasons=dict(pricing.unpriceable),
+        )
 
     def _unit[T](label: str, fn: Callable[[Session], T]) -> T:
         """One short write transaction, retried per unit (rule 5)."""
@@ -388,6 +398,8 @@ def job_options_paper_eod() -> None:
         deferred=marks.deferred,
         synthetic=marks.synthetic_marked,
         iv_unavailable=marks.iv_unavailable,
+        unpriceable=marks.unpriceable,
+        unpriceable_underlyings=marks.unpriceable_underlyings,
     )
 
     recon = _unit(
@@ -415,6 +427,8 @@ def job_options_paper_eod() -> None:
         expired_worthless=expiries.expired_worthless,
         assigned=expiries.assigned,
         forced_close_no_print=expiries.forced_close_no_print,
+        unpriceable=expiries.unpriceable,
+        unpriceable_underlyings=expiries.unpriceable_underlyings,
     )
 
     sim = _unit(

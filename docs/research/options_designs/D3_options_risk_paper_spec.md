@@ -398,6 +398,15 @@ Checks, each producing a named finding:
 10. Every leg's `shares_per_contract` is still 100 (catches a post-entry OCC adjustment; **FACT**:
     `option_contract.shares_per_contract` is vendor-populated on every write path —
     `adapters/massive_options.py:183`, `data/options_ingest.py:97`, `data/options_backfill.py:151`).
+11. **ADDED BY W5b (2026-09-12), and the only check here that is not about collateral.** Every
+    structure *carried into* this session has an `options_mark` row for it. A structure opened ON
+    the session is exempt — §10.2 condition M already required every leg to print on its fill
+    session, so the entry is its valuation. This exists because pricing became **per underlying**:
+    a name whose `q` or whose close cannot be sourced is refused by name and its structures are
+    left unmarked (see `paper/options_marks.PricingContextResolver`), and a book with an unvalued
+    structure in it must not be reported as reconciled — condition AA reads this row, so a finding
+    anywhere else would leave AA saying "clean" about a session in which a structure was never
+    priced. Rev 1's ten checks would all have passed on exactly that book.
 
 **Where the result lives, and why a flag is not enough (HYPOTHESIS).** Rev 1 said "any finding sets
 an `options_reconcile_failed` flag that the second guard reads". That flag had no home — it was not
