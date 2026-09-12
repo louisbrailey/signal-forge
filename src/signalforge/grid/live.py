@@ -23,7 +23,8 @@ Safety:
 * long reads happen with write intent dropped, so the SQLite write lock is only
   held for the short write phase (see ``docs/SQLITE_CONCURRENCY.md`` rule 4).
 
-Every fill is SIMULATED. No brokerage is contacted and no order is ever placed.
+Every fill is SIMULATED. This module contacts no brokerage; orders exist only in the
+execution layer, which is off by default and never armed without the operator.
 """
 
 from __future__ import annotations

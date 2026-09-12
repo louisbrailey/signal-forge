@@ -1,6 +1,7 @@
 """Read-only options-data adapter (education / simulation only).
 
-No order placement, no broker contact, no recommendations, no alerts. Coverage is
+This adapter only reads market data (any order path lives solely in the execution
+layer, off by default); no recommendations, no alerts. Coverage is
 deliberately narrow: the caller passes a small set of liquid underlyings and
 expiration / strike bounds — never "every contract".
 

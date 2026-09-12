@@ -58,8 +58,11 @@ def test_t8_execution_event_rejects_update_and_delete(session: Session) -> None:
     )
     session.execute(
         text(
-            "insert into execution_event (ts, event_type, adapter_name) "
-            "values (datetime('now'), 'INTENT_BUILT', 'paper_reference')"
+            "insert into execution_event (ts, event_type, adapter_name, client_order_id, "
+            "state_from, state_to, intent_kind, reason, config_hash, spec_json_hash, "
+            "payload_json, raw_status_verbatim, error_verbatim) "
+            "values (datetime('now'), 'INTENT_BUILT', 'paper_reference', 't8-test', "
+            "'NONE', 'BUILT', 'OPEN', 'test', '', '', '{}', '', '')"
         )
     )
     session.commit()

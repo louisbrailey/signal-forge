@@ -1,8 +1,10 @@
 """Signal Forge — local-first, paper-trading-only market research platform.
 
-This package produces **hypothetical research output only**. It never connects to
-a brokerage, never places an order, and never automates a trading venue. See
-``DISCLAIMER.md`` and ``ARCHITECTURE.md`` (safety invariants S1-S10).
+This package produces research output first. Orders can exist only in the
+execution layer, which is OFF by default and places nothing unless the
+operator has explicitly enabled it and armed a strategy (nothing is armed by default);
+it never automates a trading venue. See ``DISCLAIMER.md``, ``ARCHITECTURE.md``
+(safety invariants S1-S10, S15a/S15b) and ``docs/decisions/0003-execution-layer.md``.
 """
 
 from __future__ import annotations

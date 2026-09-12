@@ -225,7 +225,12 @@ def _blocked(*args, **kwargs):
     raise RuntimeError("network or subprocess at import time")
 
 
-socket.socket = _blocked
+class _BlockedSocket(socket.socket):
+    def __init__(self, *a, **k):
+        raise RuntimeError("network or subprocess at import time")
+
+
+socket.socket = _BlockedSocket  # stays a class so ssl.SSLSocket(socket) still imports
 socket.create_connection = _blocked
 subprocess.run = _blocked
 subprocess.check_output = _blocked

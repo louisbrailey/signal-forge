@@ -10,7 +10,7 @@ logged; the system continuously measures whether it has any **out-of-sample**
 predictive value.
 
 > **This is research, simulation, alerting, and education software. It is not
-> financial advice, and it never places an order.** See [DISCLAIMER.md](DISCLAIMER.md).
+> financial advice, and it places no order unless you explicitly enable the execution layer and arm a strategy; nothing is armed by default.** See [DISCLAIMER.md](DISCLAIMER.md).
 
 ## What it will not do
 

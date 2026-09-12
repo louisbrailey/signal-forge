@@ -16,12 +16,19 @@ from signalforge.audit import record
 from signalforge.killswitch import ensure_not_engaged, get_kill_switch
 from signalforge.observability import configure_logging
 
-app = typer.Typer(add_completion=False, help="Signal Forge — research/education only. No trading.")
+app = typer.Typer(
+    add_completion=False,
+    help="Signal Forge — research first; execution is off by default and requires arming.",
+)
 killswitch_app = typer.Typer(help="Emergency kill switch (S6): halt polling, jobs, alerts, paper.")
 app.add_typer(killswitch_app, name="killswitch")
-paper_app = typer.Typer(help="Paper-trading ledger (SIMULATED — no order is ever placed).")
+paper_app = typer.Typer(
+    help="Paper-trading ledger (SIMULATED fills; no broker order unless execution is armed)."
+)
 app.add_typer(paper_app, name="paper")
-portfolio_app = typer.Typer(help="Manual CSV portfolio import — analytics only, no broker contact.")
+portfolio_app = typer.Typer(
+    help="Manual CSV portfolio import — analytics only; this import never contacts a broker."
+)
 app.add_typer(portfolio_app, name="portfolio")
 
 
@@ -272,7 +279,9 @@ def providers_verify(
     )
 
 
-options_app = typer.Typer(help="Options data + education simulators (no execution path).")
+options_app = typer.Typer(
+    help="Options data + education simulators (execution only via the armed execution layer)."
+)
 app.add_typer(options_app, name="options")
 news_app = typer.Typer(help="Licensed read-only news (never drives a recommendation).")
 app.add_typer(news_app, name="news")
