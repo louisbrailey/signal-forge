@@ -56,8 +56,19 @@ concurrent API-traffic + worker-ingest regression there.
 request transaction (minutes). While it runs, worker jobs will report lock contention
 and retry/fail honestly. Run promotion evaluations from the CLI with the worker stopped.
 
-`signalforge options backfill` / options ingest (CLI, manual, rare) fetch option
-contracts and aggregates inside their session while writing — the same pattern
-the daily ingest had. Run them with the worker stopped, or accept that worker
-jobs may report lock contention (bounded retry, then an honest failure) while
-they run.
+`signalforge options backfill` (the legacy nearest-N-expiries path) and
+`signalforge options ingest` fetch option contracts and aggregates inside their
+session while writing — the same pattern the daily ingest had. Run them with the
+worker stopped, or accept that worker jobs may report lock contention (bounded
+retry, then an honest failure) while they run.
+
+**`signalforge options cycle-backfill` is no longer in that list.** It commits
+per (underlying, cycle) — one short `BEGIN IMMEDIATE` holding that cycle's bars
+and its coverage record together — and every paced provider request is issued
+with no transaction open at all (`data/options_backfill.py::_Phases`). Its
+`IngestionRun` row is committed before the first request, and `KillSwitchEngaged`
+is caught at the loop boundary, so an interrupted run costs the cycle in flight
+and nothing else. That makes it survivable beside the worker; for the multi-day
+I-O2 job the designed route is still `--to-database` against a file-level copy,
+merged back with `options merge` while the worker is stopped
+(`docs/research/options_designs/IO2_RUNBOOK.md`).
