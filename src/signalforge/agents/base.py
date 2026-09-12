@@ -87,9 +87,12 @@ class ResearchAgent(ABC):
         return list(evidence.get("missing_data", []))
 
     # ---- optional explanatory narrative -------------------------------
-    def narrate(self, evidence: dict[str, Any], summary: str) -> str | None:
+    def narrate(
+        self, evidence: dict[str, Any], summary: str, *, enabled: bool | None = None
+    ) -> str | None:
         """Explain the deterministic summary. Never decides anything."""
-        if not self.llm_narrative or not self._narratives_enabled():
+        allowed = self._narratives_enabled() if enabled is None else enabled
+        if not self.llm_narrative or not allowed:
             return None
         from signalforge.llm.client import build_client
         from signalforge.llm.guards import AI_FOOTER, GuardViolation, assert_grounded
@@ -112,7 +115,9 @@ class ResearchAgent(ABC):
         )
         try:
             text = client.complete(system=system, prompt=prompt).text
-            assert_grounded(text, evidence)
+            # The deterministic summary is itself frozen, code-generated fact text;
+            # restating its (rounded) numbers is exactly what a narrative may do.
+            assert_grounded(text, {"evidence": evidence, "summary": summary})
         except GuardViolation as exc:
             _log.warning("agent.narrative_rejected", agent=self.name, reason=str(exc)[:160])
             return None
@@ -127,6 +132,17 @@ class ResearchAgent(ABC):
 
         return bool(get_settings().research.agents.llm_narratives)
 
+    @staticmethod
+    def _narratives_enabled_for(session: Session) -> bool:
+        """Effective (DB-override-aware) switch; falls back to static settings."""
+        static = ResearchAgent._narratives_enabled()
+        try:
+            from signalforge.settings_store import effective_research_config
+
+            return static or bool(effective_research_config(session).agents.llm_narratives)
+        except Exception:  # pragma: no cover - defensive: never block a report
+            return static
+
     # ---- run ------------------------------------------------------------
     def run(self, session: Session, *, as_of: datetime | None = None) -> AgentReportResult:
         started = time.monotonic()
@@ -137,7 +153,11 @@ class ResearchAgent(ABC):
             if RESEARCH_ONLY_NOTICE not in summary:
                 summary = f"{summary}\n\n{RESEARCH_ONLY_NOTICE}"
             missing = self.missing_data(evidence)
-            narrative = self.narrate(evidence, summary)
+            # The operator switch lives in the DB-backed effective research config
+            # (research_overrides.agents.llm_narratives), not only in static settings.
+            narrative = self.narrate(
+                evidence, summary, enabled=self._narratives_enabled_for(session)
+            )
             if self.llm_narrative and narrative is None:
                 missing = [*missing, "llm_narrative_unavailable_or_rejected"]
             result = AgentReportResult(

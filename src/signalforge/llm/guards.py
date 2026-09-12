@@ -81,6 +81,9 @@ def _grounded_numbers(facts: object) -> set[str]:
             for k, v in node.items():
                 if _is_timestamp_key(k):
                     continue
+                # window lengths live in key names ("market_ret_20d", "pct_above_50sma")
+                if isinstance(k, str):
+                    grounded.update(extract_numeric_tokens(k.replace("_", " ")))
                 walk(v)
         elif isinstance(node, (list, tuple, set)):
             for v in node:
@@ -89,9 +92,13 @@ def _grounded_numbers(facts: object) -> set[str]:
             return
         elif isinstance(node, (int, float)):
             grounded.add(_normalise(str(node)))
-            grounded.add(_normalise(f"{node:.2f}"))
             if isinstance(node, float):
                 grounded.add(_normalise(f"{node:g}"))
+                # a deterministic summary legitimately rounds; accept 1–6 decimals
+                for nd in range(1, 7):
+                    grounded.add(_normalise(f"{node:.{nd}f}"))
+            else:
+                grounded.add(_normalise(f"{node:.2f}"))
         elif isinstance(node, str):
             grounded.update(extract_numeric_tokens(node))
 

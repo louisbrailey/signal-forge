@@ -69,3 +69,13 @@ def test_datetime_objects_and_timestamp_keys_are_skipped() -> None:
         assert_grounded(f"1234 symbols were checked. {AI_FOOTER}", facts)
     with pytest.raises(GuardViolation):
         assert_grounded(f"45 symbols were checked. {AI_FOOTER}", facts)
+
+
+def test_rounded_floats_and_key_windows_are_grounded() -> None:
+    facts = {"spy": {"market_ret_20d": -0.0174705610119813, "pct_above_50sma": 52.0}}
+    assert_grounded(
+        f"The 20-session return was -0.0175 and 52% sit above the 50-session SMA. {AI_FOOTER}",
+        facts,
+    )
+    with pytest.raises(GuardViolation):
+        assert_grounded(f"The 20-session return was -0.0180. {AI_FOOTER}", facts)
