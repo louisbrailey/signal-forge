@@ -13,9 +13,11 @@ import re
 from datetime import UTC, date, datetime, timedelta
 
 import httpx
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from signalforge.data.adapters import massive_options as mo
 from signalforge.data.adapters.massive_options import MassiveOptionsAdapter
 from signalforge.data.calendar import sessions as _sessions
 from signalforge.data.options_backfill import BackfillCaps, backfill_option_aggregates
@@ -24,6 +26,19 @@ from signalforge.domain import LatencyCategory
 
 _TODAY = date.today()
 _START = _TODAY - timedelta(days=120)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleeping(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The adapter now backs off before retrying a retryable status (D1 §7.6).
+    That is right in production and ruinous in an offline suite: the fixtures
+    below inject 503s deliberately, and a real backoff would charge ~22 s per
+    failing contract for a rate limit that does not exist here.
+
+    Patch ``_sleep`` itself, NOT ``time.sleep``. The backoff is a chunked wait
+    driven by ``time.monotonic()``, so neutering ``time.sleep`` alone converts
+    it into a busy-spin of exactly the same duration — slower, not faster."""
+    monkeypatch.setattr(mo.MassiveOptionsAdapter, "_sleep", lambda self, _s: None)
 
 
 def _occ(underlying: str, expiry: date, strike: float, cp: str = "C") -> str:
@@ -71,10 +86,13 @@ def _make_client(
     fail_status: int = 503,
     overshoot: bool = False,
     future_bars: int = 0,
+    urls: list[str] | None = None,
 ) -> httpx.Client:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["authorization"].startswith("Bearer ")
         url = str(request.url)
+        if urls is not None:
+            urls.append(url)
         if "/v3/reference/options/contracts" in url:
             us = re.search(r"underlying_ticker=([A-Z]+)", url)
             return httpx.Response(
@@ -310,18 +328,24 @@ def test_total_bar_cap_is_a_hard_ceiling_even_if_a_contract_overshoots_the_estim
     session: Session,
 ) -> None:
     """The pre-fetch estimate is a heuristic; the runtime check must be authoritative
-    (review finding: cap-enforcement #2/#3)."""
+    (review finding: cap-enforcement #2/#3).
+
+    The short window is now expressed as the REQUESTED window, not as a
+    ``lookback_days`` clamp on a longer one: ``--since`` reaches the run
+    unclamped, so the only way to make the pre-fetch estimate small is to ask
+    for a small window. ``overshoot`` then returns more bars than that estimate
+    predicted, which is exactly what the runtime check exists to catch."""
     caps = BackfillCaps(
-        lookback_days=30,  # expected_per_contract is small...
+        lookback_days=30,
         expirations_per_underlying=1,
         contracts_per_underlying=5,
-        max_total_bars=50,  # ...but each contract actually returns ~a year of bars
+        max_total_bars=50,  # each contract actually returns more bars than estimated
     )
     run = backfill_option_aggregates(
         session,
         _adapter(n_expiries=1, n_strikes=5, overshoot=True),
         ["SPY"],
-        start=_START,
+        start=_TODAY - timedelta(days=30),  # expected_per_contract is small...
         end=_TODAY,
         caps=caps,
     )
@@ -471,3 +495,38 @@ def test_budget_trimmed_underlying_is_retried_after_a_higher_cap_resume(session:
         .where(OptionAggregateDaily.underlying_symbol == "QQQ")
     )
     assert qqq_bars_after_2 > 0
+
+
+def test_the_requested_window_reaches_the_run_unclamped(session: Session) -> None:
+    """``--since`` used to be silently re-clamped to ``today - lookback_days``,
+    so a three-year request quietly fetched one year and the run's own
+    provenance recorded the window it was ASKED for, not the one it used. For a
+    promotion-grade dataset that is not acceptable provenance — the only way to
+    reach three years was a source edit.
+    """
+    deep_start = _TODAY - timedelta(days=900)
+    caps = BackfillCaps(
+        lookback_days=30,  # deliberately far SHORTER than the requested window
+        expirations_per_underlying=1,
+        contracts_per_underlying=1,
+        strike_pct_band=0.5,
+        max_total_bars=1_000_000,
+    )
+    urls: list[str] = []
+    run = backfill_option_aggregates(
+        session,
+        MassiveOptionsAdapter("k", client=_make_client(n_expiries=1, n_strikes=1, urls=urls)),
+        ["SPY"],
+        start=deep_start,
+        end=_TODAY,
+        caps=caps,
+    )
+    assert run.requested_start == deep_start
+
+    agg = [u for u in urls if "/v2/aggs/" in u]
+    assert agg, "no aggregate request was issued"
+    m = _AGG_RE.search(agg[0])
+    assert m
+    # the fetch really began at the requested start, not 30 days ago
+    assert date.fromisoformat(m["a"]) <= deep_start + timedelta(days=5)
+    assert date.fromisoformat(m["a"]) < _TODAY - timedelta(days=30)

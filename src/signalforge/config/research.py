@@ -11,7 +11,14 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from pydantic import BaseModel, Field, NonNegativeFloat, PositiveFloat, PositiveInt
+from pydantic import (
+    BaseModel,
+    Field,
+    NonNegativeFloat,
+    NonNegativeInt,
+    PositiveFloat,
+    PositiveInt,
+)
 
 from signalforge.config.hashing import config_hash
 from signalforge.domain import Horizon
@@ -275,7 +282,94 @@ class OptionsConfig(BaseModel):
     backfill_expirations_per_underlying: PositiveInt = 4  # nearest N expiries only
     backfill_contracts_per_underlying: PositiveInt = 40  # ATM-ranked, per underlying
     backfill_strike_pct_band: PositiveFloat = 0.15  # tighter than the snapshot band
-    backfill_max_total_bars: PositiveInt = 200_000  # global storage ceiling
+    # Raised from 200,000 by decision 6 of
+    # docs/research/DECISIONS_2026-09-12_options_execution.md. This is an
+    # EXPLICIT, recorded decision, not a quiet default bump: every run that
+    # relies on it records the raise (previous value, new value, the decision
+    # that authorised it) in its own ``IngestionRun`` provenance, so a dataset
+    # built under the higher ceiling is distinguishable from one built under
+    # the old one. ``options`` is absent from SCOPE_HASH_FIELDS, so changing it
+    # cannot move the equity ``config_hash`` — see ``options_config_hash``.
+    backfill_max_total_bars: PositiveInt = 2_000_000  # global storage ceiling (decision 6)
+    BACKFILL_MAX_TOTAL_BARS_PRIOR: ClassVar[int] = 200_000  # what decision 6 raised it FROM
+
+    # --- per-cycle (monthly) backfill: the shape D1 fixes ---------------------
+    # OFF by default and additive: with ``cycle_backfill_enabled=False`` nothing
+    # schedules it and the legacy nearest-N-expiries path is untouched.
+    cycle_backfill_enabled: bool = False
+    cycle_rule: str = "monthly_third_friday"
+    dte_entry_min: PositiveInt = 21  # map §1.1 verbatim
+    dte_entry_max: PositiveInt = 60
+    pre_entry_buffer_sessions: NonNegativeInt = 5  # context for the entry session's IV inversion
+    min_rungs_per_side: PositiveInt = 7  # map §1.1 "absolute floor of >=7 strikes either side"
+    max_contracts_per_cycle: PositiveInt = 40  # a runaway guard, NEVER the selector
+    reference_max_staleness_sessions: NonNegativeInt = 3
+    ladder_bracket_min_rungs: PositiveInt = 3  # vendor strikes required each side of the reference
+    # ``expired=true`` is what makes an expired series visible at all; without it
+    # a listing call for a 2023 expiry returns zero rows (D1 §7.0, Appendix P).
+    listing_include_expired: bool = True
+    # Point-in-time listing: pin the ladder to the state of the world on the
+    # cycle's entry date. Without it the ladder for an expired series is its
+    # END-OF-LIFE ladder, which selects short strikes in the direction the
+    # market actually went (D1 §3.3a). Whether the vendor honours it is OQ-10;
+    # the basis actually achieved is recorded per dataset.
+    listing_as_of_enabled: bool = True
+
+
+class OptionsEvaluationConfig(BaseModel):
+    """The frozen, hashed identity of an options EVALUATION's assumptions.
+
+    Deliberately separate from ``ResearchConfig.config_hash``. ``options`` is not
+    in ``SCOPE_HASH_FIELDS``, so ``risk_free_rate`` (and every backfill
+    parameter) could otherwise change every options IV, delta and mark without
+    changing any hash at all — the same class of failure as the 2026-09-11
+    agents-section incident. The fix is NOT to add ``options`` to
+    ``SCOPE_HASH_FIELDS``: that would move ``config_hash`` for the two live
+    PAPER_APPROVED equity strategies and un-scope them, repeating the incident
+    exactly. A separate hash over a separate object touches nothing equity-side
+    (D1 §5.5, blocker D11).
+    """
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    schema_version: PositiveInt = 1
+    risk_free_rate: NonNegativeFloat = 0.04
+    r_source: str = "config_constant"
+    # IV rank-1 admissibility (D1 §5.2). ``implied_vol`` does NOT return None on
+    # non-convergence — after max_iter bisection steps it returns the midpoint,
+    # a float indistinguishable from a converged solve — so the caller must
+    # re-price at the returned sigma and check vega. Rank 1 is the only source
+    # permitted to price a FILL; an arbitrary sigma there is an arbitrary delta,
+    # and an arbitrary delta is an arbitrary strike-selection rule.
+    iv_max_price_residual: PositiveFloat = 1e-4
+    iv_min_vega: PositiveFloat = 1e-3
+    # Same-session surface floor (D1 §5.3). Below it there is no surface and the
+    # contract is marked unavailable — never extrapolated.
+    surface_min_prints_per_expiry: PositiveInt = 5
+    surface_min_distinct_strikes: PositiveInt = 3
+    surface_fit: str = "quadratic_log_moneyness"
+    surface_term_interp: str = "linear_total_variance"
+    surface_extrapolation: bool = False
+    realised_vol_fallback: bool = False  # forbidden; never True
+    # q precedence (decision 11). ``q = 0`` is never reached.
+    q_precedence: tuple[str, ...] = ("vendor_dividends", "parity_implied")
+    parity_min_pairs: PositiveInt = 3
+    parity_max_abs_log_moneyness: PositiveFloat = 0.05
+    parity_statistic: str = "median"
+    q_default_zero_permitted: bool = False
+    # Gate 4b: every evaluation runs at baseline AND 2x baseline spread, on both
+    # asset classes (decision 5). The multiplier is part of an evaluation's
+    # identity — two spread settings must never hash to one snapshot.
+    spread_multipliers: tuple[float, ...] = (1.0, 2.0)
+    # Coverage thresholds, pre-registered before any coverage was observed.
+    # R4 permits making a gate MORE searching; neither may ever be lowered.
+    gate_0c_cycles_bracket: PositiveFloat = 0.90
+    gate_0d_session_bars: PositiveFloat = 0.80
+    require_shares_per_contract: PositiveInt = 100
+
+    @property
+    def options_config_hash(self) -> str:
+        return config_hash(self.model_dump(mode="json"))
 
 
 class IntradayOperationsConfig(BaseModel):

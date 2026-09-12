@@ -209,7 +209,17 @@ forbidden_modules = [
 [[tool.importlinter.contracts]]
 name = "S11: options are education/simulation only — no alerts, no LLM, no decision path"
 type = "forbidden"
-source_modules = ["signalforge.options", "signalforge.data.options_backfill"]
+# Widened, never narrowed: the two new options data modules are covered by the
+# same contract as the backfill they belong to. The coverage summary is a
+# RETURN VALUE, so the dependency arrow runs research -> data.options_backfill,
+# which this contract permits; the backfill never imports research and never
+# writes a research row.
+source_modules = [
+    "signalforge.options",
+    "signalforge.data.options_backfill",
+    "signalforge.data.options_cycles",
+    "signalforge.data.options_corporate_actions",
+]
 forbidden_modules = [
     "signalforge.alerts",
     "signalforge.llm",
