@@ -205,7 +205,9 @@ evaluation, no snapshot, no single source, a missing/empty snapshot, or a univer
 that disagrees with the snapshot) is skipped with an explicit reason rather than
 scanned on another version's data. Each persisted run is verified against the approved
 scope on dataset snapshot, source **and** universe; a mismatch raises loudly.
-INTRADAY remains excluded.
+INTRADAY is excluded exactly as before, but now via the one flag
+`research.intraday.operating_enabled` (default off) that `research/intraday_policy.py`
+owns, rather than a hard-coded condition in the grouping.
 
 **Surfaces.** `job_approved_scope_scan` is unchanged as a call, but now hands
 `paper/auto_simulate.py` every group's `scan_run_id`. `/ops` and the activation
