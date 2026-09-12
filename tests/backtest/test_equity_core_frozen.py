@@ -23,13 +23,18 @@ from signalforge.backtest.engine import EntrySignal, run_backtest
 from signalforge.data.series import PriceSeries
 from signalforge.domain import Direction
 
+# The two digests below are pinned sha256 file hashes, not credentials, but
+# detect-secrets reads any 64-character hex string as a possible one — so each
+# carries the inline allowlist pragma, exactly as the config-hash constants in
+# tests/research/test_promotion.py do.  The pragma must sit on the secret's own
+# line and the line budget is 100 characters, which is why these names are three
+# characters long; ENG is engine.py's digest and CST is costs.py's.
+ENG = "62faa6dda709d5ae0efff15fe1165f1c206a792b4ef7cfca9a6e7cfd6fa68c02"  # pragma: allowlist secret
+CST = "51f624bb9dca84ccd6421ded552b23de0ede058995598fb1a1ab433fc5147d60"  # pragma: allowlist secret
+
 FROZEN: dict[str, str] = {
-    "src/signalforge/backtest/engine.py": (
-        "62faa6dda709d5ae0efff15fe1165f1c206a792b4ef7cfca9a6e7cfd6fa68c02"
-    ),
-    "src/signalforge/backtest/costs.py": (
-        "51f624bb9dca84ccd6421ded552b23de0ede058995598fb1a1ab433fc5147d60"
-    ),
+    "src/signalforge/backtest/engine.py": ENG,
+    "src/signalforge/backtest/costs.py": CST,
 }
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
