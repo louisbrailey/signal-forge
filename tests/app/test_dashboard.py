@@ -243,6 +243,46 @@ def test_settings_override_is_persisted(seeded: TestClient) -> None:
     assert cfg.watchlist == ("AAPL", "MSFT")
 
 
+def test_settings_save_preserves_overrides_the_form_does_not_own(seeded: TestClient) -> None:
+    """agents/universe_pipeline/execution/options overrides are set by audited CLI
+    ceremonies; a Save on /settings must not silently reset them (found 2026-09-12)."""
+    from signalforge.db.session import session_scope
+    from signalforge.settings_store import (
+        RESEARCH_OVERRIDES_KEY,
+        effective_research_config,
+        get_setting,
+        set_setting,
+    )
+
+    with session_scope(write=True) as s:
+        set_setting(
+            s,
+            RESEARCH_OVERRIDES_KEY,
+            {
+                "agents": {"enabled": True},
+                "universe_pipeline": {"enabled": True},
+                "execution": {"enabled": True},
+                "watchlist": ["NVDA"],
+                "risk": {"per_trade_risk_pct": 0.9},
+            },
+        )
+    r = seeded.post(
+        "/settings",
+        data={"per_trade_risk_pct": "0.75", "csrf_token": _csrf(seeded, "/settings")},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    with session_scope() as s:
+        stored = get_setting(s, RESEARCH_OVERRIDES_KEY)
+        cfg = effective_research_config(s)
+    assert stored["agents"] == {"enabled": True}
+    assert stored["universe_pipeline"] == {"enabled": True}
+    assert stored["execution"] == {"enabled": True}
+    assert "watchlist" not in stored  # the form owns it and the field was left empty
+    assert cfg.risk.per_trade_risk_pct == 0.75
+    assert cfg.agents.enabled is True
+
+
 def test_post_without_csrf_is_forbidden(seeded: TestClient) -> None:
     assert seeded.post("/killswitch", data={"action": "engage"}).status_code == 403
 

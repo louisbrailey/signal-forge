@@ -43,7 +43,7 @@ from signalforge.paper.journal import add_entry
 from signalforge.paper.ledger import accept_candidate, mark_to_market, record_decision
 from signalforge.paper.portfolio import portfolio_snapshot
 from signalforge.portfolio import import_csv, portfolio_analytics
-from signalforge.settings_store import RESEARCH_OVERRIDES_KEY, set_setting
+from signalforge.settings_store import RESEARCH_OVERRIDES_KEY, get_setting, set_setting
 
 router = APIRouter()
 
@@ -354,11 +354,21 @@ def act_settings(
         risk["max_position_concentration_pct"] = max_position_concentration_pct
     if max_portfolio_exposure_pct:
         risk["max_portfolio_exposure_pct"] = max_portfolio_exposure_pct
-    overrides: dict[str, object] = {"allow_short_candidates": allow_short_candidates}
+    # The form owns exactly three override keys. Every other section of the
+    # override dict (agents.enabled, universe_pipeline.enabled, execution.enabled,
+    # options.*, intraday.*) is set by audited CLI ceremonies and must survive a
+    # Save here — replacing the whole dict silently disabled all of them.
+    existing = get_setting(db, RESEARCH_OVERRIDES_KEY, {}) or {}
+    overrides: dict[str, object] = dict(existing) if isinstance(existing, dict) else {}
+    overrides["allow_short_candidates"] = allow_short_candidates
     if risk:
         overrides["risk"] = risk
+    else:
+        overrides.pop("risk", None)
     if watchlist.strip():
         overrides["watchlist"] = [s.strip().upper() for s in watchlist.split(",") if s.strip()]
+    else:
+        overrides.pop("watchlist", None)
     set_setting(db, RESEARCH_OVERRIDES_KEY, overrides)
     set_setting(db, "auto_simulate_qualified_signals", auto_simulate)
     set_setting(db, "alerts_enabled", alerts_enabled)
