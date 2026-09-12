@@ -24,6 +24,7 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from fastapi import Request
@@ -61,10 +62,15 @@ def _sqlite_begin(conn: Any) -> None:
     conn.exec_driver_sql("BEGIN IMMEDIATE" if write else "BEGIN")
 
 
-@lru_cache(maxsize=1)
-def get_engine() -> Engine:
-    settings = get_settings()
-    url = settings.database_url
+def build_engine(url: str) -> Engine:
+    """An engine for ``url`` with this project's SQLite discipline attached.
+
+    Separated from :func:`get_engine` so a second, explicitly-addressed database
+    file can be opened under exactly the same pragmas, busy timeout and explicit
+    ``BEGIN`` / ``BEGIN IMMEDIATE`` scoping as the configured one. A bulk run
+    against a copy of the live file must not get a *different* concurrency
+    contract from the file it will be merged back into.
+    """
     is_sqlite = url.startswith("sqlite")
     engine = create_engine(
         url,
@@ -81,6 +87,11 @@ def get_engine() -> Engine:
         event.listen(engine, "connect", _apply_sqlite_pragmas)
         event.listen(engine, "begin", _sqlite_begin)
     return engine
+
+
+@lru_cache(maxsize=1)
+def get_engine() -> Engine:
+    return build_engine(get_settings().database_url)
 
 
 @lru_cache(maxsize=1)
@@ -121,13 +132,59 @@ def set_write_intent(session: Session, write: bool) -> None:
     bind, so it is sticky across ``commit()`` — a long read/compute phase in a
     ``session_scope(write=True)`` must call ``commit()`` then
     ``set_write_intent(session, False)`` to stop holding the write lock, and
-    ``set_write_intent(session, True)`` again before it writes."""
+    ``set_write_intent(session, True)`` again before it writes.
+
+    The new bind is derived from the session's OWN bind, never from the cached
+    configured engine: a session opened against a different database file (see
+    :func:`external_session_scope`) must keep writing to that file. Deriving it
+    from ``get_engine()`` would silently re-point such a session at the live
+    database on its first write phase.
+    """
     if session.in_transaction():
         raise RuntimeError("commit() or rollback() before changing write intent")
-    base = get_engine()
-    if not base.url.get_backend_name().startswith("sqlite"):
+    bind = session.get_bind()
+    if not isinstance(bind, Engine) or not bind.url.get_backend_name().startswith("sqlite"):
         return
-    session.bind = base.execution_options(sqlite_write=True) if write else base
+    session.bind = bind.execution_options(sqlite_write=write)
+
+
+@contextmanager
+def external_session_scope(path: str | Path, *, write: bool = False) -> Iterator[Session]:
+    """A transactional scope against a SQLite file OTHER than the configured one.
+
+    This is the separate-database-file half of the long-backfill safety design
+    (D1 §7.7 fix 2): a multi-day options run writes into a file-level copy of
+    the live database, so the live file keeps exactly one writer — the paper
+    probation worker — for the whole run, and the result is merged back in one
+    short pass afterwards.
+
+    The file must already exist and be migrated. Creating one on demand is
+    refused deliberately: SQLite would happily create an empty database, the
+    run would then find no ``instrument`` / ``ohlcv_daily`` rows, and a
+    multi-day job would end with every cycle excluded ``no_instrument`` instead
+    of failing in the first second.
+    """
+    p = Path(path).expanduser()
+    if not p.is_file():
+        raise FileNotFoundError(
+            f"{p} does not exist. The bulk database is a FILE-LEVEL COPY of the live "
+            "database taken with the worker stopped — it is never created empty, because "
+            "an empty file would run for days and exclude every cycle for want of an "
+            "equity reference price."
+        )
+    engine = build_engine(f"sqlite+pysqlite:///{p}")
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
+    bind: Engine | Any = engine.execution_options(sqlite_write=True) if write else engine
+    session = factory(bind=bind)
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+        engine.dispose()
 
 
 def get_db(request: Request) -> Iterator[Session]:

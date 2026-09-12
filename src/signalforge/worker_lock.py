@@ -40,6 +40,34 @@ def lock_path() -> Path:
     return data_dir() / LOCK_FILENAME
 
 
+def worker_lock_holder(path: Path | None = None) -> str | None:
+    """Who holds the worker lock right now, or ``None`` if nobody does.
+
+    Read-only on purpose: unlike :func:`acquire_worker_lock` it never truncates
+    the file and never writes this process's pid, so a probe cannot corrupt the
+    holder record it is trying to read. Used by one-off jobs that must not
+    contend with the worker for the SQLite write lock — a bulk merge holds it
+    far longer than the 5 s busy timeout any worker job will wait.
+    """
+    p = path or lock_path()
+    if not p.exists():
+        return None
+    try:
+        handle = p.open("r+", encoding="utf-8")
+    except OSError:  # pragma: no cover - unusual
+        return None
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.seek(0)
+        return handle.read().strip() or "unknown pid"
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return None
+    finally:
+        handle.close()
+
+
 def acquire_worker_lock(path: Path | None = None) -> WorkerLock:
     """Take the exclusive worker lock or raise ``WorkerAlreadyRunning``."""
     p = path or lock_path()
