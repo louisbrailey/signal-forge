@@ -54,3 +54,17 @@ disable, limits from the pre-registration document, adapter lookup, OMS position
 per-cycle adapter with account-scope refusal). The cycle's OPEN LANE (intent → OMS → adapter.place) is
 being built as its own increment (W4-C) under the orchestrator's decision recorded here: it is the
 ADR's designed body, default-disabled, unreachable unless a strategy is armed by the operator's ceremony.
+
+## Addendum 2 (2026-09-12): the open lane is merged; two more operator items
+
+W4-C (`7af463d`) merged the cycle's OPEN lane (`execution/open_lane.py`: ACCEPTED SIMULATED paper
+trades of ARMED versions with the auto-simulate actor only → `build_open_intent` → `may_open` →
+`record_submitting` committed first → `adapter.place` → fills; idempotent via `client_order_id_for`;
+one intent per paper trade ever) and a durable `paper_reference` book (migration `c1e5a9f37b24`,
+table `paper_reference_order`, applied live). Phase V drills 31/31 PASS. `ADAPTER_NAMES` is still
+`("paper_reference",)`; `execution.enabled` is False; nothing is armed.
+
+| # | Item | Why it is yours | Recommendation |
+|---|---|---|---|
+| OP-5 | Under `PREREGISTRATION_execution_limits_v1` the binding per-order notional cap is min($1,000, 0.5 % × $25,000) = **$125**, so an armed session on v1 cannot open any instrument priced above $125 (drill V30). | Capital limit; a v2 document supersedes the row and resets the decision-10 evidence counter. | Write `PREREGISTRATION_execution_limits_v2` with `max_order_notional_pct` = 4 % (→ $1,000 binding on $25k) **before** the first arming, so the evidence window is not reset later. |
+| OP-6 | The lane submits on the cycle cadence (30 s grid centre) with no human per order. Acceptable for the network-free simulator; when a **vendor** paper adapter is registered, decide whether it ships with the lane enabled or with a per-order confirmation. | Operational risk on a real (paper) broker account. | Per-order confirmation for the first 20 closed trades on the vendor adapter, then cadence. |
