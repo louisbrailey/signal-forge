@@ -202,3 +202,62 @@ class ExecutionEvent(Base, IntPK):
     realized_fill_price: Mapped[float | None] = mapped_column(Float, default=None)
     realized_minus_modelled_bps: Mapped[float | None] = mapped_column(Float, default=None)
     leg_index: Mapped[int | None] = mapped_column(Integer, default=None)
+
+
+class PaperReferenceOrder(Base, IntPK):
+    """The ``paper_reference`` simulator's OWN book, made durable (D6 §3.1).
+
+    The adapter used to hold its book in a Python dict, which made it useless
+    for the one thing reconciliation is for: a fresh instance — the next cycle,
+    or the next process — started FLAT and therefore reconciled CLEAN because it
+    held nothing, not because anything had been explained. "Clean because we
+    forgot" is the failure mode §10 exists to prevent, so the simulator's book
+    outlives the object.
+
+    This table is the SIMULATOR's, not the OMS's. ``execution_event`` remains the
+    OMS's append-only record of what it did; this is the broker side of the same
+    story, and reconciliation compares the two. They are deliberately separate
+    tables written by separate code: a reconciliation whose two sides are the
+    same rows is not a reconciliation.
+
+    Rows are keyed by ``client_order_id`` and are UPDATED in place as the
+    simulated order's state moves — this is a broker's book, not an audit log,
+    and no immutability trigger belongs on it.
+    """
+
+    __tablename__ = "paper_reference_order"
+    __table_args__ = (
+        Index("ix_paper_reference_order_account", "account_id"),
+        Index("ix_paper_reference_order_fingerprint", "account_id", "fingerprint"),
+    )
+
+    #: The simulated account this order belongs to. One adapter answers for one
+    #: account (§13), and two accounts must not share a book.
+    account_id: Mapped[str] = mapped_column(String(120))
+    client_order_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    broker_order_id: Mapped[str] = mapped_column(String(64), default="")
+    #: The economic fingerprint §5.4 / A1 dedupes on — a fresh id is not a fresh
+    #: order, and that rule has to survive a restart too.
+    fingerprint: Mapped[str] = mapped_column(String(64), default="")
+    state: Mapped[str] = mapped_column(String(16))
+    submitted_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+    legs_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    requested_units: Mapped[int] = mapped_column(Integer, default=0)
+    filled_units: Mapped[int] = mapped_column(Integer, default=0)
+    leg_fill_prices_json: Mapped[list[float]] = mapped_column(JSON, default=list)
+    net_fill_price: Mapped[float] = mapped_column(Float, default=0.0)
+
+    intent_kind: Mapped[str] = mapped_column(String(20), default="")
+    structure_type: Mapped[str] = mapped_column(String(40), default="")
+    raw_status_verbatim: Mapped[str] = mapped_column(Text, default="")
+    error_verbatim: Mapped[str] = mapped_column(Text, default="")
+
+    source_paper_trade_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    strategy_version_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    armed_strategy_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    execution_limits_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    config_hash: Mapped[str] = mapped_column(String(64), default="")
+    spec_json_hash: Mapped[str] = mapped_column(String(64), default="")
+    modelled_fill_price: Mapped[float] = mapped_column(Float, default=0.0)
+    modelled_spread_bps: Mapped[float] = mapped_column(Float, default=0.0)

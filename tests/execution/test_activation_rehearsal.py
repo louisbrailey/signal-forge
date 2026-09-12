@@ -38,7 +38,7 @@ from signalforge.db.models import (
 from signalforge.domain import StrategyStatus
 from signalforge.execution import arming
 from signalforge.execution.brokers.paper_reference import SIMULATED_ACCOUNT_PREFIX
-from tests.execution.conftest import add_closed_paper_positions
+from tests.execution.conftest import NOW, add_closed_paper_positions
 
 runner = CliRunner()
 
@@ -284,6 +284,7 @@ def _rehearsal_broker(session: Session, *, quote_at: object) -> object:
         ExecutionEventAudit,
         MarketClock,
         PaperReferenceBroker,
+        PaperReferenceOrderStore,
         PreSubmissionInformation,
         ReferenceQuote,
         SimulatedAccount,
@@ -297,6 +298,7 @@ def _rehearsal_broker(session: Session, *, quote_at: object) -> object:
             [ReferenceQuote("SPY", 470.0, quote_at, available_qty=None)]
         ),
         clock=MarketClock(is_open=True, as_of=quote_at + timedelta(minutes=1)),
+        book=PaperReferenceOrderStore(session),
     )
 
 
@@ -460,3 +462,251 @@ def test_a_foreign_position_ends_the_same_rehearsal_in_a_halt(
         d.endswith(arming.DisarmTrigger.RECONCILIATION.value) for d in report.disarms
     ), report.disarms
     assert arming.live_armings(session) == []
+
+
+# ---------------------------------------------------------------------------
+# W4c — the rehearsal ends with an order the CYCLE placed.
+#
+# W4b's version placed the fill through the OMS path by hand, because the cycle
+# had no open lane. It has one now, so the rehearsal ends where an armed day
+# actually ends: the operator arms, the worker's cycle runs, and ONE simulated
+# order is submitted and filled by the cycle itself — then the NEXT cycle, with
+# a brand-new adapter instance, reconciles that book CLEAN.
+#
+# The instrument is low-priced on purpose. Under
+# PREREGISTRATION_execution_limits_v1 the binding per-order notional cap is
+# min($1,000, 0.5% x $25,000) = $125, so a $470 instrument cannot be opened at
+# all — drill V30 records that finding, and the operator doc states it.
+# ---------------------------------------------------------------------------
+
+LANE_SYMBOL = "LOWP"
+LANE_SHARES = 12
+LANE_FILL_PRICE = 10.02
+LANE_REFERENCE = 10.00
+
+
+def _lane_world(session: Session, version: StrategyVersion) -> object:
+    """A scope-matching candidate + auto-simulated paper trade the lane can open.
+
+    P4 re-verifies the full five-part approved-scope match at intent time, so the
+    scan run has to carry the LIVE config hash, the approved snapshot, the source
+    and the exact universe — a world that skipped any of those would make this
+    rehearsal pass for the wrong reason.
+    """
+    from datetime import date
+
+    from signalforge.db.models import (
+        Candidate,
+        DataSnapshot,
+        Instrument,
+        PaperAccount,
+        PaperTrade,
+        ScanRun,
+        StrategyPromotionEvaluation,
+        StrategySealedTest,
+    )
+    from signalforge.domain import (
+        Direction,
+        Horizon,
+        PaperDecision,
+        QualityGate,
+    )
+    from signalforge.paper.auto_simulate import AUTO_SIM_ACTOR
+    from signalforge.research.approval_scope import current_spec_json_hash
+    from signalforge.settings_store import effective_research_config
+
+    now = _utcnow()
+    account = session.scalars(select(PaperAccount)).first()
+    assert account is not None
+    inst = Instrument(symbol=LANE_SYMBOL, name="Low priced", instrument_type="stock", sector="B")
+    snapshot = DataSnapshot(key="rehearsal_lane_snapshot", symbols_json=[LANE_SYMBOL])
+    session.add_all([inst, snapshot])
+    session.flush()
+    sealed = StrategySealedTest(
+        strategy_version_id=version.id,
+        dataset_snapshot_id=snapshot.id,
+        window_start=date(2024, 1, 2),
+        window_end=date(2025, 1, 2),
+        universe_json=[LANE_SYMBOL],
+        passed=True,
+        evaluated_at=now - timedelta(days=30),
+    )
+    session.add(sealed)
+    session.flush()
+    config_hash = effective_research_config(session).config_hash
+    session.add(
+        StrategyPromotionEvaluation(
+            strategy_version_id=version.id,
+            dataset_snapshot_id=snapshot.id,
+            evaluated_at=now - timedelta(days=29),
+            config_hash=config_hash,
+            spec_json_hash=current_spec_json_hash(session, version.id) or "",
+            universe_json=[LANE_SYMBOL],
+            window_start=date(2024, 1, 2),
+            window_end=date(2025, 1, 2),
+            data_provenance_json={"sources": ["massive"]},
+            passed=True,
+            verdict="PAPER_APPROVED",
+            sealed_test_id=sealed.id,
+        )
+    )
+    scan = ScanRun(
+        horizon=Horizon.SHORT_SWING,
+        started_at=now,
+        config_hash=config_hash,
+        source="massive",
+        universe_json=[LANE_SYMBOL],
+        dataset_snapshot_id=snapshot.id,
+    )
+    session.add(scan)
+    session.flush()
+    cand = Candidate(
+        scan_run_id=scan.id,
+        instrument_id=inst.id,
+        strategy_version_id=version.id,
+        horizon=Horizon.SHORT_SWING,
+        direction=Direction.LONG,
+        entry_zone_low=10.0,
+        entry_zone_high=10.05,
+        invalidation_level=9.0,
+        target_level=12.0,
+        target_logic="entry + 3 ATR",
+        time_stop_days=10,
+        reward_risk_estimate=2.0,
+        risk_dollars=125.0,
+        risk_pct_of_account=0.5,
+        liquidity_json={},
+        slippage_assumption_json={},
+        event_risk_json={},
+        portfolio_context_json={},
+        data_freshness_json={},
+        ranking_json={},
+        reasons_qualify=["trend"],
+        reasons_fail=["regime flip"],
+        quality_gate_status=QualityGate.PASSED,
+        failed_gates=[],
+        rank_in_horizon=1,
+    )
+    session.add(cand)
+    session.flush()
+    trade = PaperTrade(
+        account_id=account.id,
+        candidate_id=cand.id,
+        decision=PaperDecision.ACCEPTED,
+        signal_snapshot_json={"decision": {"actor": AUTO_SIM_ACTOR, "automatic": True}},
+        plan_json={"shares": LANE_SHARES, "fill_price": LANE_FILL_PRICE},
+        why_qualified="trend",
+        why_might_fail="regime flip",
+        actor=AUTO_SIM_ACTOR,
+        created_at=now,
+    )
+    session.add(trade)
+    session.flush()
+    return trade
+
+
+#: The cycle clock for the lane half of the rehearsal: 2026-09-11 15:00 UTC is
+#: 11:00 ET on a Friday regular session — 90 minutes after the open and 300
+#: before the close, so it is outside both pre-registered no-submit windows. Real
+#: "now" is not usable here: the calendar refuses a non-session day, and a
+#: rehearsal that only passes on weekdays is a flaky rehearsal.
+LANE_NOW = NOW
+
+
+def _utcnow():
+    return LANE_NOW
+
+
+def _lane_broker(session: Session):
+    from signalforge.execution.brokers.paper_reference import (
+        ExecutionEventAudit,
+        MarketClock,
+        PaperReferenceBroker,
+        PaperReferenceOrderStore,
+        PreSubmissionInformation,
+        ReferenceQuote,
+        SimulatedAccount,
+    )
+
+    now = _utcnow()
+    return PaperReferenceBroker(
+        audit=ExecutionEventAudit(session),
+        account=SimulatedAccount(account_id=ACCOUNT_ID, initial_cash=25_000.0),
+        expected_account_id=ACCOUNT_ID,
+        information=PreSubmissionInformation.of(
+            [ReferenceQuote(LANE_SYMBOL, LANE_REFERENCE, now - timedelta(minutes=5))]
+        ),
+        clock=MarketClock(is_open=True, as_of=now),
+        book=PaperReferenceOrderStore(session),
+    )
+
+
+def test_the_rehearsal_ends_with_an_order_the_cycle_placed(
+    session: Session, rehearsal_version: StrategyVersion
+) -> None:
+    """enable → limits set → arm → the CYCLE opens → the next cycle is CLEAN."""
+    from signalforge.execution import deadman
+    from signalforge.execution.cycle import run_execution_cycle
+    from signalforge.execution.intents import OrderSide
+    from signalforge.execution.oms import current_state, read_cycle_posture
+    from signalforge.execution.open_lane import open_intent_client_order_id
+    from signalforge.execution.states import OrderState
+
+    version_id = rehearsal_version.id
+    session.commit()
+
+    _invoke("execution", "enable", "--yes")
+    _invoke("execution", "limits", "set", "--from-preregistration", PREREGISTRATION, "--yes")
+    session.commit()
+    _seed_evidence_under_the_active_row(session, session.get(StrategyVersion, version_id))
+    _invoke(
+        "execution",
+        "arm",
+        str(version_id),
+        "--account-id",
+        ACCOUNT_ID,
+        "--preregistration",
+        PREREGISTRATION,
+        "--yes",
+        "--confirm",
+        arming.confirmation_phrase(version_id, "paper_reference"),
+    )
+    session.commit()
+    assert len(arming.live_armings(session)) == 1
+
+    trade = _lane_world(session, session.get(StrategyVersion, version_id))
+    now = _utcnow()
+    deadman.feed(session, now=now, detail="rehearsal: the previous cycle")
+    session.flush()
+
+    # ---- the cycle opens it ---------------------------------------------
+    first = run_execution_cycle(
+        session, read_cycle_posture(), now=now, adapter=_lane_broker(session), actor="test"
+    )
+
+    cid = open_intent_client_order_id(
+        trade_id=trade.id, symbol=LANE_SYMBOL, side=OrderSide.BUY_TO_OPEN
+    )
+    assert first.submitted == (cid,), f"{first.open_lane} / {first.blocked_reasons}"
+    assert first.filled == (cid,), first.open_lane
+    assert current_state(session, cid) is OrderState.FILLED
+
+    # It is a SIMULATED fill against a local, network-free adapter, and it says
+    # so on the record.
+    fills = list(
+        session.scalars(
+            select(ExecutionEvent).where(
+                ExecutionEvent.event_type == "FILL", ExecutionEvent.client_order_id == cid
+            )
+        )
+    )
+    assert fills and fills[0].payload_json.get("drill_artifact") is True
+
+    # ---- the NEXT cycle, with a brand-new adapter instance ---------------
+    second = run_execution_cycle(
+        session, read_cycle_posture(), now=now, adapter=_lane_broker(session), actor="test"
+    )
+
+    assert second.reconciliation_status == "CLEAN", second.blocked_reasons
+    assert second.submitted == (), "one paper trade, one order, ever"
+    assert len(arming.live_armings(session)) == 1

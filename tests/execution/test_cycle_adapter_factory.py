@@ -36,6 +36,7 @@ from signalforge.execution.brokers.paper_reference import (
     ExecutionEventAudit,
     MarketClock,
     PaperReferenceBroker,
+    PaperReferenceOrderStore,
     PreSubmissionInformation,
     SimulatedAccount,
 )
@@ -67,6 +68,7 @@ def _broker(session: Session, *, account_id: str = ACCOUNT_ID) -> PaperReference
         expected_account_id=account_id,
         information=PreSubmissionInformation.of([]),
         clock=MarketClock(is_open=True, as_of=NOW),
+        book=PaperReferenceOrderStore(session),
     )
 
 

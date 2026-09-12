@@ -227,6 +227,10 @@ class World:
     broker: Any = None
     suffix: str = ""
     approved: bool = False
+    # W4c: the OPEN lane's world carries its own instrument and its trades.
+    open_trades: list = field(default_factory=list)
+    open_symbol: str = ""
+    open_reference: float = 0.0
 
     @property
     def account_id(self) -> str:
@@ -510,6 +514,282 @@ def drill_quotes(now: datetime, **available: int | None) -> Any:
     )
 
 
+# ---------------------------------------------------------------------------
+# W4c — a world the OPEN lane can actually open in
+#
+# `seed_research_state` builds a SPY world, and SPY cannot be opened under
+# PREREGISTRATION_execution_limits_v1 at all: the binding per-order notional cap
+# is min($1,000, 0.5% x $25,000) = $125, which does not buy one share at $470.
+# That is a real property of the operator's own pre-registered numbers and drill
+# V26 records it. The open-lane drills therefore need a LOW-PRICED instrument,
+# and a scan run whose scope matches the approval exactly (P4 re-verifies the
+# full five-part match at intent time).
+# ---------------------------------------------------------------------------
+
+LOW_PRICED_SYMBOL = "LOWP"
+LOW_PRICED_REFERENCE = 10.00
+LOW_PRICED_FILL = 10.02
+LOW_PRICED_SHARES = 12  # 12 x 10.02 = $120.24, inside the $125 binding cap
+
+
+def seed_open_lane_world(
+    session: Any,
+    now: datetime,
+    *,
+    suffix: str = "",
+    manual_actor: bool = False,
+    shares: int = LOW_PRICED_SHARES,
+    fill_price: float = LOW_PRICED_FILL,
+    reference: float = LOW_PRICED_REFERENCE,
+    entry: float = 10.0,
+    stop: float = 9.0,
+    symbol: str = LOW_PRICED_SYMBOL,
+    trades: int = 1,
+    max_orders_per_day: int | None = None,
+) -> World:
+    """Everything the OPEN lane needs, with the approved scope actually matching."""
+    from signalforge.db.models import (
+        ArmedStrategy,
+        Candidate,
+        DataSnapshot,
+        ExecutionLimits,
+        Instrument,
+        PaperAccount,
+        PaperTrade,
+        ScanRun,
+        Strategy,
+        StrategyPromotionEvaluation,
+        StrategySealedTest,
+        StrategyVersion,
+    )
+    from signalforge.domain import (
+        Direction,
+        Horizon,
+        PaperDecision,
+        QualityGate,
+        StrategyStatus,
+    )
+    from signalforge.paper.auto_simulate import AUTO_SIM_ACTOR
+    from signalforge.research.approval_scope import current_spec_json_hash
+    from signalforge.settings_store import effective_research_config
+
+    sym = f"{symbol}{suffix.upper()}"
+    world = World(session=session, now=now, suffix=suffix)
+    world.account = PaperAccount(
+        name=f"openlane{suffix}", initial_cash=Decimal("25000"), cash=Decimal("25000")
+    )
+    inst = Instrument(symbol=sym, name="Low priced", instrument_type="stock", sector="Broad")
+    session.add_all([world.account, inst])
+    session.flush()
+
+    world.strategy = Strategy(
+        name=f"trend_continuation.open_lane{suffix}",
+        horizon=Horizon.SHORT_SWING,
+        permits_long=True,
+        permits_short=False,
+        status=StrategyStatus.PAPER_APPROVED,
+    )
+    session.add(world.strategy)
+    session.flush()
+    world.version = StrategyVersion(
+        strategy_id=world.strategy.id,
+        version="0.1.0",
+        git_sha="openlane",
+        spec_json={},
+        status=StrategyStatus.PAPER_APPROVED,
+    )
+    session.add(world.version)
+    session.flush()
+
+    snapshot = DataSnapshot(key=f"open_lane_snapshot{suffix}", symbols_json=[sym])
+    session.add(snapshot)
+    session.flush()
+    sealed = StrategySealedTest(
+        strategy_version_id=world.version.id,
+        dataset_snapshot_id=snapshot.id,
+        window_start=date(2024, 1, 2),
+        window_end=date(2025, 1, 2),
+        universe_json=[sym],
+        passed=True,
+        evaluated_at=now - timedelta(days=30),
+    )
+    session.add(sealed)
+    session.flush()
+    config_hash = effective_research_config(session).config_hash
+    spec_hash = current_spec_json_hash(session, world.version.id) or ""
+    session.add(
+        StrategyPromotionEvaluation(
+            strategy_version_id=world.version.id,
+            dataset_snapshot_id=snapshot.id,
+            evaluated_at=now - timedelta(days=29),
+            config_hash=config_hash,
+            spec_json_hash=spec_hash,
+            universe_json=[sym],
+            window_start=date(2024, 1, 2),
+            window_end=date(2025, 1, 2),
+            data_provenance_json={"sources": ["massive"]},
+            passed=True,
+            verdict="PAPER_APPROVED",
+            sealed_test_id=sealed.id,
+        )
+    )
+    scan = ScanRun(
+        horizon=Horizon.SHORT_SWING,
+        started_at=now,
+        config_hash=config_hash,
+        source="massive",
+        universe_json=[sym],
+        dataset_snapshot_id=snapshot.id,
+    )
+    session.add(scan)
+    session.flush()
+    world.approved = True
+
+    actor = "local-user" if manual_actor else AUTO_SIM_ACTOR
+    world.open_trades = []
+    for index in range(trades):
+        cand = Candidate(
+            scan_run_id=scan.id,
+            instrument_id=inst.id,
+            strategy_version_id=world.version.id,
+            horizon=Horizon.SHORT_SWING,
+            direction=Direction.LONG,
+            entry_zone_low=entry,
+            entry_zone_high=entry + 0.05,
+            invalidation_level=stop,
+            target_level=entry * 1.2,
+            target_logic="entry + 3 ATR",
+            time_stop_days=10,
+            reward_risk_estimate=2.0,
+            risk_dollars=125.0,
+            risk_pct_of_account=0.5,
+            liquidity_json={},
+            slippage_assumption_json={},
+            event_risk_json={},
+            portfolio_context_json={},
+            data_freshness_json={},
+            ranking_json={},
+            reasons_qualify=["trend"],
+            reasons_fail=["regime flip"],
+            quality_gate_status=QualityGate.PASSED,
+            failed_gates=[],
+            rank_in_horizon=index + 1,
+        )
+        session.add(cand)
+        session.flush()
+        trade = PaperTrade(
+            account_id=world.account.id,
+            candidate_id=cand.id,
+            decision=PaperDecision.ACCEPTED,
+            signal_snapshot_json={"decision": {"actor": actor, "automatic": not manual_actor}},
+            plan_json={"shares": shares, "fill_price": fill_price},
+            why_qualified="trend",
+            why_might_fail="regime flip",
+            actor=actor,
+            created_at=now,
+        )
+        session.add(trade)
+        session.flush()
+        world.open_trades.append(trade)
+    world.candidate = cand
+    world.paper_trade = world.open_trades[0]
+    world.open_symbol = sym
+    world.open_reference = reference
+
+    values = dict(LIMIT_GRID_CENTRES)
+    if max_orders_per_day is not None:
+        values["max_orders_per_day"] = max_orders_per_day
+    world.limits_row = ExecutionLimits(
+        created_at=now - timedelta(days=30), created_by="drill", **values
+    )
+    session.add(world.limits_row)
+    session.flush()
+    world.armed = ArmedStrategy(
+        strategy_version_id=world.version.id,
+        structure_type="equity",
+        armed_at=now - timedelta(days=1),
+        armed_by="drill",
+        expires_at=now + timedelta(days=6),
+        adapter_name="paper_reference",
+        broker_account_id_expected=world.account_id,
+        max_notional_usd=1_000.0,
+        max_orders_per_day=10,
+        evidence_paper_trade_count=20,
+        evidence_expectancy_r=0.5,
+        sealed_look_prior_at_arm=1,
+        preregistration_doc_id=LIMIT_GRID_CENTRES["preregistration_doc_id"],
+        execution_limits_id=world.limits_row.id,
+        spec_json_hash=spec_hash,
+        config_hash=config_hash,
+    )
+    session.add(world.armed)
+    session.flush()
+
+    from signalforge.execution import deadman
+
+    deadman.feed(session, now=now, detail="drill: the previous cycle")
+    session.flush()
+    return world
+
+
+def open_lane_adapter(session: Any, world: World, *, available: int | None = None) -> Any:
+    from signalforge.execution.brokers.paper_reference import (
+        ExecutionEventAudit,
+        MarketClock,
+        PaperReferenceBroker,
+        PaperReferenceOrderStore,
+        PreSubmissionInformation,
+        ReferenceQuote,
+        SimulatedAccount,
+    )
+
+    broker = PaperReferenceBroker(
+        audit=ExecutionEventAudit(session),
+        account=SimulatedAccount(account_id=world.account_id, initial_cash=25_000.0),
+        expected_account_id=world.account_id,
+        information=PreSubmissionInformation.of(
+            [
+                ReferenceQuote(
+                    world.open_symbol,
+                    world.open_reference,
+                    world.now - timedelta(minutes=1),
+                    available_qty=available,
+                )
+            ]
+        ),
+        clock=MarketClock(is_open=True, as_of=world.now),
+        book=PaperReferenceOrderStore(session),
+    )
+    world.broker = broker
+    world.adapter = broker
+    return broker
+
+
+def open_lane_posture(*, kill: bool = False) -> Any:
+    from signalforge.execution.oms import CycleBranch, CyclePosture, ExecutionKillState
+
+    branch = CycleBranch.PROTECTIVE if kill else CycleBranch.FULL
+    return CyclePosture(
+        branch=branch,
+        may_open=not kill,
+        may_close=True,
+        kill_switch_engaged=kill,
+        execution_kill=ExecutionKillState(engaged=kill, readable=True),
+        detail="drill posture",
+    )
+
+
+def open_lane_order_id(world: World, index: int = 0) -> str:
+    from signalforge.execution.intents import OrderSide
+    from signalforge.execution.open_lane import open_intent_client_order_id
+
+    return open_intent_client_order_id(
+        trade_id=world.open_trades[index].id,
+        symbol=world.open_symbol,
+        side=OrderSide.BUY_TO_OPEN,
+    )
+
+
 def make_adapter(
     session: Any,
     world: World,
@@ -530,6 +810,7 @@ def make_adapter(
         ExecutionEventAudit,
         MarketClock,
         PaperReferenceBroker,
+        PaperReferenceOrderStore,
         SimulatedAccount,
     )
 
@@ -539,6 +820,9 @@ def make_adapter(
         expected_account_id=expected_account_id or world.account_id,
         information=information or drill_quotes(world.now),
         clock=MarketClock(is_open=is_open, as_of=clock_at or world.now),
+        # The DURABLE book: a drill that wants to prove a restart survives one
+        # has to be using the book a restart would survive.
+        book=PaperReferenceOrderStore(session),
     )
     world.broker = broker
     world.adapter = broker
@@ -748,6 +1032,28 @@ def max_event_id(session: Any) -> int:
     from signalforge.db.models import ExecutionEvent
 
     return int(session.scalar(select(func.max(ExecutionEvent.id))) or 0)
+
+
+def event_reasons(session: Any, event_type: Any, *, after_id: int = 0) -> list[str]:
+    """The FULL ``reason`` of every event of one type, untruncated.
+
+    ``observed_events`` clips at 120 characters for the report; a drill that
+    asserts on a refusal has to read the whole sentence.
+    """
+    from sqlalchemy import select
+
+    from signalforge.db.models import ExecutionEvent
+
+    return list(
+        session.scalars(
+            select(ExecutionEvent.reason)
+            .where(
+                ExecutionEvent.id > after_id,
+                ExecutionEvent.event_type == str(event_type),
+            )
+            .order_by(ExecutionEvent.id)
+        )
+    )
 
 
 def event_types(session: Any, *, after_id: int = 0) -> list[str]:
@@ -2269,6 +2575,341 @@ def drill_v22(session: Any, now: datetime) -> DrillOutcome:
     return out
 
 
+def drill_v23(session: Any, now: datetime) -> DrillOutcome:
+    """V23 — the OPEN lane opens when, and only when, all seven hold."""
+    from signalforge.execution.cycle import run_execution_cycle
+    from signalforge.execution.events import ExecutionEventType
+    from signalforge.execution.oms import current_state
+    from signalforge.execution.states import OrderState
+
+    out = DrillOutcome()
+    world = seed_open_lane_world(session, now)
+    adapter = open_lane_adapter(session, world)
+    before = max_event_id(session)
+
+    report = run_execution_cycle(
+        session, open_lane_posture(), now=now, adapter=adapter, actor="drill"
+    )
+    cid = open_lane_order_id(world)
+
+    out.check(
+        "every precondition held", report.may_open_possible, "; ".join(report.blocked_reasons)
+    )
+    out.check("exactly one order was submitted", report.submitted == (cid,), str(report.submitted))
+    out.check("and it FILLED", report.filled == (cid,), report.open_lane)
+    out.check(
+        "the OMS's own state is FILLED",
+        current_state(session, cid) is OrderState.FILLED,
+        str(current_state(session, cid)),
+    )
+    types = event_types(session, after_id=before)
+    out.check(
+        "the §6/§8 order is on the record: INTENT_CREATED → SUBMITTING → FILL",
+        types.index(ExecutionEventType.INTENT_CREATED)
+        < types.index(ExecutionEventType.SUBMITTING)
+        < types.index(ExecutionEventType.FILL),
+        str(types),
+    )
+    out.check(
+        "the size submitted is the SIMULATION's, not one the lane invented",
+        f"{LOW_PRICED_SHARES} {world.open_symbol}" in "".join(observed_events(session)),
+    )
+    out.events = observed_events(session, after_id=before)
+    return out
+
+
+def drill_v24(session: Any, now: datetime) -> DrillOutcome:
+    """V24 — a manually accepted paper trade NEVER becomes an order (§5.3 P6)."""
+    from signalforge.execution.cycle import run_execution_cycle
+    from signalforge.execution.events import ExecutionEventType
+
+    out = DrillOutcome()
+    world = seed_open_lane_world(session, now, manual_actor=True)
+    adapter = open_lane_adapter(session, world)
+    before = max_event_id(session)
+
+    report = run_execution_cycle(
+        session, open_lane_posture(), now=now, adapter=adapter, actor="drill"
+    )
+
+    out.check("nothing was submitted", report.submitted == (), str(report.submitted))
+    out.check(
+        "the trade was not even a candidate — P6 is read off the INDEXED actor column",
+        "considered=0" in report.open_lane,
+        report.open_lane,
+    )
+    out.check(
+        "no SUBMITTING record exists at all",
+        ExecutionEventType.SUBMITTING not in event_types(session, after_id=before),
+    )
+    out.events = observed_events(session, after_id=before)
+    return out
+
+
+def drill_v25(session: Any, now: datetime) -> DrillOutcome:
+    """V25 — a timeout mid-submit produces ONE fill, an UNKNOWN, and no retry."""
+    from signalforge.execution.cycle import run_execution_cycle
+    from signalforge.execution.events import ExecutionEventType
+    from signalforge.execution.oms import current_state, promote_stale_submitting
+    from signalforge.execution.states import OrderState
+
+    out = DrillOutcome()
+    world = seed_open_lane_world(session, now)
+    adapter = open_lane_adapter(session, world)
+    adapter.arm_timeout_once()
+    before = max_event_id(session)
+
+    report = run_execution_cycle(
+        session, open_lane_posture(), now=now, adapter=adapter, actor="drill"
+    )
+    cid = open_lane_order_id(world)
+
+    out.check("the order was submitted", report.submitted == (cid,), str(report.submitted))
+    out.check("the caller never heard a fill", report.filled == (), report.open_lane)
+    out.check(
+        "the local record stays SUBMITTING — never assumed failed",
+        current_state(session, cid) is OrderState.SUBMITTING,
+        str(current_state(session, cid)),
+    )
+    calls = event_reasons(session, ExecutionEventType.ADAPTER_CALL, after_id=before)
+    out.check(
+        "the lane recorded the ambiguity and did NOT retry",
+        any("never retried here" in reason for reason in calls),
+        str([r[:90] for r in calls][-2:]),
+    )
+    promoted = promote_stale_submitting(
+        session, now=now + timedelta(minutes=1), adapter_name="paper_reference", actor="drill"
+    )
+    out.check("the next cycle promotes it to UNKNOWN", cid in promoted, str(promoted))
+    fresh = open_lane_adapter(session, world)
+    status = fresh.order_status(cid)
+    out.check(
+        "the broker DID take it, and a fresh instance still knows — so a retry is answered "
+        "from the book (A1), not filled a second time",
+        status is not None and status.state is OrderState.FILLED,
+        str(status),
+    )
+    out.events = observed_events(session, after_id=before)
+    return out
+
+
+def drill_v26(session: Any, now: datetime) -> DrillOutcome:
+    """V26 — cap exhaustion refuses, and the v1 notional cap is $125."""
+    from signalforge.execution.cycle import run_execution_cycle
+    from signalforge.execution.events import ExecutionEventType
+
+    out = DrillOutcome()
+    world = seed_open_lane_world(session, now, max_orders_per_day=1, trades=2)
+    adapter = open_lane_adapter(session, world)
+    before = max_event_id(session)
+
+    report = run_execution_cycle(
+        session, open_lane_posture(), now=now, adapter=adapter, actor="drill"
+    )
+
+    out.check(
+        "two candidates, ONE order: the second is refused on L1",
+        len(report.submitted) == 1 and "considered=2" in report.open_lane,
+        report.open_lane,
+    )
+    refusals = event_reasons(session, ExecutionEventType.INTENT_REFUSED, after_id=before)
+    out.check("the refusal names L1", any("L1" in line for line in refusals), str(refusals[:2]))
+    out.events = observed_events(session, after_id=before)
+    return out
+
+
+def drill_v30(session: Any, now: datetime) -> DrillOutcome:
+    """V30 — FINDING: the v1 binding per-order notional cap is $125.
+
+    Its own drill rather than a second world inside V26, because two live
+    armings naming two different accounts is itself a refusal (§10 rule 2, W4b)
+    and would block the open for a reason that has nothing to do with the cap.
+    """
+    from signalforge.execution.cycle import run_execution_cycle
+    from signalforge.execution.events import ExecutionEventType
+
+    out = DrillOutcome()
+    world = seed_open_lane_world(
+        session,
+        now,
+        symbol="HIGHP",
+        entry=470.0,
+        stop=465.0,
+        reference=470.0,
+        fill_price=471.18,
+    )
+    adapter = open_lane_adapter(session, world)
+    before = max_event_id(session)
+
+    report = run_execution_cycle(
+        session, open_lane_posture(), now=now, adapter=adapter, actor="drill"
+    )
+    refusals = event_reasons(session, ExecutionEventType.INTENT_REFUSED, after_id=before)
+
+    out.check(
+        "a $470 instrument cannot be opened AT ALL under v1 — not even one share",
+        report.submitted == (),
+        str(report.submitted),
+    )
+    out.check(
+        "and the refusal names L2 and the $125 binding cap, in those numbers",
+        any("L2" in x and "binding cap 125.00" in x for x in refusals),
+        str(refusals[:1]),
+    )
+    out.notes.append(
+        "FINDING (not a drill failure): PREREGISTRATION_execution_limits_v1 pairs a $1,000 "
+        "per-order dollar cap with a 0.5%-of-equity cap, and binding_cap takes the tighter. On "
+        "the $25,000 reference account that is $125, so no instrument priced above $125 can be "
+        "opened by the lane at all. This is the pre-registration's own arithmetic working as "
+        "written (§1.1 tabulates it), not a defect — but it means an armed session on v1 can "
+        "only trade low-priced instruments. Changing it requires a v2 document and supersedes "
+        "the row, which RESETS the decision-10 evidence counter (§7b rule 3)."
+    )
+    out.events = observed_events(session, after_id=before)
+    return out
+
+
+def drill_v27(session: Any, now: datetime) -> DrillOutcome:
+    """V27 — the kill switch refuses the open; the protective close still runs."""
+    from signalforge.execution.cycle import run_execution_cycle
+    from signalforge.execution.events import ExecutionEventType
+    from signalforge.execution.intents import (
+        CostModelFeedback,
+        OrderLeg,
+        OrderSide,
+        build_close_intent,
+    )
+    from signalforge.execution.states import OrderState
+
+    out = DrillOutcome()
+    world = seed_open_lane_world(session, now)
+    adapter = open_lane_adapter(session, world)
+
+    # Open one first, so there is something to close.
+    run_execution_cycle(session, open_lane_posture(), now=now, adapter=adapter, actor="drill")
+    cid = open_lane_order_id(world)
+    before = max_event_id(session)
+
+    monotonic, sleep = fake_clock()
+    report = run_execution_cycle(
+        session,
+        open_lane_posture(kill=True),
+        now=now,
+        adapter=adapter,
+        monotonic=monotonic,
+        sleep=sleep,
+        actor="drill",
+    )
+
+    out.check("no open was even attempted", report.submitted == (), str(report.submitted))
+    out.check("the open lane did not run at all", report.open_lane == "", report.open_lane)
+    out.check(
+        "a CYCLE_PROTECTIVE event was written — the body RAN, it did not skip",
+        ExecutionEventType.CYCLE_PROTECTIVE in event_types(session, after_id=before),
+    )
+
+    position = reconciled_position(world, origin=cid)
+    close = build_close_intent(
+        session,
+        position=position,
+        legs=[
+            OrderLeg(
+                side=OrderSide.SELL_TO_CLOSE,
+                ratio=1,
+                shares_per_contract=1,
+                symbol=world.open_symbol,
+            )
+        ],
+        contracts=LOW_PRICED_SHARES,
+        limit_price=9.50,
+        cost_model=CostModelFeedback(modelled_fill_price=10.0, modelled_spread_bps=5.0),
+        now=now,
+        max_intent_age_minutes=15,
+        execution_limits_id=world.limits_row.id,
+    )
+    result = submit_through_oms(session, adapter, close)
+    out.check(
+        "a PROTECTIVE_CLOSE still constructs AND still submits with the switch engaged",
+        result.state is OrderState.FILLED,
+        result.raw_status_verbatim,
+    )
+    out.events = observed_events(session, after_id=before)
+    return out
+
+
+def drill_v28(session: Any, now: datetime) -> DrillOutcome:
+    """V28 — a strategy disarmed by THIS cycle's sweep never opens in it."""
+    from signalforge.domain import StrategyStatus
+    from signalforge.execution.cycle import run_execution_cycle
+    from signalforge.execution.events import ExecutionEventType
+
+    out = DrillOutcome()
+    world = seed_open_lane_world(session, now)
+    adapter = open_lane_adapter(session, world)
+    world.version.status = StrategyStatus.EXPERIMENTAL
+    session.flush()
+    before = max_event_id(session)
+
+    report = run_execution_cycle(
+        session, open_lane_posture(), now=now, adapter=adapter, actor="drill"
+    )
+
+    out.check(
+        "the sweep disarmed it on the status change",
+        any("status_change" in d for d in report.disarms),
+        str(report.disarms),
+    )
+    out.check("nothing was submitted", report.submitted == (), str(report.submitted))
+    out.check(
+        "the sweep runs BEFORE the lane, so no SUBMITTING record exists",
+        ExecutionEventType.SUBMITTING not in event_types(session, after_id=before),
+    )
+    out.events = observed_events(session, after_id=before)
+    return out
+
+
+def drill_v29(session: Any, now: datetime) -> DrillOutcome:
+    """V29 — the simulated book is DURABLE across adapter instances."""
+    from signalforge.execution.cycle import run_execution_cycle
+    from signalforge.execution.states import OrderState
+
+    out = DrillOutcome()
+    world = seed_open_lane_world(session, now)
+    adapter = open_lane_adapter(session, world)
+    run_execution_cycle(session, open_lane_posture(), now=now, adapter=adapter, actor="drill")
+    cid = open_lane_order_id(world)
+    before = max_event_id(session)
+
+    # A brand-new instance: the next cycle's adapter, or the next process's.
+    fresh = open_lane_adapter(session, world)
+    out.check(
+        "a fresh instance HOLDS the position the last one filled",
+        bool(list(fresh.positions())),
+        f"{len(list(fresh.positions()))} position(s)",
+    )
+    out.check(
+        "and knows the order's terminal state (A4)",
+        (fresh.order_status(cid) or None) is not None
+        and fresh.order_status(cid).state is OrderState.FILLED,
+    )
+    second = run_execution_cycle(
+        session, open_lane_posture(), now=now, adapter=fresh, actor="drill"
+    )
+    out.check(
+        "so the next cycle reconciles that book CLEAN — because the OMS EXPLAINED it, not "
+        "because the simulator forgot",
+        second.reconciliation_status == "CLEAN",
+        second.reconciliation_status,
+    )
+    out.check(
+        "and does not re-submit the same paper trade",
+        second.submitted == (),
+        str(second.submitted),
+    )
+    out.events = observed_events(session, after_id=before)
+    return out
+
+
 DRILLS: tuple[Drill, ...] = (
     Drill(
         "V0",
@@ -2422,6 +3063,70 @@ DRILLS: tuple[Drill, ...] = (
         "L1 daily count, L2 per-order notional with the tighter of the dollar and percent forms, "
         "and the account-exposure cap",
         drill_v22,
+        in_adr=False,
+    ),
+    Drill(
+        "V23",
+        "OPEN lane — opens when all seven preconditions hold",
+        "one order is built, committed as SUBMITTING, submitted and filled, in the §6/§8 order, "
+        "at the size the SIMULATION decided",
+        drill_v23,
+        in_adr=False,
+    ),
+    Drill(
+        "V24",
+        "OPEN lane — a manual accept never becomes an order",
+        "a PaperTrade whose indexed actor is not the automatic one is not even a candidate "
+        "(§5.3 P6)",
+        drill_v24,
+        in_adr=False,
+    ),
+    Drill(
+        "V25",
+        "OPEN lane — retry after a timeout is one fill, not two",
+        "the order stays SUBMITTING, is promoted to UNKNOWN, is never retried in the except "
+        "block, and the broker's own durable book answers a re-presented id (A1)",
+        drill_v25,
+        in_adr=False,
+    ),
+    Drill(
+        "V26",
+        "OPEN lane — cap exhaustion refuses",
+        "the order that would cross the daily cap is refused on L1; and under v1 the binding "
+        "per-order notional cap is $125, which no $470 instrument can pass",
+        drill_v26,
+        in_adr=False,
+    ),
+    Drill(
+        "V27",
+        "OPEN lane — kill switch refuses the open, the close still runs",
+        "the protective branch runs the body, no open is attempted, and a PROTECTIVE_CLOSE still "
+        "constructs and submits",
+        drill_v27,
+        in_adr=False,
+    ),
+    Drill(
+        "V28",
+        "OPEN lane — disarmed mid-cycle, no open",
+        "the §12 step 7 sweep runs before the lane, so a strategy disarmed by this cycle never "
+        "opens in it",
+        drill_v28,
+        in_adr=False,
+    ),
+    Drill(
+        "V29",
+        "OPEN lane — the simulated book is durable",
+        "a fresh adapter instance holds what the last one filled, knows its terminal state, and "
+        "the next cycle reconciles it CLEAN through the OMS-side attribution",
+        drill_v29,
+        in_adr=False,
+    ),
+    Drill(
+        "V30",
+        "OPEN lane — FINDING: the v1 binding notional cap is $125",
+        "min($1,000, 0.5% x $25,000) = $125, so a $470 instrument is refused on L2 — the "
+        "pre-registration's own arithmetic, drilled so it cannot be forgotten",
+        drill_v30,
         in_adr=False,
     ),
 )

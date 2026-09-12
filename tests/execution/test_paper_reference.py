@@ -40,8 +40,10 @@ from signalforge.execution.brokers.paper_reference import (
     AdapterAudit,
     ByLegPartialHalt,
     ExecutionEventAudit,
+    InMemoryBook,
     LookaheadRefused,
     PaperReferenceBroker,
+    PaperReferenceOrderStore,
     PreSubmissionInformation,
     ReferenceQuote,
     SimulatedAccount,
@@ -133,6 +135,9 @@ def make_adapter(
         expected_account_id=expected_account_id,
         information=info or information(),
         clock=clock or MarketClock(is_open=True, as_of=NOW),
+        # A throwaway book: these tests are about the FILL RULE, and each one
+        # wants its own empty account. The durable store has its own tests.
+        book=InMemoryBook(),
     )
 
 
@@ -746,6 +751,7 @@ def test_the_audit_sink_is_required_and_has_no_null_default() -> None:
             expected_account_id=ACCOUNT_ID,
             information=information(),
             clock=MarketClock(is_open=True, as_of=NOW),
+            book=InMemoryBook(),
         )
 
 
@@ -829,6 +835,7 @@ def test_the_adapter_is_built_when_the_config_selects_it(session: Session) -> No
         expected_account_id=ACCOUNT_ID,
         information=information(),
         clock=MarketClock(is_open=True, as_of=NOW),
+        book=PaperReferenceOrderStore(session),
     )
     assert isinstance(adapter, PaperReferenceBroker)
     assert adapter.name == PAPER_REFERENCE_NAME
@@ -930,4 +937,5 @@ def test_a_registry_key_that_disagrees_with_its_adapter_is_refused(
             expected_account_id=ACCOUNT_ID,
             information=information(),
             clock=MarketClock(is_open=True, as_of=NOW),
+            book=PaperReferenceOrderStore(session),
         )

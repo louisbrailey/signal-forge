@@ -74,6 +74,7 @@ PAPER_REFERENCE_DRILL_NOW = datetime(2026, 9, 11, 15, 0, tzinfo=UTC)
 
 def _paper_reference_adapter(audit: object, *, expected_account_id: str) -> object:
     from signalforge.execution.brokers.paper_reference import (
+        InMemoryBook,
         PaperReferenceBroker,
         PreSubmissionInformation,
         ReferenceQuote,
@@ -88,6 +89,7 @@ def _paper_reference_adapter(audit: object, *, expected_account_id: str) -> obje
         expected_account_id=expected_account_id,
         information=PreSubmissionInformation.of([ReferenceQuote("SPY", 470.0, earlier)]),
         clock=MarketClock(is_open=True, as_of=PAPER_REFERENCE_DRILL_NOW),
+        book=InMemoryBook(),
     )
 
 

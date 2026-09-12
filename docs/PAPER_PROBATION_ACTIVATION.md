@@ -237,6 +237,10 @@ records in `execution_event` against an adapter.
 
 Read `docs/PREREGISTRATION_execution_limits_v1.md` first. Arming is refused without it.
 
+**As of W4c the cycle can SUBMIT.** Step 6 is no longer "start the worker and
+watch"; with a strategy armed, the worker's cycle builds and submits orders on
+its own. Read "The OPEN lane" below before running step 5, not after.
+
 ## Before anything: what is true today
 
 | Fact | Where |
@@ -435,6 +439,93 @@ and refuses on the first failure. Do not pass `--override-evidence` unless you i
 override to be audited with the observed `n` and expectancy recorded beside your typed
 reason — that is what it does, deliberately, because an override is taken **after** seeing
 the outcome.
+
+## The OPEN lane — what the cycle can now do, once a strategy is armed
+
+**Added 2026-09-12 (W4c). Read this before arming anything.** Until W4c the
+execution cycle could evaluate, reconcile, sweep and report, and it could not
+submit: nothing in `src/signalforge/` called `adapter.place()`. It can now. Here
+is exactly what happens, and exactly what has to be true first.
+
+### What it does
+
+Once — and only once — every one of the following holds **in the same cycle**,
+the lane submits **one LIMIT order per eligible paper trade**:
+
+| # | Condition | Where it is enforced |
+|---|---|---|
+| 1 | `research.execution.enabled` is True | `execution enable --yes`; ships False |
+| 2 | An adapter was built for the armed account | `cli._execution_cycle_adapter_factory` |
+| 3 | A live, unexpired `armed_strategy` row for that strategy version | `arming.live_armings`, after the §12 step 7 sweep has run |
+| 4 | Every live arming names the SAME broker account | `cycle._account_scope_ok` (§10 rule 2) |
+| 5 | `is_paper()` proved out against the armed account id THIS cycle | `cycle._is_paper_proven` (§13) |
+| 6 | The FULL branch — neither kill switch engaged | `read_cycle_posture` (K1, K2) |
+| 7 | The dead man is alive | `deadman.assess` (D1) |
+| 8 | Reconciliation is CLEAN and fresh | `reconcile` + `max_reconciliation_age_s` (R1) |
+| 9 | Broker clock and local calendar AGREE the market is open, outside both no-submit windows | `calendarcheck` (C1, C2, C3) |
+| 10 | All seven §5 preconditions, re-verified live per order | `intents.build_open_intent` |
+| 11 | Every `may_open` limit, evaluated for THAT order | `limits.may_open` (L0-L3, I1, I2, A1, A2, P, R1, R2) |
+
+The order it sends is **the one the simulation already made**: the size and the
+limit price come from the `PaperTrade`'s own `plan_json` (`shares`,
+`fill_price`), written by `paper/ledger.py`. The lane computes neither. If the
+simulated plan is missing either, the lane refuses rather than inventing one.
+
+### What it cannot do
+
+* **It cannot open anything while nothing is armed** — and nothing is armed by
+  default. With no live arming the lane runs no query, builds no intent and
+  calls no adapter method: it is absent, not merely inert.
+* **It cannot open from a manual accept.** The source must be a `PaperTrade`
+  whose indexed `actor` column is the automatic simulator's (§5.3 P6).
+  `accept_candidate` is reachable from the CLI with no guard, so "an ACCEPTED
+  PaperTrade exists" is not an authorisation.
+* **It cannot open the same paper trade twice, ever.** `client_order_id` is a
+  hash of (paper trade, leg signature) with no attempt counter; any recorded
+  state for that id makes the lane skip it forever.
+* **It cannot retry an ambiguous submission.** If `place()` does not return, the
+  committed `SUBMITTING` record stands, the next cycle promotes it to `UNKNOWN`,
+  and an `UNKNOWN` blocks every further open for that strategy AND blocks
+  re-arming it. A retry there is how an ambiguous response becomes a double fill.
+* **It cannot reach a real broker.** The only registered adapter is
+  `paper_reference`: local, deterministic, network-free, no credential. Its fills
+  are drill artifacts and are excluded from every gate.
+* **It cannot run in the app process.** The cycle exists only in the
+  CLI-launched worker.
+
+### The order of operations, which is not negotiable
+
+`build_open_intent` (all seven §5 preconditions) → `may_open` (every limit, for
+this order) → `INTENT_CREATED` → `VALIDATED` → **`SUBMITTING` written and
+COMMITTED** → `adapter.place()` → the outcome recorded. The commit before the
+call is the whole point: a process killed in between leaves a durable row the
+next cycle can promote, rather than losing an order that may have reached the
+broker.
+
+### A number to know before you arm: the binding cap is $125
+
+`PREREGISTRATION_execution_limits_v1` pairs a **$1,000** per-order dollar cap
+with a **0.5%-of-equity** cap, and `binding_cap` takes the **tighter**. On the
+$25,000 reference account that is **$125**.
+
+**So under v1 the lane cannot open any instrument priced above $125 — not even
+one share.** A $470 ETF is refused on L2 every time. This is the
+pre-registration's own arithmetic working exactly as §1.1 tabulates it, not a
+defect, but it is the kind of thing that is much better known before an armed
+session than during one. Drill **V30** exists solely to keep it visible.
+
+If that is not what the operator intends, the fix is a **v2 pre-registration
+document** and a superseding row — which **RESETS the decision-10 evidence
+counter** (§7b rule 3), because evidence accumulated under different limits is
+evidence about a different system.
+
+### Watching it
+
+`signalforge execution status` still shows the posture. The cycle's `JobRun`
+note now carries an `open_lane[...]` segment whenever the lane ran at all —
+`considered=N; submitted=N; filled=N; refused=N`. Every refusal is an
+`INTENT_REFUSED` row in `execution_event` naming the precondition or limit that
+refused it, and every submission and fill is on the same spine.
 
 ## Step 6 — run the worker that carries the cycle
 

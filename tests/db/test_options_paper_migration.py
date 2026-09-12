@@ -50,6 +50,14 @@ def test_the_options_paper_revision_is_chained_from_the_options_data_revision(
     script = ScriptDirectory.from_config(alembic_config(db_url))
     rev = script.get_revision("b9d41e07c6aa")  # pragma: allowlist secret
     assert rev.down_revision == "a7f3c2b8e451"  # pragma: allowlist secret
+    # It is ON the single chain — not necessarily still AT its head. Later
+    # migrations legitimately extend it (W4c's paper_reference book was the
+    # first); what must never happen is this revision ending up on a branch of
+    # its own, and `test_the_migration_chain_still_has_a_single_head` is the
+    # independent check that no branch exists at all.
+    head = script.get_heads()[0]
+    ancestry = {r.revision for r in script.walk_revisions(base="base", head=head)}
+    assert "b9d41e07c6aa" in ancestry  # pragma: allowlist secret
 
 
 def test_the_w5b_revision_is_chained_from_the_options_paper_revision(db_url: str) -> None:
@@ -59,7 +67,11 @@ def test_the_w5b_revision_is_chained_from_the_options_paper_revision(db_url: str
     script = ScriptDirectory.from_config(alembic_config(db_url))
     rev = script.get_revision("c1e8f0a4d7b3")  # pragma: allowlist secret
     assert rev.down_revision == "b9d41e07c6aa"  # pragma: allowlist secret
-    assert list(script.get_heads()) == ["c1e8f0a4d7b3"]  # pragma: allowlist secret
+    # ON the single chain, not necessarily AT its head (W4c's paper_reference book
+    # follows it); the single-head test is the independent check for branches.
+    head = script.get_heads()[0]
+    ancestry = {r.revision for r in script.walk_revisions(base="base", head=head)}
+    assert "c1e8f0a4d7b3" in ancestry  # pragma: allowlist secret
 
 
 def test_the_mark_records_the_q_it_used_and_nothing_else_changed(db_url: str) -> None:

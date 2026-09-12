@@ -59,7 +59,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from signalforge.execution import arming, calendarcheck, deadman
+from signalforge.execution import arming, calendarcheck, deadman, open_lane
 from signalforge.execution import reconcile as reconcile_mod
 from signalforge.execution.events import ExecutionEventType, record_execution_event
 from signalforge.execution.limits import LimitSet, load_active_limits
@@ -126,6 +126,11 @@ class CycleReport:
     drain_timed_out: int = 0
     cancelled: int | None = None
     may_open_possible: bool = False
+    #: What the OPEN lane did, when it ran at all. Empty is the default state
+    #: and the shipped one: with nothing armed the lane is not entered.
+    open_lane: str = ""
+    submitted: tuple[str, ...] = ()
+    filled: tuple[str, ...] = ()
     blocked_reasons: list[str] = field(default_factory=list)
     detail: str = ""
 
@@ -143,6 +148,8 @@ class CycleReport:
             bits.append(f"drained={self.drained}/timed_out={self.drain_timed_out}")
             if self.cancelled is not None:
                 bits.append(f"cancelled={self.cancelled}")
+        if self.open_lane:
+            bits.append(f"open_lane[{self.open_lane}]")
         if self.blocked_reasons:
             bits.append(f"open_blocked={self.blocked_reasons[0]}")
         return "; ".join(bits)
@@ -375,8 +382,78 @@ def run_execution_cycle(
             actor=actor,
         )
 
+    # -- 7. the OPEN lane (§2 cycle body, §5, §6/§8) -------------------------
+    #
+    # Reached only when EVERY condition above held in THIS cycle, and it is a
+    # conjunction of independent gates rather than one flag: something armed and
+    # un-swept, the FULL branch, a live dead man, a CLEAN reconciliation, an
+    # open market both sources agree on, a parseable limits row, a proven
+    # is_paper, and one account across every arming. With nothing armed —
+    # the default and the shipped state — `remaining` is empty, this is False,
+    # and `run_open_lane` is never called at all.
+    #
+    # `may_open_possible` is necessary and still not sufficient: the lane
+    # re-evaluates every `may_open` limit PER ORDER (the notional and daily-count
+    # caps cannot be evaluated without an order) and `build_open_intent`
+    # re-verifies all seven §5 preconditions against the database again.
+    if report.may_open_possible and adapter is not None and limits is not None:
+        # Read ONLY here, so a cycle with nothing armed makes no extra adapter
+        # call and the "absent when nothing is armed" promise stays strict.
+        account_equity, account_exposure = _account_facts(adapter)
+        lane = open_lane.run_open_lane(
+            session,
+            open_lane.OpenLaneContext(
+                now=at,
+                adapter_name=adapter_name,
+                limits=limits,
+                verdict=verdict,
+                armed=remaining,
+                kill_switch_engaged=posture.kill_switch_engaged,
+                execution_kill_engaged=(
+                    posture.execution_kill.engaged if posture.execution_kill.readable else True
+                ),
+                dead_man_alive=state.alive,
+                reconciliation_clean=(recon.clean if recon is not None else None),
+                reconciliation_age_s=report.reconciliation_age_s,
+                is_paper_proven=facts.is_paper_proven,
+                account_equity_usd=account_equity,
+                account_exposure_usd=account_exposure,
+            ),
+            adapter=adapter,
+            actor=actor,
+        )
+        report.open_lane = lane.note
+        report.submitted = tuple(lane.submitted)
+        report.filled = tuple(lane.filled)
+
     report.detail = report.note()
     return report
+
+
+def _account_facts(adapter: BrokerAdapter) -> tuple[float | None, float | None]:
+    """``(equity, exposure)`` from the broker's OWN book, or ``(None, None)``.
+
+    ``None`` blocks L2 — an uncomputable cap is not a cap — so an unreachable
+    adapter refuses the order rather than sizing it against a guess. Exposure is
+    the absolute market value the broker reports, not a local model: §10's rule
+    is that the broker's figure is authoritative and the local model is a model.
+    """
+    try:
+        account = adapter.account()
+        positions = list(adapter.positions())
+    except Exception:
+        return None, None
+    try:
+        equity = float(account.equity)
+    except (TypeError, ValueError):
+        return None, None
+    exposure = 0.0
+    for position in positions:
+        try:
+            exposure += abs(float(getattr(position, "market_value", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            return equity, None
+    return equity, exposure
 
 
 def _account_scope_ok(

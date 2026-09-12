@@ -3901,6 +3901,7 @@ def _execution_adapter(
     from signalforge.execution import brokers as brokers_mod
     from signalforge.execution.brokers.paper_reference import (
         ExecutionEventAudit,
+        PaperReferenceOrderStore,
         PreSubmissionInformation,
         SimulatedAccount,
     )
@@ -3943,6 +3944,10 @@ def _execution_adapter(
             is_open=bool(calendar_evaluate(now, None).market_open_calendar),
             as_of=now,
         ),
+        # The DURABLE book. A fresh adapter is built every cycle, so an
+        # in-memory one would start flat each time and reconcile CLEAN because
+        # the simulator forgot rather than because the OMS explained anything.
+        book=PaperReferenceOrderStore(session),
     )
     return adapter
 

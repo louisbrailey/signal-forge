@@ -1,7 +1,10 @@
 # ADR — Execution layer (pointer)
 
-- **Status:** accepted for the contract and documentation work only (2026-09-12). No
-  execution code exists yet. Nothing is armed. Nothing reaches real money.
+- **Status:** accepted and IMPLEMENTED through increment W4c (2026-09-12). The execution
+  layer exists, is default-disabled, and its cycle can submit orders once a strategy is
+  armed — see "Increment W4c" at the foot of this file. **Nothing is armed. Nothing reaches
+  real money:** the only registered adapter is `paper_reference`, a local, deterministic,
+  network-free simulator, and `research.execution.enabled` ships False.
 - **Deciders:** Louis Brailey (operator). Direction of 2026-09-11: Signal Forge is "no longer
   research use only"; end-to-end operational control granted.
 - **Full text:** `docs/research/options_designs/D6_execution_adr.md` — this file is a short
@@ -86,3 +89,32 @@ one is a prose fix I-E2 must make by hand.
 The paper-first evidence discipline (`docs/research/STRATEGY_COMPLETION_MAP.md` §1 R1–R10) is
 unchanged by this ADR. No promotion gate or threshold is weakened anywhere in it; every
 addition is strictly more searching.
+
+## Increment W4c — the OPEN lane is built (2026-09-12)
+
+The cycle body described in §2 now has its opening half. Until W4c nothing in
+`src/signalforge/` called `adapter.place()` at all; the cycle evaluated,
+reconciled, swept and reported, and submission existed only in the drill
+harness.
+
+What landed:
+
+* `execution/open_lane.py` — candidate selection (ACCEPTED + AUTOMATIC actor +
+  armed version + today), `build_open_intent`, `may_open` per order, then the
+  §6/§8 durable order: `SUBMITTING` committed BEFORE `place()`. One order per
+  paper trade forever, via the attempt-counter-free `client_order_id`.
+* `paper_reference`'s book is now DURABLE (`paper_reference_order`, migration
+  `c1e5a9f37b24`). A fresh instance per cycle used to start flat and reconcile
+  CLEAN because it had forgotten; it now holds what the last one filled.
+* Drills V23-V30 in `scripts/execution_drills.py`.
+
+The guards are unchanged and are what make this safe to have: nothing is armed
+by default, `execution.enabled` ships False, the only registered adapter is a
+network-free local simulator, and with no live arming the lane is absent rather
+than inert.
+
+**One finding worth reading before arming:** under
+`PREREGISTRATION_execution_limits_v1` the binding per-order notional cap on the
+$25,000 reference account is `min($1,000, 0.5% x equity)` = **$125**, so no
+instrument priced above $125 can be opened under v1. See
+`docs/PAPER_PROBATION_ACTIVATION.md` ("The OPEN lane") and drill V30.

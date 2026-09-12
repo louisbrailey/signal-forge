@@ -11,6 +11,7 @@ from signalforge.db.models.execution import (
     ArmedStrategy,
     ExecutionEvent,
     ExecutionLimits,
+    PaperReferenceOrder,
 )
 from signalforge.db.models.grid import (
     GridPosition,
@@ -161,6 +162,7 @@ __all__ = [
     "ArmedStrategy",
     "ExecutionLimits",
     "ExecutionEvent",
+    "PaperReferenceOrder",
     # grid (mechanical strategy — NOT promotion-gated)
     "GridPosition",
     "GridTradeRow",

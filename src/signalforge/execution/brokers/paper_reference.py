@@ -91,13 +91,16 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 __all__ = [
     "AdapterAudit",
+    "AdapterBook",
     "ByLegPartialHalt",
     "ExecutionEventAudit",
+    "InMemoryBook",
     "LookaheadRefused",
     "MODEL_SPREAD_BPS_FLOOR",
     "PAPER_HOST_ALLOWLIST",
     "PAPER_REFERENCE_NAME",
     "PaperReferenceBroker",
+    "PaperReferenceOrderStore",
     "PreSubmissionInformation",
     "ReferenceQuote",
     "SIMULATED_ACCOUNT_PREFIX",
@@ -278,6 +281,159 @@ class ExecutionEventAudit:
     def record(self, event_type: ExecutionEventType, /, **fields: Any) -> None:
         fields.setdefault("adapter_name", PAPER_REFERENCE_NAME)
         record_execution_event(self._session, event_type=event_type, **fields)
+
+
+# ---------------------------------------------------------------------------
+# The book — durable, because a forgetful simulator reconciles CLEAN for the
+# wrong reason (§3.1, §10)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class AdapterBook(Protocol):
+    """Where the simulated order book lives between calls.
+
+    A broker remembers its own orders across a reconnect; a simulator whose book
+    dies with the Python object does not, and a fresh instance then reconciles
+    CLEAN because it holds NOTHING rather than because the OMS explained what it
+    holds. That is "clean because we forgot", which is the exact failure §10
+    exists to catch — so the book is an injected dependency with no default,
+    like the audit sink and for the same reason.
+    """
+
+    def load(self, account_id: str) -> dict[str, SimulatedOrder]: ...
+
+    def save(self, account_id: str, order: SimulatedOrder) -> None: ...
+
+
+class InMemoryBook:
+    """A throwaway book. **Never the production one.**
+
+    Exists so a unit test of the fill rule can run without a database, and so
+    the choice between forgetting and remembering is written at every
+    construction site rather than defaulted.
+    """
+
+    def __init__(self) -> None:
+        self._orders: dict[str, dict[str, SimulatedOrder]] = {}
+
+    def load(self, account_id: str) -> dict[str, SimulatedOrder]:
+        return dict(self._orders.get(account_id, {}))
+
+    def save(self, account_id: str, order: SimulatedOrder) -> None:
+        self._orders.setdefault(account_id, {})[order.client_order_id] = order
+
+
+def _leg_to_json(leg: OrderLeg) -> dict[str, Any]:
+    return {
+        "side": leg.side.value,
+        "ratio": leg.ratio,
+        "shares_per_contract": leg.shares_per_contract,
+        "option_ticker": leg.option_ticker,
+        "symbol": leg.symbol,
+        "strike": leg.strike,
+    }
+
+
+def _leg_from_json(raw: dict[str, Any]) -> OrderLeg:
+    return OrderLeg(
+        side=OrderSide(raw["side"]),
+        ratio=int(raw["ratio"]),
+        shares_per_contract=int(raw["shares_per_contract"]),
+        option_ticker=raw.get("option_ticker"),
+        symbol=raw.get("symbol"),
+        strike=raw.get("strike"),
+    )
+
+
+class PaperReferenceOrderStore:
+    """The durable book, in ``paper_reference_order``.
+
+    Rows are keyed by ``client_order_id`` and UPDATED in place as a simulated
+    order's state moves. No immutability trigger belongs on that table: it is a
+    broker's *state*, not evidence. ``execution_event`` remains the OMS's
+    append-only record, and reconciliation compares the two — which only means
+    something because they are different rows written by different code.
+
+    It does not commit, for the same reason ``ExecutionEventAudit`` does not:
+    the caller owns the transaction boundary.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def load(self, account_id: str) -> dict[str, SimulatedOrder]:
+        from sqlalchemy import select
+
+        from signalforge.db.models import PaperReferenceOrder
+
+        rows = self._session.scalars(
+            select(PaperReferenceOrder).where(PaperReferenceOrder.account_id == account_id)
+        )
+        return {row.client_order_id: self._to_order(row) for row in rows}
+
+    @staticmethod
+    def _to_order(row: Any) -> SimulatedOrder:
+        return SimulatedOrder(
+            client_order_id=row.client_order_id,
+            broker_order_id=row.broker_order_id,
+            fingerprint=row.fingerprint,
+            state=OrderState(row.state),
+            submitted_at=row.submitted_at,
+            legs=tuple(_leg_from_json(raw) for raw in (row.legs_json or [])),
+            requested_units=row.requested_units,
+            filled_units=row.filled_units,
+            leg_fill_prices=tuple(row.leg_fill_prices_json or []),
+            net_fill_price=row.net_fill_price,
+            intent_kind=row.intent_kind,
+            structure_type=row.structure_type,
+            raw_status_verbatim=row.raw_status_verbatim,
+            error_verbatim=row.error_verbatim,
+            source_paper_trade_id=row.source_paper_trade_id,
+            strategy_version_id=row.strategy_version_id,
+            armed_strategy_id=row.armed_strategy_id,
+            execution_limits_id=row.execution_limits_id,
+            config_hash=row.config_hash,
+            spec_json_hash=row.spec_json_hash,
+            modelled_fill_price=row.modelled_fill_price,
+            modelled_spread_bps=row.modelled_spread_bps,
+        )
+
+    def save(self, account_id: str, order: SimulatedOrder) -> None:
+        from sqlalchemy import select
+
+        from signalforge.db.models import PaperReferenceOrder
+
+        row = self._session.scalars(
+            select(PaperReferenceOrder).where(
+                PaperReferenceOrder.client_order_id == order.client_order_id
+            )
+        ).first()
+        if row is None:
+            row = PaperReferenceOrder(account_id=account_id, client_order_id=order.client_order_id)
+            self._session.add(row)
+        row.broker_order_id = order.broker_order_id
+        row.fingerprint = order.fingerprint
+        row.state = order.state.value
+        row.submitted_at = order.submitted_at
+        row.legs_json = [_leg_to_json(leg) for leg in order.legs]
+        row.requested_units = order.requested_units
+        row.filled_units = order.filled_units
+        row.leg_fill_prices_json = list(order.leg_fill_prices)
+        row.net_fill_price = order.net_fill_price
+        row.intent_kind = order.intent_kind
+        row.structure_type = order.structure_type
+        row.raw_status_verbatim = order.raw_status_verbatim
+        row.error_verbatim = order.error_verbatim
+        row.source_paper_trade_id = order.source_paper_trade_id
+        row.strategy_version_id = order.strategy_version_id
+        row.armed_strategy_id = order.armed_strategy_id
+        row.execution_limits_id = order.execution_limits_id
+        row.config_hash = order.config_hash
+        row.spec_json_hash = order.spec_json_hash
+        row.modelled_fill_price = order.modelled_fill_price
+        row.modelled_spread_bps = order.modelled_spread_bps
+        self._session.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +648,7 @@ class PaperReferenceBroker:
         expected_account_id: str,
         information: PreSubmissionInformation,
         clock: MarketClock,
+        book: AdapterBook,
     ) -> None:
         if not expected_account_id:
             raise ValueError(
@@ -503,11 +660,28 @@ class PaperReferenceBroker:
         self._expected_account_id = expected_account_id
         self._information = information
         self._clock = clock
-        self._orders: dict[str, SimulatedOrder] = {}
-        self._by_fingerprint: dict[str, str] = {}
+        self._book = book
+        # The book is LOADED, not started empty. A fresh instance of this class
+        # is a reconnect, not a new account: it has to see the orders the last
+        # instance placed, or every reconciliation after a restart is clean
+        # because the simulator forgot rather than because anything was
+        # explained (§10).
+        self._orders: dict[str, SimulatedOrder] = book.load(account.account_id)
+        self._by_fingerprint: dict[str, str] = {
+            order.fingerprint: cid for cid, order in self._orders.items() if order.fingerprint
+        }
         self._cash = float(account.initial_cash)
+        for order in self._orders.values():
+            self._apply_cash(order)
         self._timeout_armed = False
         type(self).instances_created += 1
+
+    def _remember(self, order: SimulatedOrder) -> None:
+        """Put an order in the book — in memory AND durably, never one alone."""
+        self._orders[order.client_order_id] = order
+        if order.fingerprint:
+            self._by_fingerprint[order.fingerprint] = order.client_order_id
+        self._book.save(self._account.account_id, order)
 
     # -- drill controls -----------------------------------------------------
 
@@ -884,8 +1058,7 @@ class PaperReferenceBroker:
             modelled_spread_bps=intent.cost_model.modelled_spread_bps,
         )
         assert_no_naked_short_leg(order.legs, order.filled_ratios, client_order_id=client_order_id)
-        self._orders[client_order_id] = order
-        self._by_fingerprint[fingerprint] = client_order_id
+        self._remember(order)
         self._apply_cash(order)
 
         if self._timeout_armed:
@@ -1006,7 +1179,7 @@ class PaperReferenceBroker:
             config_hash=intent.config_hash,
             spec_json_hash=intent.spec_json_hash,
         )
-        self._orders[client_order_id] = order
+        self._remember(order)
         self._audit.record(
             ExecutionEventType.REJECTION,
             client_order_id=client_order_id,
@@ -1064,7 +1237,7 @@ class PaperReferenceBroker:
             state=OrderState.CANCELLED,
             raw_status_verbatim="cancelled before any fill",
         )
-        self._orders[client_order_id] = cancelled
+        self._remember(cancelled)
         self._audit.record(
             ExecutionEventType.CANCELLATION,
             client_order_id=client_order_id,
