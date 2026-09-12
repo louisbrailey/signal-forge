@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -244,17 +245,19 @@ def test_ensure_grid_account_is_idempotent(session: Session) -> None:
     assert float(a.initial_cash) == pytest.approx(float(cfg.starting_cash))
 
 
-def test_grid_daily_is_registered_as_a_manual_job_and_chained_after_eod() -> None:
-    import inspect
-
+def test_grid_daily_is_registered_as_a_manual_job_and_scheduled_after_universe_update() -> None:
     from signalforge import scheduler as sched
 
     assert "grid_daily" in sched.MANUAL_JOBS
     assert sched.MANUAL_JOBS["grid_daily"] is sched.job_grid_daily
-    src = inspect.getsource(sched.job_daily_eod_update)
-    assert 'guarded("grid_daily", job_grid_daily)()' in src
-    # It runs AFTER the approved-scope scan, on the freshly completed bars.
-    assert src.index("approved_scope_scan") < src.index("grid_daily")
+    specs = {j.name: j for j in sched.default_job_specs()}
+    assert "grid_daily" in specs
+    g, u = specs["grid_daily"], specs["universe_update"]
+    assert (g.cron_hour, g.cron_minute) > (u.cron_hour, u.cron_minute)
+    src = Path(sched.__file__).read_text()
+    assert (
+        'guarded("grid_daily", job_grid_daily)()' not in src
+    )  # no longer chained into the EOD update
 
 
 def test_grid_config_is_excluded_from_the_approval_scope_hash() -> None:

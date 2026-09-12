@@ -399,10 +399,9 @@ def job_daily_eod_update() -> None:
         # Operational Status page shows it by name) — a failure still propagates
         # and also marks daily_eod_update failed.
         guarded("approved_scope_scan", job_approved_scope_scan)()
-        # The mechanical grid runs last, on the freshly completed bars, behind
-        # its own config flag (research.grid.enabled, default False). Nested
-        # guard so it leaves its OWN JobRun row and obeys the kill switch.
-        guarded("grid_daily", job_grid_daily)()
+        # The mechanical grid is NOT chained here: it reads the bulk universe
+        # source that ``universe_update`` (18:15 ET) refreshes, so it has its own
+        # cron slot after that job (see default_job_specs).
     finally:
         _EOD_UPDATE_LOCK.release()
 
@@ -592,6 +591,16 @@ def default_job_specs() -> list[JobSpec]:
             "Post-close liquid-universe bulk update + screen (config-gated OFF; EOD only)",
             cron_hour=18,
             cron_minute=15,
+        ),
+        # After the bulk universe refresh: the mechanical grid evaluates the day's
+        # closes for its 1,000-symbol universe (config-gated; SIMULATED account).
+        JobSpec(
+            "grid_daily",
+            job_grid_daily,
+            24 * 60,
+            "Mechanical grid daily cycle on the refreshed bulk universe (config-gated)",
+            cron_hour=18,
+            cron_minute=50,
         ),
         JobSpec(
             "catch_up",
