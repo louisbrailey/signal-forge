@@ -289,8 +289,9 @@ def job_approved_scope_scan() -> None:
     UNIVERSE, on fresh, complete data
     (``research.approved_scope_scan.data_readiness``) — a stale feed, a
     non-ok ingestion, or missing bars for the latest session blocks that
-    universe (and only that universe) and records why. Never intraday,
-    never options, never an alert.
+    universe (and only that universe) and records why. Never options, never
+    an alert; INTRADAY only if ``research.intraday.operating_enabled`` is on
+    (default off), the single flag ``research.intraday_policy`` owns.
 
     When the operator setting ``auto_simulate_qualified_signals`` is ON, the
     scan's own gate-PASSED candidates are then offered to
