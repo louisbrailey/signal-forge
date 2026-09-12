@@ -357,35 +357,19 @@ ignore_imports = ["signalforge.llm.client -> httpx"]
 # ADR, ARCHITECTURE.md and tests/safety/test_s15_execution_boundary.py all agree.
 # ---------------------------------------------------------------------------
 
-# S15a is written out in full here but is COMMENTED OUT until signalforge.execution
-# exists (I-E2), because import-linter 2.15 raises
-#     Module 'signalforge.execution' does not exist.
-# for a missing *source* module (ForbiddenContract._check_all_modules_exist_in_graph),
-# while a missing *forbidden* module is tolerated. So S15b and the S14 addition below
-# are live from this commit and bind the moment the package appears; S15a cannot be
-# live before the package exists without failing `make lint` outright.
-#
-# S15a enforces nothing today regardless (it constrains what execution imports, and
-# there is no execution code), so nothing is lost by the wait — but it must not be
-# forgotten. `test_s15a_contract_is_active_once_execution_exists` in
-# tests/safety/test_s15_execution_boundary.py FAILS the safety suite the moment
-# signalforge.execution exists while this block is still commented out.
-#
-# Verified green against a throwaway stub src/signalforge/execution/__init__.py
-# (docstring + EXECUTION_DISABLED_BY_DEFAULT only) per D6 ADR §17.2 requirement 2;
-# the stub was removed and is not part of this commit.
-#
-# [[tool.importlinter.contracts]]
-# name = "S15a: the execution layer never imports the LLM, agents, alerts, scan, or SF1000 layers"
-# type = "forbidden"
-# source_modules = ["signalforge.execution"]
-# forbidden_modules = [
-#     "signalforge.llm",
-#     "signalforge.agents",
-#     "signalforge.alerts",
-#     "signalforge.research.scan",
-#     "signalforge.sf1000",
-# ]
+# S15a was staged (commented out) in I-E1 because import-linter refuses a missing
+# *source* module; signalforge.execution exists as of I-E2, so it is live here.
+[[tool.importlinter.contracts]]
+name = "S15a: the execution layer never imports the LLM, agents, alerts, scan, or SF1000 layers"
+type = "forbidden"
+source_modules = ["signalforge.execution"]
+forbidden_modules = [
+    "signalforge.llm",
+    "signalforge.agents",
+    "signalforge.alerts",
+    "signalforge.research.scan",
+    "signalforge.sf1000",
+]
 
 [[tool.importlinter.contracts]]
 name = "S15b: nothing outside the execution layer may import it — no LLM, agent, app, research, alert, or SF1000 code path reaches an order"
