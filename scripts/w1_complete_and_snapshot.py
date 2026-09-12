@@ -67,7 +67,9 @@ def main() -> int:
                     select(OHLCVDaily.session_date)
                     .where(OHLCVDaily.instrument_id == inst.id, OHLCVDaily.source == "massive")
                     .order_by(OHLCVDaily.session_date)
-                ).scalars().all()
+                )
+                .scalars()
+                .all()
                 if inst is not None
                 else []
             )
@@ -105,8 +107,10 @@ def main() -> int:
             for d in s.scalars(select(DataSnapshot))
             if set(d.symbols_json) == set(symbols) and d.key != key
         ]
-        print(f"shadowing: existing row with key={key!r}: {existing.id if existing else None}; "
-              f"other snapshots with the same symbol set: {same_set}")
+        print(
+            f"shadowing: existing row with key={key!r}: {existing.id if existing else None}; "
+            f"other snapshots with the same symbol set: {same_set}"
+        )
         if not args.create:
             print("dry run — pass --create to write the keyed DataSnapshot row.")
             return 0
@@ -117,8 +121,10 @@ def main() -> int:
             s, key=key, symbols=symbols, description=DESCRIPTION, source_note=SOURCE_NOTE
         )
         s.flush()
-        print(f"created/resolved DataSnapshot id={snap.id} key={snap.key!r} n={len(snap.symbols_json)} "
-              f"reusable={snap.reusable_by_new_evaluations}")
+        print(
+            f"created/resolved DataSnapshot id={snap.id} key={snap.key!r} "
+            f"n={len(snap.symbols_json)} reusable={snap.reusable_by_new_evaluations}"
+        )
     return 0
 
 

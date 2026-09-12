@@ -40,15 +40,16 @@ def main() -> int:
     ap.add_argument("--confirm", action="store_true", help="actually write the evaluation")
     args = ap.parse_args()
 
-    strat = next(
-        (s for s in default_strategies() if s.spec().name == args.strategy), None
-    )
+    strat = next((s for s in default_strategies() if s.spec().name == args.strategy), None)
     if strat is None:
-        print(f"unknown strategy {args.strategy!r}; known: {[s.spec().name for s in default_strategies()]}")
+        known = [s.spec().name for s in default_strategies()]
+        print(f"unknown strategy {args.strategy!r}; known: {known}")
         return 2
     if not args.confirm:
-        print("dry run — pass --confirm to write the evaluation (spends a sealed look for a "
-              "never-sealed (version, snapshot) pair).")
+        print(
+            "dry run — pass --confirm to write the evaluation (spends a sealed look for a "
+            "never-sealed (version, snapshot) pair)."
+        )
         return 0
 
     with session_scope(write=True) as s:
