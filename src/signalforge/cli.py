@@ -878,6 +878,309 @@ def options_simulate_cmd(
     typer.echo(f"  {res.disclaimer}")
 
 
+def _options_gate_line(g: Any) -> tuple[str, str]:
+    label = f"{g.number}{'.' + g.label.split('.', 1)[-1] if g.label else ''}"
+    return ("PASS" if g.passed else "FAIL", f"{g.label or label}. {g.name}: {g.detail}")
+
+
+@options_app.command("evaluate-promotion")
+def options_evaluate_promotion_cmd(
+    strategy: Annotated[
+        str, typer.Option(help="Options strategy key, e.g. 'options_short_vertical.medium_swing'.")
+    ],
+    snapshot_key: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "The EXACT key of an options-scoped DataSnapshot. Mandatory: the unkeyed "
+                "fallback resolves by symbol set alone, so an options run would bind to the "
+                "live equity snapshot and collapse the two sealed ledgers (D4 §2.9b)."
+            )
+        ),
+    ],
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Assemble the evidence and print the ladder. Writes nothing, seals nothing.",
+        ),
+    ] = True,
+    confirm: Annotated[
+        bool,
+        typer.Option(
+            "--confirm",
+            help=(
+                "Actually run the ladder: writes a StrategyPromotionEvaluation and, for a "
+                "never-sealed (version, snapshot) pair, CONSUMES A SEALED LOOK."
+            ),
+        ),
+    ] = False,
+    since: Annotated[str, typer.Option(help="YYYY-MM-DD; window start.")] = "",
+    until: Annotated[str, typer.Option(help="YYYY-MM-DD; window end (default: today).")] = "",
+    sealed_days: Annotated[
+        int, typer.Option(help="Length of the sealed window at the end of the span.")
+    ] = 365,
+    proxy: Annotated[str, typer.Option(help="Regime / benchmark proxy symbol.")] = "SPY",
+    grid: Annotated[
+        bool,
+        typer.Option(
+            "--grid",
+            help=(
+                "Also run gate 5's sensitivity grid (96 pre-sealed re-runs per underlying). "
+                "Cached on (version, snapshot key, options_config_hash)."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Run the OPTIONS gate ladder for one strategy on one options-scoped snapshot.
+
+    Mirrors ``evaluate-promotion`` and ``scripts/evaluate_on_snapshot.py``, and is
+    a **separate command** for the same reason ``evaluate_options_promotion`` is a
+    separate function: the equity path must not gain an asset-class branch.
+
+    ``--dry-run`` (the default) assembles the evidence and prints the ladder
+    through the read-only preview — no evaluation row, no sealed test, no look.
+    ``--confirm`` runs the real ladder and can spend a look, which is why it
+    refuses while the worker holds the SQLite write lock.
+
+    Three refusals, all exiting non-zero: a missing D5 pre-registration file,
+    coverage below gate 0.c/0.d's pre-registered floors, and (``--confirm`` only)
+    a worker holding the write lock. On a ``--dry-run`` the refusal is printed and
+    the ladder is still shown as a diagnostic, but the exit code stays non-zero so
+    nothing can mistake a refused rehearsal for a pass.
+    """
+    ensure_not_engaged()
+    from collections.abc import Mapping
+    from datetime import date as _date
+
+    from sqlalchemy import select
+
+    from signalforge.db.models import DataSnapshot
+    from signalforge.db.session import session_scope, set_write_intent
+    from signalforge.research.options_evidence import (
+        assemble_options_evidence,
+        coverage_preflight,
+        latest_options_coverage_summary,
+        options_ladder_preview,
+        preregistration_path,
+    )
+    from signalforge.research.options_gates import OptionsGateThresholds, OptionsWindow
+    from signalforge.research.options_strategies import default_options_strategies
+    from signalforge.worker_lock import worker_lock_holder
+
+    strat = next((s for s in default_options_strategies() if s.key == strategy), None)
+    if strat is None:
+        known = [s.key for s in default_options_strategies()]
+        typer.secho(f"unknown options strategy {strategy!r}; known: {known}", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+
+    end = _date.fromisoformat(until) if until else _date.today()
+    start = _date.fromisoformat(since) if since else end - timedelta(days=365 * 8)
+    sealed_start = end - timedelta(days=sealed_days)
+    if sealed_start <= start:
+        typer.secho(
+            f"--sealed-days {sealed_days} leaves no pre-sealed span between {start} and {end}",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2)
+    window = OptionsWindow(
+        start=start,
+        pre_sealed_end=sealed_start - timedelta(days=1),
+        sealed_start=sealed_start,
+        end=end,
+    )
+    th = OptionsGateThresholds()
+
+    refusals: list[str] = []
+    prereg = preregistration_path()
+    if not prereg.is_file():
+        refusals.append(
+            f"the D5 pre-registration file is missing ({prereg}); an options evaluation may not "
+            "run without the document that froze its parameters (R1)"
+        )
+    if confirm:
+        holder = worker_lock_holder()
+        if holder:
+            refusals.append(
+                f"the scheduler worker holds the write lock (holder: {holder}); a --confirm run "
+                "opens a write transaction and would starve every worker job for longer than the "
+                "busy timeout. Stop the worker first (docs/SQLITE_CONCURRENCY.md)"
+            )
+
+    with session_scope(write=False) as session:
+        snap = session.scalar(select(DataSnapshot).where(DataSnapshot.key == snapshot_key))
+        if snap is None:
+            typer.secho(f"no DataSnapshot with key {snapshot_key!r}", fg=typer.colors.RED)
+            raise typer.Exit(code=2)
+        if snap.options_scope_json is None:
+            typer.secho(
+                f"DataSnapshot {snapshot_key!r} carries no options_scope_json — an options "
+                "evaluation needs an options-scoped snapshot (D4 §2.9b)",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=2)
+        pre = coverage_preflight(
+            latest_options_coverage_summary(
+                session, window_start=window.start, window_end=window.end
+            )
+        )
+        refusals.extend(pre.reasons)
+        options_config_hash = str(
+            (snap.options_scope_json or {}).get("options_config_hash", "") or ""
+        )
+
+    if refusals:
+        typer.secho("\nREFUSED:", fg=typer.colors.RED, bold=True)
+        for r in refusals:
+            typer.secho(f"  - {r}", fg=typer.colors.RED)
+        if confirm:
+            typer.secho(
+                "no evidence was assembled, no row was written and no sealed look was spent.",
+                fg=typer.colors.YELLOW,
+            )
+            raise typer.Exit(code=2)
+        typer.secho(
+            "--dry-run continues as a DIAGNOSTIC; the exit code stays non-zero.",
+            fg=typer.colors.YELLOW,
+        )
+
+    if confirm and dry_run:
+        # --dry-run defaults to True, so --confirm must win when both are present;
+        # the alternative (refusing the combination) would make --confirm unusable
+        # without also typing --no-dry-run.
+        dry_run = False
+
+    sensitivity_summary = None
+    with session_scope(write=confirm) as session:
+        if confirm:
+            # Rule 4 (docs/SQLITE_CONCURRENCY.md): drop write intent for the long
+            # read/compute phase, re-arm it only for the write.
+            session.commit()
+            set_write_intent(session, False)
+        snap = session.scalar(select(DataSnapshot).where(DataSnapshot.key == snapshot_key))
+        assert snap is not None  # re-read in this scope; existence checked above
+
+        if grid:
+            from dataclasses import replace as _dc_replace
+
+            from signalforge.research.options_sensitivity import run_options_sensitivity
+            from signalforge.research.options_strategies import VERSION, OptionsShortVertical
+
+            base_params = strat.params
+
+            def _factory(p: Mapping[str, Any]) -> Any:
+                return OptionsShortVertical(
+                    _dc_replace(base_params, **dict(p)),
+                    selection_cost_model=strat.selection_cost_model,
+                    q_lookup=strat.q_lookup,
+                    q_source=strat.q_source,
+                    risk_free_rate=strat.risk_free_rate,
+                    r_source=strat.r_source,
+                    proxy_regimes=strat.proxy_regimes,
+                )
+
+            report = run_options_sensitivity(
+                session,
+                strat,
+                _factory,
+                baseline_params={k: getattr(base_params, k) for k in strat.sensitivity_axes()},
+                dataset_snapshot=snap,
+                window=window,
+                version=VERSION,
+                options_config_hash=options_config_hash,
+                thresholds=th,
+            )
+            sensitivity_summary = report.summary(th)
+            typer.secho(
+                f"gate-5 grid: {report.evaluated_points}/{report.declared_points} points "
+                f"evaluated, {len(report.dropped_points)} dropped, "
+                f"cache_hit={report.cache_hit}",
+                fg=typer.colors.CYAN,
+            )
+
+        assembled = assemble_options_evidence(
+            session,
+            strat,
+            dataset_snapshot=snap,
+            window=window,
+            thresholds=th,
+            proxy_symbol=proxy,
+            sensitivity=sensitivity_summary,
+            include_sealed=confirm,
+        )
+        typer.secho(
+            f"\n{strat.key} on {snap.key!r} (id {snap.id}, {len(snap.symbols_json)} symbols)  "
+            f"window {window.start}..{window.end}  sealed from {window.sealed_start}",
+            bold=True,
+        )
+        typer.echo(
+            f"  underlyings evaluable: "
+            f"{sum(1 for u in assembled.per_underlying if u.dual is not None)}"
+            f"/{len(assembled.per_underlying)}   "
+            f"pooled structures: {len(assembled.evidence.dual.baseline.trades)}   "
+            f"OOS: {assembled.evidence.n_oos_trades}"
+        )
+        typer.echo(
+            f"  clustered CI {assembled.clustered_d4.unit}: "
+            f"[{assembled.clustered_d4.low:+.4f}, {assembled.clustered_d4.high:+.4f}]R  "
+            f"k={assembled.clustered_d4.n_clusters}  deff={assembled.clustered_d4.deff:.2f}  "
+            f"seed={assembled.clustered_d4.seed}"
+        )
+        typer.echo(
+            f"  F11 {assembled.clustered_f11.unit}: low {assembled.clustered_f11.low:+.4f}R "
+            f"(NO-SHIP if <= {th.min_bootstrap_ci_low_r:+.4f}R)"
+        )
+        for note in assembled.notes:
+            typer.secho(f"  note: {note}", fg=typer.colors.YELLOW)
+
+        if dry_run:
+            gates = options_ladder_preview(assembled.evidence, window=window, thresholds=th)
+            typer.secho("\n  DRY RUN — no evaluation row, no sealed test, no look", bold=True)
+            for g in gates:
+                mark, line = _options_gate_line(g)
+                typer.secho(
+                    f"  [{mark}] {line}",
+                    fg=typer.colors.GREEN if g.passed else typer.colors.RED,
+                )
+            typer.echo("  sealed looks: none — a dry run cannot read or create a sealed test.")
+        else:
+            from signalforge.research.options_promotion import evaluate_options_promotion
+            from signalforge.settings_store import effective_research_config
+
+            cfg = effective_research_config(session)
+            session.commit()
+            set_write_intent(session, True)
+            result = evaluate_options_promotion(
+                session,
+                strat.spec(),
+                symbols=list(snap.symbols_json),
+                window=window,
+                dataset_snapshot=snap,
+                evidence=assembled.evidence,
+                thresholds=th,
+                config=cfg,
+                options_config_hash=options_config_hash,
+            )
+            colour = typer.colors.GREEN if result.passed else typer.colors.YELLOW
+            typer.secho(f"\n  -> {result.verdict}", fg=colour, bold=True)
+            for g in result.gates:
+                mark, line = _options_gate_line(g)
+                typer.secho(
+                    f"  [{mark}] {line}",
+                    fg=typer.colors.GREEN if g.passed else typer.colors.RED,
+                )
+            typer.echo(f"  sealed looks: {_sealed_look_summary(result)}")
+            typer.echo(
+                f"  k_effective {result.k_effective} "
+                f"(prior {result.sealed_look_prior} + abandonments "
+                f"{result.presealed_abandonments}); program looks {result.options_program_looks}"
+            )
+
+    typer.echo("Research signal only — SIMULATION ONLY. No order was placed.")
+    if refusals:
+        raise typer.Exit(code=2)
+
+
 @app.command()
 def universe() -> None:
     """Preview the conservative liquid-universe screen against the local data."""

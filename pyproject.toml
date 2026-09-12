@@ -283,6 +283,12 @@ source_modules = [
     "signalforge.research.options_promotion",
     "signalforge.research.options_strategies",
     "signalforge.research.options_backtest_runner",
+    # W3b: the evidence assembler and the gate-5 grid runner are the two modules
+    # that now READ real data for the ladder, which makes them the two most
+    # tempting places to write "the grid cleared, so alert on it". Named here in
+    # the same commit that creates them, for the same reason as the four above.
+    "signalforge.research.options_evidence",
+    "signalforge.research.options_sensitivity",
 ]
 forbidden_modules = [
     "signalforge.llm",
