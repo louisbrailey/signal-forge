@@ -3757,6 +3757,79 @@ def execution_cycle_cmd() -> None:
     typer.secho(f"{EXECUTION_CYCLE_JOB} finished", fg=typer.colors.GREEN)
 
 
+@execution_app.command("drill")
+def execution_drill(
+    all_drills: Annotated[
+        bool, typer.Option("--all", help="Run every Phase V drill (D6 ADR §21).")
+    ] = False,
+    name: Annotated[
+        list[str] | None,
+        typer.Option("--name", help="Run one drill by name, e.g. --name V1. Repeatable."),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="List what would run. Opens no database and runs nothing."),
+    ] = False,
+    report: Annotated[
+        bool, typer.Option("--report/--no-report", help="Write the dated drill report.")
+    ] = True,
+) -> None:
+    """Run the Phase V drills against `paper_reference` on a SCRATCH database.
+
+    Each drill builds its own world in a throwaway SQLite file under a temporary
+    directory, exercises one refusal the execution layer has to make, and
+    records the audit rows it observed. `scripts/execution_drills.py` refuses
+    outright if the database it is handed resolves to the live file.
+
+    Run in a SUBPROCESS deliberately: the drills redirect `DATABASE_URL` and
+    `SIGNALFORGE_DATA_DIR` at their scratch tree, and that redirection must not
+    survive into this process, where the next command would inherit it.
+
+    The drill harness lives under `scripts/` and therefore only exists in a
+    source checkout; from an installed wheel this command says so rather than
+    guessing.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "execution_drills.py"
+    if not script.is_file():
+        typer.secho(
+            f"the drill harness is not present at {script} — it ships with the source "
+            "checkout, not with an installed package. Clone the repository to run the drills.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2)
+
+    argv = [sys.executable, str(script)]
+    if all_drills:
+        argv.append("--all")
+    for one in name or []:
+        argv += ["--name", one]
+    if dry_run:
+        argv.append("--dry-run")
+    if not report:
+        argv.append("--no-report")
+    if not all_drills and not name:
+        typer.secho(
+            "nothing selected: pass --all, or --name V1 (repeatable). --dry-run lists them.",
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(code=2)
+
+    completed = subprocess.run(argv, check=False)  # noqa: S603 - fixed argv, no shell
+    record(
+        "execution.drill",
+        actor="cli",
+        entity="paper_reference",
+        selected="all" if all_drills else ",".join(name or []),
+        dry_run=dry_run,
+        exit_code=completed.returncode,
+    )
+    raise typer.Exit(code=completed.returncode)
+
+
 def _configured_adapter_name() -> str:
     from signalforge.db.session import session_scope
     from signalforge.settings_store import effective_research_config

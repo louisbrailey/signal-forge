@@ -215,3 +215,184 @@ preconditions report "daily bars current" and "approved-scope scan data readines
 once per distinct approved universe. The activation precondition
 "exactly two PAPER_APPROVED strategy versions" is replaced by
 **"every PAPER_APPROVED version has a live-matching scope"** — no count is hard-coded.
+
+
+---
+
+# Execution layer — arming ONE strategy on `paper_reference` (2026-09-12)
+
+**This section is DOCUMENTATION ONLY. None of it has been run. Nothing is armed, the
+execution layer is disabled, and `execution_limits` has no row.** It is the exact,
+reviewed command sequence for the D6 execution ADR's §12 ceremony against the LOCAL
+`paper_reference` adapter — a simulator that opens no socket and reaches no broker. It is
+a separate thing from the equity paper probation documented above: that one produces
+SIMULATED fills in `paper_trade`; this one produces order records in `execution_event`
+against an adapter.
+
+Read `docs/PREREGISTRATION_execution_limits_v1.md` first. Arming is refused without it.
+
+## Before anything: what is true today
+
+| Fact | Where |
+|---|---|
+| `EXECUTION_DISABLED_BY_DEFAULT is True` | `src/signalforge/execution/__init__.py` |
+| `research.execution.enabled` ships **False** | `config/research.py::ExecutionConfig` |
+| Zero `armed_strategy` rows; zero `execution_limits` rows | the live database |
+| The kill switch blocks **opening** and never blocks **closing** | §7, drilled as V1/V18 |
+| Arming EXPIRES after at most 7 days, and there is no "resume" | `arming.ARMING_EXPIRY_DAYS` |
+| `paper_reference` fills are **drill artifacts**, excluded from every gate | §3.1 rule 4, T10 |
+
+## Blockers — the ceremony cannot be completed today
+
+Found while writing this sequence (2026-09-12). Each is a real gap, not a missing
+permission, and each blocks the step it is listed under.
+
+| # | Blocker | Where | Blocks |
+|---|---|---|---|
+| B1 | **No supported interface sets `research.execution.enabled`.** There is no CLI command and the `/settings` form builds its overrides dict from a fixed field list that does not include the `execution` section. The only path is a direct `set_setting(session, "research_overrides", {...})` call. | `cli.py` (absent); `app/routers/dashboard.py:340-380` | step 2 |
+| B2 | **No supported interface creates an `execution_limits` row.** Nothing in `src/` constructs `ExecutionLimits`; the model, the loader and the validator exist, the writer does not. Without a row, `load_active_limits` returns `None`, `may_open` blocks on L0, and the ceremony's S15 fails. | `db/models/execution.py::ExecutionLimits`; no writer anywhere | step 3 |
+| B3 | **The CLI cannot build an adapter.** `_execution_adapter()` looks up `brokers.resolve_adapter`; the registry exports `build_adapter` and `selected_adapter_name`, and no `resolve_adapter` exists, so the `AttributeError` is swallowed and the function always returns `None`. With no adapter the ceremony takes **no `is_paper` proof** and refuses on S8 every time, and `signalforge execution cycle` always runs adapter-less. `build_adapter` would also need the five required keyword arguments (audit sink, simulated account, expected account id, information set, clock), which `_execution_adapter` does not supply. | `cli.py:3345-3373`; `execution/brokers/__init__.py` | steps 4-7 |
+
+Until B1-B3 are closed, the sequence below **refuses at S8 and S15** — which is the
+correct behaviour, and is the reason nothing is armed. `scripts/execution_drills.py`
+exercises the whole ceremony without them because it constructs the adapter and the
+limits row itself, in a scratch database.
+
+## Step 0 — prove the drills pass, on a scratch database
+
+```bash
+uv run signalforge execution drill --all
+```
+
+Runs the D6 §21 Phase V drills against `paper_reference` in a throwaway SQLite file
+(the runner refuses any URL that resolves to the live database) and writes a dated
+report to `docs/research/execution_drills/`. `--dry-run` lists them without opening a
+database at all. A drill failure is a stop, not a warning.
+
+## Step 1 — read the posture, and confirm nothing is armed
+
+```bash
+uv run signalforge execution status
+```
+
+Read-only: it never arms, never disarms and never contacts a broker. Expect
+`execution.enabled = False`, `execution_limits: NO active, parseable row`, and
+`armed strategies: NONE`.
+
+## Step 2 — enable the layer (blocked by B1)
+
+`research.execution.enabled` must become True. It is necessary and nowhere near
+sufficient: with no unexpired `armed_strategy` row, zero orders can be submitted
+whatever this flag says. It is deliberately excluded from `SCOPE_HASH_FIELDS`, so
+turning it on does **not** move `config_hash` and does not put any live approval out of
+scope — that exclusion is the fix for the 2026-09-11 incident.
+
+There is no command for this yet (B1). The change belongs behind an audited CLI command
+of the same shape as `paper-probation-enable`, writing `AppSettingHistory` plus an
+`AuditLog` row. **Do not edit the database by hand to work around it.**
+
+## Step 3 — write the pre-registered `execution_limits` row (blocked by B2)
+
+Exactly the row tabulated in `docs/PREREGISTRATION_execution_limits_v1.md`, with
+`preregistration_doc_id = "PREREGISTRATION_execution_limits_v1"`. Rows are never edited:
+a change is a new row plus `superseded_at` on the old one, and **superseding RESETS the
+decision-10 evidence counter** for every strategy armed under it (§7b rule 3).
+
+There is no command for this yet (B2). It belongs as `signalforge execution set-limits`,
+reading the values from the pre-registration document rather than from flags, so the row
+and the document cannot disagree.
+
+Verify afterwards with `signalforge execution status`: the `execution_limits id=…` line
+must print, and it must name the pre-registration document.
+
+## Step 4 — prove the account is flat and the evidence exists
+
+The ceremony re-verifies both live and refuses on either, so this is a read, not a
+promise:
+
+* **decision 10** — ≥ 20 closed paper trades with non-negative expectancy under the
+  health monitor, counted **only since the active limits row was created**. Check with
+  `uv run signalforge strategy-health`.
+* **§10 rule 2** — `adapter.positions()` and `adapter.open_orders()` must both be empty.
+  Arming begins from a flat, empty account; "could not check" is not "is flat" and blocks
+  identically.
+
+## Step 5 — the ceremony (blocked by B3)
+
+```bash
+uv run signalforge execution arm <STRATEGY_VERSION_ID> \
+  --account-id 'PAPER-SIM-<the id you read OUT OF BAND from the broker>' \
+  --preregistration PREREGISTRATION_execution_limits_v1 \
+  --adapter paper_reference \
+  --structure-type equity \
+  --approval-level 0 \
+  --max-notional 1000 \
+  --max-orders-per-day 10 \
+  --expires-days 7 \
+  --yes
+```
+
+What each part is doing, and what refuses:
+
+* `--account-id` is typed **out of band** — read from the broker's own interface, not
+  copied from a config file. `is_paper()` must prove the broker's own response body names
+  exactly this string (S8). A local flag is not a proof: the flag and a wrong base URL are
+  set in the same place by the same mistake.
+* `--preregistration` must name a real file under `docs/` (S3). The check is a filename
+  match; that the document enumerated the grid is a review fact, and the id is written
+  onto the arming row so a reviewer can follow it here.
+* `--approval-level 0` is equities only. An options structure needs the operator's real
+  level, which is decision 3 and is still outstanding.
+* `--expires-days 7` is the **maximum** (decision 4). A larger number is refused, not
+  clamped. There is no indefinite arming.
+* `--yes` acknowledges the four §12 step 3 facts the command prints above the prompt.
+  Read them; (ii) and (iv) are the two an operator otherwise discovers during an outage:
+  **nothing is auto-liquidated**, and **engaging the kill switch while the worker is down
+  cancels nothing at the broker.**
+* Omit `--confirm` so the command **prompts** for the typed phrase. It is exactly
+  `ARM <STRATEGY_VERSION_ID> ON paper_reference`, and it names the version and the adapter
+  so a confirmation typed for one arming cannot be pasted into another.
+
+The command prints the full precondition table (A0, S1–S15) before it asks for anything,
+and refuses on the first failure. Do not pass `--override-evidence` unless you intend the
+override to be audited with the observed `n` and expectancy recorded beside your typed
+reason — that is what it does, deliberately, because an override is taken **after** seeing
+the outcome.
+
+## Step 6 — run the worker that carries the cycle
+
+```bash
+uv run python -m signalforge.cli run-scheduler
+```
+
+**The execution cycle exists only in the CLI-launched worker.** Started from the app
+process there is no execution job at all: no submissions, and equally no heartbeat, no
+reconciliation, no drain and no protective cycle (drilled as V19). One run by hand:
+
+```bash
+uv run signalforge execution cycle
+```
+
+## Step 7 — the observation window
+
+One armed strategy, smallest viable size, a stated window, and **daily reconciliation
+review by the operator** (§21). Read `signalforge execution status` every session:
+`dead man: ALIVE`, a recent clean reconciliation, and the arming's own expiry.
+
+## Stopping — three separate levers, none of which blocks closing
+
+```bash
+uv run signalforge execution kill --engage --reason "..."   # K2, execution-only, fail-CLOSED
+uv run signalforge killswitch on --reason "..."             # K1, the existing global switch
+uv run signalforge execution disarm <STRATEGY_VERSION_ID> --reason "..."
+```
+
+Any of them ends the authority to **open**. None of them closes a position, and none of
+them is an auto-liquidation: close by hand, at the broker, or through the protective
+close lane. Disarming keeps the row — reconciliation and the `is_paper` proof read the
+most recent `armed_strategy` row for an adapter **including disarmed and expired ones**,
+and deleting it would create a state the system cannot leave without a manual database
+write.
+
+If the worker is not running, none of the above reaches the broker at all. That is
+acknowledgement (iv), and it is why it is an acknowledgement rather than a footnote.
