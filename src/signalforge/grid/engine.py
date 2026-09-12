@@ -72,7 +72,22 @@ NONE = "none"
 
 
 def _q(x: float) -> float:
+    """Position quantities, rounded to the stored precision."""
     return round(x, QTY_DP)
+
+
+def _order_qty(usd: float, price: float) -> float:
+    """Shares for a NOTIONAL order, rounded DOWN to the stored precision.
+
+    Rounding to nearest would let ``qty * price`` land a fraction of a cent above
+    the dollar amount asked for, which then trips the per-symbol cap and the cash
+    check at fill time. With ``per_symbol_cap == buy_usd`` that rejected roughly
+    half of every buy in the 1000-symbol / $5-cap run — a pure rounding artifact,
+    not an economic constraint. A real fractional-share broker fills at most the
+    notional requested, so floor is also the honest model.
+    """
+    scale = 10**QTY_DP
+    return math.floor(max(usd, 0.0) / price * scale) / scale
 
 
 @dataclass(frozen=True, slots=True)
@@ -602,7 +617,7 @@ def execute_fill(
         return None, cash
 
     if dec.action == BUY:
-        qty = _q(params.buy_usd / px)
+        qty = _order_qty(params.buy_usd, px)
         if qty <= 0:
             return None, cash
         notional = qty * px
@@ -642,7 +657,7 @@ def execute_fill(
     # --- SELL: never more than the shares held, never more than sell_usd.
     if st.qty <= 0:
         return None, cash
-    qty = min(st.qty, _q(params.sell_usd / px))
+    qty = min(st.qty, _order_qty(params.sell_usd, px))
     qty = _q(qty)
     # Never leave an unsellable stub. A $10 sell out of a $10.50 position would
     # leave $0.50, which can never clear the per-order minimum again: the sell is

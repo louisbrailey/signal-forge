@@ -293,6 +293,29 @@ def test_budget_consistency_flag() -> None:
     assert also.budget_is_consistent
 
 
+def test_a_buy_never_spends_more_than_buy_usd() -> None:
+    """Order quantity floors, so the notional can never exceed the amount asked
+    for — otherwise a rounding cent trips the cap and cash checks at fill."""
+    p = GridParams(starting_cash=1_000.0, per_symbol_cap=50.0, buy_usd=5.0)
+    for open_px in (7.0, 11.0, 13.0, 37.0, 101.0, 333.0, 1_234.56):
+        st = GridState(symbol="AAA", anchor=100.0, tracking=True)
+        dec = decide(close=94.0, anchor=100.0, qty=0.0, cost_basis=0.0, cash=1_000.0, params=p)
+        trade, _cash = execute_fill(
+            st, dec, date(2024, 1, 2), date(2024, 1, 3), open_px, 1_000.0, p
+        )
+        assert trade is not None, open_px
+        assert trade.usd <= p.buy_usd + 1e-9, (open_px, trade.usd)
+
+
+def test_cap_equal_to_buy_size_still_fills_the_first_buy() -> None:
+    """per_symbol_cap == buy_usd is configuration (b1); it must not self-block."""
+    p = GridParams(starting_cash=5_000.0, per_symbol_cap=5.0, buy_usd=5.0)
+    series = {f"S{i}": _series(f"S{i}", [100.0 + i, 94.0 + i, 94.0 + i]) for i in range(20)}
+    res = run_grid_backtest(series, p, symbols=sorted(series))
+    assert len([t for t in res.trades if t.side == BUY]) == 20
+    assert res.skip_counts.get("skip_at_fill", 0) == 0
+
+
 def test_a_partial_sell_never_leaves_an_unsellable_stub() -> None:
     """$10 out of a $10.50 position would strand $0.50 below the $1 minimum,
     and that stub could never be sold again — so the whole position goes."""
