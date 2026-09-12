@@ -60,8 +60,28 @@ and the prohibition is now enforced in **both** directions rather than one.
 |---|---|
 | I-E1 — contracts (S15b live, S14 amended, S15a staged) + safety tests T1–T13 | done |
 | §18 documentation amendment (roadmap, methodology, capability matrix, ARCHITECTURE invariants) | done |
-| §18 amendment of the shipped strings (`README.md`, `DISCLAIMER.md`, `src/signalforge/options/__init__.py`, `src/signalforge/cli.py` help text, `src/signalforge/__init__.py` docstring) | **outstanding — lands with I-E2**, because those promises are still literally true until the package exists. Safety test T9 fails mechanically the moment it does |
+| §18 amendment of the shipped strings (`README.md`, `DISCLAIMER.md`, `src/signalforge/options/__init__.py`, `src/signalforge/cli.py` help text, `src/signalforge/__init__.py` docstring) | **outstanding — lands with I-E2**, because those promises are still literally true until the package exists. See the note below for exactly what holds the reminder |
 | I-E2 and later | not started; no execution code exists |
+
+**The deviation from §18, recorded rather than glossed.** §18 says "**one commit, all of these
+files, or none of them**", and this was not that: five documents were amended and five shipped
+strings were not. The reason is that the unamended five are still *literally true* while no
+execution package exists, so amending them now would describe a capability the tree does not
+have — but the §18 rule exists precisely because a half-amended repository contradicts itself,
+and that is the state this leaves. It is acceptable only for as long as the reminder is
+mechanical rather than a line in this table.
+
+**What actually holds the reminder.** Safety test T9
+(`tests/safety/test_s15_execution_boundary.py`) fails the moment `src/signalforge/execution`
+exists while any unconditional no-order promise survives, and it was verified against a
+throwaway stub package to report: `src/signalforge/__init__.py`, all four `cli.py` help
+strings, `README.md`, `DISCLAIMER.md`, and two the ADR did not enumerate —
+`data/adapters/massive_options.py` and `grid/live.py`. **One file in the row above is NOT
+covered by T9:** `src/signalforge/options/__init__.py`. Its "no options execution path anywhere
+in this package" is genuinely package-scoped and stays true once execution lives elsewhere; what
+goes stale there is the separate claim that "0DTE alerting, **and spreads** are intentionally
+absent", which decision 12 falsifies by making a short vertical spread the first structure. That
+one is a prose fix I-E2 must make by hand.
 
 The paper-first evidence discipline (`docs/research/STRATEGY_COMPLETION_MAP.md` §1 R1–R10) is
 unchanged by this ADR. No promotion gate or threshold is weakened anywhere in it; every
