@@ -17,6 +17,8 @@ from tests.support import iter_source_files, run_python
 
 EXECUTION_MODULES = (
     "signalforge.execution",
+    "signalforge.execution.brokers",
+    "signalforge.execution.brokers.paper_reference",
     "signalforge.execution.credentials",
     "signalforge.execution.events",
     "signalforge.execution.intents",
@@ -86,8 +88,14 @@ def _execution_sources() -> list:
     return list(iter_source_files("execution"))
 
 
-def test_this_phase_contains_no_adapter_and_no_http_client() -> None:
-    """There is no adapter here: nothing in this package opens a socket."""
+def test_the_package_imports_no_http_client_and_no_socket() -> None:
+    """I-E3 added the first adapter, and it still opens no socket.
+
+    ``brokers/paper_reference.py`` is a local, deterministic simulator: it
+    imports no HTTP client, no ``socket``, and no vendor package, so "nothing
+    in this package opens a socket" is a property of the import graph rather
+    than a claim about behaviour.
+    """
     offenders: list[str] = []
     banned_modules = {"httpx", "requests", "aiohttp", "socket", "urllib", "http"}
     for path in _execution_sources():
@@ -156,3 +164,43 @@ def test_assert_auto_simulate_allowed_is_still_stock_and_etf_only() -> None:
     # options trades flow through equity-shaped sizing, cash, and
     # mark-to-market logic that is provably wrong for options".
     assert "option" not in body
+
+
+def test_importing_the_package_constructs_no_adapter() -> None:
+    """D6 §2: an adapter exists only when the config selects one.
+
+    Walking every submodule in a clean interpreter must leave the adapter
+    class's construction counter at zero — "never instantiated by an import
+    side effect" proved rather than asserted.
+    """
+    code = """
+import importlib, pkgutil
+
+import signalforge.execution as ex
+
+for mod in pkgutil.walk_packages(ex.__path__, "signalforge.execution."):
+    importlib.import_module(mod.name)
+
+from signalforge.execution.brokers.paper_reference import PaperReferenceBroker
+
+assert PaperReferenceBroker.instances_created == 0, PaperReferenceBroker.instances_created
+print("ok")
+"""
+    result = run_python(code)
+    assert result.returncode == 0, result.stderr
+    assert "ok" in result.stdout
+
+
+def test_an_adapter_is_reachable_only_through_the_config_selector() -> None:
+    """The registry maps a name to a LOADER, so no module-level object of the
+    adapter class exists to be picked up by accident."""
+    from signalforge.execution import brokers
+    from signalforge.execution.brokers.paper_reference import PaperReferenceBroker
+
+    module_level_adapters = [
+        name
+        for name, value in vars(brokers).items()
+        if isinstance(value, PaperReferenceBroker)  # pragma: no cover - must stay empty
+    ]
+    assert not module_level_adapters
+    assert brokers.ADAPTER_NAMES == ("paper_reference",)

@@ -37,6 +37,12 @@ class ExecutionEventType(StrEnum):
     """The event vocabulary. Anything the OMS does that a reviewer would want to
     see afterwards has a name here rather than a free-form string."""
 
+    # Added in I-E3. §15 requires an audit record for EVERY adapter call, and
+    # the read-only ones (account, positions, open_orders, order_status, clock)
+    # are not state transitions — reusing STATE_CHANGE or RECONCILED for them
+    # would make the vocabulary lie about what happened. One name, used only
+    # for "the adapter was called", keeps the state-transition types honest.
+    ADAPTER_CALL = "ADAPTER_CALL"
     INTENT_CREATED = "INTENT_CREATED"
     INTENT_REFUSED = "INTENT_REFUSED"
     INTENT_VALIDATED = "INTENT_VALIDATED"

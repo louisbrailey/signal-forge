@@ -24,11 +24,15 @@ the PROTECTIVE_CLOSE lane are built by two different factories with two
 different precondition sets and **opposite** fail directions: a check that
 cannot be evaluated blocks opening and never blocks closing.
 
-State of this phase (I-E2): protocol, intent data model, the two factories, the
-state machine, limits, audit records and credential resolution. **There is no
-adapter here — nothing in this package opens a socket** — no arming ceremony,
-and no scheduler registration. Importing this package performs no network call
-and reads no credential.
+State of this phase (I-E3): protocol, intent data model, the two factories, the
+state machine, limits, audit records, credential resolution, and the **first**
+adapter — ``brokers.paper_reference``, which is local, deterministic and
+network-free, whose fills are drill artifacts fenced off from every gate
+(§3.1 rule 4), and which is reachable only through
+``brokers.build_adapter`` behind the ``execution.enabled`` config flag.
+**Nothing in this package opens a socket.** There is still no arming ceremony
+and no scheduler registration. Importing this package performs no network call,
+reads no credential, and constructs no adapter.
 """
 
 from __future__ import annotations
