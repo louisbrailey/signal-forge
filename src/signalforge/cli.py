@@ -4025,8 +4025,9 @@ def execution_enable(
         typer.Option("--yes", help="Required. Without it this command changes nothing."),
     ] = False,
 ) -> None:
-    """Set ``research.execution.enabled`` True — audited, and NOT sufficient.
+    """Turn the execution layer ON — audited, and nowhere near sufficient.
 
+    Sets `research.execution.enabled` True.
     The one supported way to turn the layer on. Deliberately here and not on the
     web `/settings` form: D6 §12 keeps enabling and arming on the human-typed
     CLI, with no LLM and no app route anywhere on the path (S15b).
@@ -4083,8 +4084,9 @@ def execution_disable(
     ] = False,
     reason: Annotated[str, typer.Option("--reason")] = "operator disabled execution",
 ) -> None:
-    """Set ``research.execution.enabled`` False and DISARM everything live.
+    """Turn the execution layer OFF and DISARM every live arming.
 
+    Sets `research.execution.enabled` False.
     Disabling has to disarm, and this is why: the flag stops the cycle being
     registered, so with the layer off nothing runs the per-cycle auto-disarm
     sweep — a live `armed_strategy` row would sit there unexpiring-in-practice
@@ -4181,7 +4183,7 @@ execution_app.add_typer(limits_app, name="limits")
 
 @limits_app.command("show")
 def execution_limits_show() -> None:
-    """Print the active ``execution_limits`` row. Read-only."""
+    """Print the active `execution_limits` row. Read-only."""
     from signalforge.db.session import session_scope
     from signalforge.execution.limits import load_active_limits
     from signalforge.execution.preregistration import active_limits_rows
@@ -4254,7 +4256,7 @@ def execution_limits_set(
         bool, typer.Option("--yes", help="Required. Without it this command changes nothing.")
     ] = False,
 ) -> None:
-    """Create the active ``execution_limits`` row from a pre-registration document.
+    """Create the active `execution_limits` row from a pre-registration document.
 
     Refuses, rather than defaulting, when: no document with that id exists under
     `docs/`; no row is registered in `execution.preregistration` for it; the
