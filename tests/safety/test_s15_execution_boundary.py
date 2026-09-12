@@ -23,6 +23,7 @@ import tomllib
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 from sqlalchemy.orm import Session
@@ -253,7 +254,44 @@ def test_t2_open_intent_requires_all_seven_preconditions() -> None:
     assert (
         'actor: str = "local-user"' in ledger
     ), "accept_candidate's manual-actor default moved; P6 (ADR §5.3) is keyed on it"
-    _requires_ie2("signalforge.execution.intents.build_open_intent")
+
+    # I-E2 landed build_open_intent. Two facts are asserted here; the behavioural
+    # proof of each precondition (a DB-backed refusal per P1..P7) lives in
+    # tests/execution/test_open_preconditions.py and is required to exist by name.
+    import inspect
+
+    from signalforge.execution import intents
+
+    src = inspect.getsource(intents.build_open_intent)
+    refused = set(re.findall(r'_refuse\(\s*"(P[1-7])"', src)) | set(
+        re.findall(r'_guarded\(\s*"(P[1-7])"', src)
+    )
+    missing = {f"P{n}" for n in range(1, 8)} - refused
+    assert not missing, f"build_open_intent no longer refuses on {sorted(missing)} (ADR §5)"
+
+    proofs = (
+        PKG_ROOT.parent.parent / "tests" / "execution" / "test_open_preconditions.py"
+    ).read_text(encoding="utf-8")
+    unproven = [f"P{n}" for n in range(1, 8) if not re.search(rf"^def test_p{n}_", proofs, re.M)]
+    assert not unproven, f"no behavioural test for {unproven} in test_open_preconditions.py"
+
+    # And the one precondition needing no database: an OPEN intent cannot carry a closing side.
+    from signalforge.execution.intents import IntentRefused, OrderSide
+
+    with pytest.raises(IntentRefused, match="P0"):
+        intents.build_open_intent(
+            None,  # type: ignore[arg-type]  # refused before the session is touched
+            paper_trade_id=1,
+            adapter_name="paper_reference",
+            side=OrderSide.SELL_TO_CLOSE,
+            qty=1,
+            limit_price=1.0,
+            cost_model=intents.CostModelFeedback(1.0, 0.0),
+            limit_decision=None,
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+            max_intent_age_minutes=30,
+            session_end_utc=None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +300,32 @@ def test_t2_open_intent_requires_all_seven_preconditions() -> None:
 
 
 def test_t3_client_order_id_is_stable_across_retries() -> None:
-    _requires_ie2("signalforge.execution.intents.client_order_id")
+    from signalforge.execution.intents import (
+        IntentRefused,
+        OrderLeg,
+        OrderSide,
+        client_order_id_for,
+    )
+
+    def leg(
+        symbol: str = "AAPL", side: OrderSide = OrderSide.BUY_TO_OPEN, ratio: int = 1
+    ) -> OrderLeg:
+        return OrderLeg(side=side, ratio=ratio, shares_per_contract=1, symbol=symbol)
+
+    base = client_order_id_for(source_trade_id=7, legs=[leg()])
+    # Stable across retries: the same (trade, structure) always hashes to the same id.
+    assert client_order_id_for(source_trade_id=7, legs=[leg()]) == base
+    # Distinct across trades and across structures (symbol, side, ratio, leg count).
+    others = {
+        client_order_id_for(source_trade_id=8, legs=[leg()]),
+        client_order_id_for(source_trade_id=7, legs=[leg("MSFT")]),
+        client_order_id_for(source_trade_id=7, legs=[leg(side=OrderSide.SELL_TO_OPEN)]),
+        client_order_id_for(source_trade_id=7, legs=[leg(ratio=2)]),
+        client_order_id_for(source_trade_id=7, legs=[leg(), leg("MSFT")]),
+    }
+    assert base not in others and len(others) == 5
+    with pytest.raises(IntentRefused):
+        client_order_id_for(source_trade_id=7, legs=[])
 
 
 # ---------------------------------------------------------------------------
@@ -895,7 +958,7 @@ def test_s15a_contract_is_active_once_execution_exists() -> None:
         "uncomment the staged block (D6 ADR §17.2)"
     )
     assert contract["source_modules"] == [EXECUTION_MODULE]
-    assert set(contract["forbidden_modules"]) == {
+    assert set(cast("list[str]", contract["forbidden_modules"])) == {
         "signalforge.llm",
         "signalforge.agents",
         "signalforge.alerts",
