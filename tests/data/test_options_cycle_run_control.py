@@ -332,6 +332,55 @@ def test_a_bounded_pass_never_marks_an_unfinished_underlying_done(session: Sessi
     assert "pass ended" in run.symbols_failed["SPY"]
 
 
+def test_a_resume_refuses_to_splice_a_different_dataset_onto_the_same_run(
+    session: Session,
+) -> None:
+    """Ten nightly passes under one run id: a changed window or ladder would
+    leave one provenance record describing only the last night."""
+    _seed_equity(session)
+    first = backfill_option_cycles(
+        session, _adapter(), ["SPY"], caps=_caps(), bounds=RunBounds(max_cycles=1)
+    )
+    with pytest.raises(ValueError, match="splice two datasets"):
+        backfill_option_cycles(
+            session,
+            _adapter(),
+            ["SPY"],
+            caps=_caps(window_end=WINDOW_END - timedelta(days=60)),
+            resume_run_id=first.id,
+        )
+    with pytest.raises(ValueError, match="options_config_hash"):
+        backfill_option_cycles(
+            session,
+            _adapter(),
+            ["SPY"],
+            caps=_caps(),
+            options_config_hash="different",
+            resume_run_id=first.id,
+        )
+    # raising the bar ceiling is NOT drift: it is how an operator recovers
+    # budget-limited coverage, and the run records it
+    resumed = backfill_option_cycles(
+        session, _adapter(), ["SPY"], caps=_caps(max_total_bars=2_000_000), resume_run_id=first.id
+    )
+    assert resumed.gaps_json["__run__"]["max_total_bars"] == 2_000_000
+
+
+def test_every_pacing_a_multi_pass_run_used_is_kept(session: Session) -> None:
+    """D1 §7.5 wants the pacing ACTUALLY used recorded. Over ten passes,
+    overwriting it would describe only the final night."""
+    _seed_equity(session)
+    slow = MassiveOptionsAdapter("k", client=_client(), min_request_spacing_s=12.1)
+    first = backfill_option_cycles(
+        session, slow, ["SPY"], caps=_caps(), bounds=RunBounds(max_cycles=1)
+    )
+    fast = MassiveOptionsAdapter("k", client=_client(), min_request_spacing_s=0.5)
+    second = backfill_option_cycles(session, fast, ["SPY"], caps=_caps(), resume_run_id=first.id)
+    prov = second.gaps_json["__run__"]
+    assert prov["pacing_s"] == 0.5
+    assert sorted(prov["pacing_s_passes"]) == [0.5, 12.1]
+
+
 # --- the request plan ------------------------------------------------------- #
 def _plan(**kw: object) -> BackfillRequestPlan:
     return plan_cycle_backfill(["SPY", "QQQ"], caps=_caps(), pacing_s=12.1, **kw)  # type: ignore[arg-type]

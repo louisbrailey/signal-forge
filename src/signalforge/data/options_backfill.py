@@ -1179,6 +1179,74 @@ def _fetch_cycle_bars(
     )
 
 
+# Provenance fields that DECIDE WHAT THE DATASET IS. A resume that changed one
+# of these would splice two different datasets under one provenance blob, and
+# the blob would describe only the last pass — over ten nightly passes that is
+# an unrecoverable identity problem, discovered (if ever) long after the fetch.
+# ``max_total_bars`` is deliberately absent: raising the ceiling to recover
+# budget-limited coverage is a supported, recorded operator action, and
+# ``pacing_s`` is absent because it legitimately varies between passes and is
+# accumulated instead.
+_IDENTITY_KEYS: frozenset[str] = frozenset(
+    {
+        "window_start",
+        "window_end",
+        "cycle_rule",
+        "dte_entry_min",
+        "dte_entry_max",
+        "strike_band_pct",
+        "ladder_id",
+        "ladder_offsets",
+        "min_rungs_per_side",
+        "pre_entry_buffer_sessions",
+        "rights",
+        "reference_source",
+        "reference_max_staleness_sessions",
+        "ladder_bracket_min_rungs",
+        "listing_include_expired",
+        "listing_as_of_enabled",
+        "strike_listing_basis",
+        "require_shares_per_contract",
+        "options_config_hash",
+        "provider",
+    }
+)
+
+
+def _refuse_parameter_drift(run: IngestionRun, provenance: dict[str, object]) -> None:
+    """A resume must continue the same dataset, not start a different one."""
+    stored = dict((run.gaps_json or {}).get(_RUN_PROVENANCE_KEY, {}) or {})
+    if not stored:
+        return  # a run from before provenance was recorded structurally
+    drift = {
+        k: (stored.get(k), provenance.get(k))
+        for k in _IDENTITY_KEYS
+        if k in stored and stored.get(k) != provenance.get(k)
+    }
+    if drift:
+        raise ValueError(
+            f"ingestion_run {run.id} was built with different parameters and resuming it would "
+            f"splice two datasets under one provenance record: {drift}. Start a NEW run for the "
+            "new parameters — a changed window, ladder, listing basis or options_config_hash is "
+            "a different dataset, not a continuation."
+        )
+
+
+def _carry_pacing_history(run: IngestionRun, provenance: dict[str, object]) -> dict[str, object]:
+    """Keep every pacing a multi-pass run actually used, not just the last.
+
+    D1 §7.5 requires the pacing ACTUALLY used to be recorded so a later run at a
+    different rate is distinguishable. Over ten nightly passes, overwriting it
+    would leave the record describing only the final night.
+    """
+    stored = dict((run.gaps_json or {}).get(_RUN_PROVENANCE_KEY, {}) or {})
+    history = list(stored.get("pacing_s_passes") or [])
+    for value in (stored.get("pacing_s"), provenance.get("pacing_s")):
+        if value is not None and value not in history:
+            history.append(value)
+    return {**provenance, "pacing_s_passes": history}
+
+
 @dataclass(slots=True)
 class _Totals:
     """Run-level counters carried across cycles (and across resumes)."""
@@ -1358,6 +1426,8 @@ def backfill_option_cycles(
         run = session.get(IngestionRun, resume_run_id)
         if run is None:
             raise ValueError(f"ingestion_run {resume_run_id} not found")
+        _refuse_parameter_drift(run, provenance)
+        provenance = _carry_pacing_history(run, provenance)
         # A re-entered run is running again; a previous pass's terminal status
         # and finish time would otherwise outlive the pass that set them.
         run.status = "running"
