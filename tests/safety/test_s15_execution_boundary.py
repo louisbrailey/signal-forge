@@ -395,28 +395,47 @@ UNCONDITIONAL_NO_ORDER_PHRASES = (
     "no order execution",
 )
 
-# A statement scoped to a module, a package, or the paper ledger stays true and must pass.
+# A statement scoped to the execution package by name, or to the paper ledger, stays true.
 _SCOPING_MARKERS = (
     "this ledger",
-    "this package",
-    "this module",
     "signalforge.execution",
     "adr-execution-layer",
     "outside",
 )
 
+# "this package" / "this module" scope a claim to the file that makes it — but only when that
+# file speaks for a PART of the tree. In ``src/signalforge/__init__.py`` "this package" is the
+# whole distribution, ``signalforge.execution`` included, so the promise there is exactly as
+# unconditional as one with no marker at all; the same goes for a repo-root document that
+# speaks for the project. Treating those two words as scoping everywhere gave the root
+# docstring ("It never connects to a brokerage, never places an order") a free pass, which is
+# the one file §18's rule least intends to excuse.
+_SELF_SCOPING_MARKERS = ("this package", "this module")
 
-def find_unconditional_no_order_claims(text: str) -> list[str]:
+
+def find_unconditional_no_order_claims(
+    text: str, *, speaks_for_whole_project: bool = False
+) -> list[str]:
+    """Return the unconditional no-order phrases in ``text``.
+
+    ``speaks_for_whole_project`` drops the self-scoping markers, for the root package
+    docstring and the repo-root promise documents. Every occurrence of every phrase is
+    checked, not just the first: a scoped sentence early in a file must not excuse an
+    absolute one later in it.
+    """
+    markers = (
+        _SCOPING_MARKERS if speaks_for_whole_project else _SCOPING_MARKERS + _SELF_SCOPING_MARKERS
+    )
     lowered = text.lower()
     hits = []
     for phrase in UNCONDITIONAL_NO_ORDER_PHRASES:
         start = lowered.find(phrase)
-        if start == -1:
-            continue
-        window = lowered[max(0, start - 160) : start + len(phrase) + 160]
-        if any(marker in window for marker in _SCOPING_MARKERS):
-            continue
-        hits.append(phrase)
+        while start != -1:
+            window = lowered[max(0, start - 160) : start + len(phrase) + 160]
+            if not any(marker in window for marker in markers):
+                hits.append(phrase)
+                break
+            start = lowered.find(phrase, start + 1)
     return hits
 
 
@@ -431,6 +450,36 @@ def test_t9_scan_distinguishes_absolute_from_scoped_claims() -> None:
     )
     assert not find_unconditional_no_order_claims(
         "No brokerage connection exists outside signalforge.execution (ADR-execution-layer)."
+    )
+
+
+def test_t9_this_package_does_not_excuse_the_root_docstring() -> None:
+    """The whole-project reading of "this package" is not a scope (see _SELF_SCOPING_MARKERS)."""
+    root_style = (
+        "Signal Forge — paper-trading-only research platform.\n\n"
+        "This package produces hypothetical research output only. It never connects to a "
+        "brokerage, never places an order, and never automates a trading venue.\n"
+    )
+    assert find_unconditional_no_order_claims(root_style, speaks_for_whole_project=True), (
+        "the root package docstring's promise must NOT be excused by its own words "
+        '"this package" — there it means the whole tree, execution included'
+    )
+    # A genuine subpackage keeps the exemption: signalforge.options really does hold no order path.
+    assert not find_unconditional_no_order_claims(
+        "Options — education and simulation only.\n\n"
+        "There is no options execution path anywhere in this package.\n"
+    )
+
+
+def test_t9_a_scoped_sentence_does_not_excuse_a_later_absolute_one() -> None:
+    text = (
+        "Paper-trading ledger (SIMULATED — this ledger places no order).\n\n"
+        + "filler. " * 60
+        + "\nNo order is ever placed.\n"
+    )
+    assert find_unconditional_no_order_claims(text), (
+        "only the first occurrence of each phrase was checked; a scoped sentence early in a "
+        "file excused an absolute one later"
     )
 
 
@@ -450,17 +499,35 @@ def _docstrings_and_help_strings(path: Path) -> Iterator[str]:
             yield node.value.value
 
 
+# §18 names README.md and DISCLAIMER.md among the files the amendment commit must reach, and
+# DISCLAIMER.md's "No orders are ever placed." is called out there as "the single most-read
+# promise in the repo". `iter_source_files()` walks src/signalforge only, so neither would ever
+# have been scanned. They are scanned here for the same reason T9 exists at all: a decision
+# record that says a promise is mechanically guarded must be telling the truth about it.
+ROOT_PROMISE_DOCUMENTS = ("README.md", "DISCLAIMER.md")
+
+
 def test_t9_no_unconditional_no_order_promise_once_execution_exists() -> None:
     if not execution_package_exists():
         _requires_ie2(
             "signalforge.execution — the §18 amendment of the shipped strings lands with it"
         )
+    root_init = PKG_ROOT / "__init__.py"
     offenders: list[str] = []
     for path in iter_source_files():
         for text in _docstrings_and_help_strings(path):
-            hits = find_unconditional_no_order_claims(text)
+            hits = find_unconditional_no_order_claims(
+                text, speaks_for_whole_project=path == root_init
+            )
             if hits:
                 offenders.append(f"{path}: {hits}")
+    for name in ROOT_PROMISE_DOCUMENTS:
+        doc = REPO_ROOT / name
+        hits = find_unconditional_no_order_claims(
+            doc.read_text(encoding="utf-8"), speaks_for_whole_project=True
+        )
+        if hits:
+            offenders.append(f"{doc}: {hits}")
     assert (
         not offenders
     ), "Unconditional no-order promises still shipped in the binary (ADR §18):\n" + "\n".join(
