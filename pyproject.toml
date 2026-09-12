@@ -227,6 +227,16 @@ forbidden_modules = [
     "signalforge.research.scan",
     "signalforge.research.candidates",
     "signalforge.paper.ledger",
+    # D3 §12.1: an import-linter *forbidden* contract matches a module and its
+    # DESCENDANTS. The options paper modules are SIBLINGS of paper.ledger, not
+    # descendants, so naming paper.ledger alone left the options decision path
+    # uncovered by this contract. Named explicitly here; the meta-test in
+    # tests/safety/test_options_import_contracts.py asserts that every contract
+    # naming paper.ledger also names all three, so the next sibling cannot
+    # quietly reopen the hole.
+    "signalforge.paper.options_ledger",
+    "signalforge.paper.options_marks",
+    "signalforge.paper.options_auto_simulate",
 ]
 
 [[tool.importlinter.contracts]]
@@ -309,6 +319,16 @@ source_modules = ["signalforge.sf1000"]
 forbidden_modules = [
     "signalforge.alerts",
     "signalforge.paper.ledger",
+    # D3 §12.1: an import-linter *forbidden* contract matches a module and its
+    # DESCENDANTS. The options paper modules are SIBLINGS of paper.ledger, not
+    # descendants, so naming paper.ledger alone left the options decision path
+    # uncovered by this contract. Named explicitly here; the meta-test in
+    # tests/safety/test_options_import_contracts.py asserts that every contract
+    # naming paper.ledger also names all three, so the next sibling cannot
+    # quietly reopen the hole.
+    "signalforge.paper.options_ledger",
+    "signalforge.paper.options_marks",
+    "signalforge.paper.options_auto_simulate",
     "signalforge.llm",
     "signalforge.research.promotion",
     "httpx",
@@ -330,6 +350,16 @@ forbidden_modules = [
     "signalforge.research.promotion",
     "signalforge.research.approval_scope",
     "signalforge.paper.ledger",
+    # D3 §12.1: an import-linter *forbidden* contract matches a module and its
+    # DESCENDANTS. The options paper modules are SIBLINGS of paper.ledger, not
+    # descendants, so naming paper.ledger alone left the options decision path
+    # uncovered by this contract. Named explicitly here; the meta-test in
+    # tests/safety/test_options_import_contracts.py asserts that every contract
+    # naming paper.ledger also names all three, so the next sibling cannot
+    # quietly reopen the hole.
+    "signalforge.paper.options_ledger",
+    "signalforge.paper.options_marks",
+    "signalforge.paper.options_auto_simulate",
     "signalforge.paper.auto_simulate",
     "signalforge.data.ingest",
     "signalforge.data.adapters.registry",
@@ -343,6 +373,16 @@ type = "forbidden"
 source_modules = ["signalforge.agents"]
 forbidden_modules = [
     "signalforge.paper.ledger",
+    # D3 §12.1: an import-linter *forbidden* contract matches a module and its
+    # DESCENDANTS. The options paper modules are SIBLINGS of paper.ledger, not
+    # descendants, so naming paper.ledger alone left the options decision path
+    # uncovered by this contract. Named explicitly here; the meta-test in
+    # tests/safety/test_options_import_contracts.py asserts that every contract
+    # naming paper.ledger also names all three, so the next sibling cannot
+    # quietly reopen the hole.
+    "signalforge.paper.options_ledger",
+    "signalforge.paper.options_marks",
+    "signalforge.paper.options_auto_simulate",
     "signalforge.alerts.dispatch",
     "signalforge.alerts.channels",
     "signalforge.research.scan",
@@ -425,3 +465,38 @@ source_modules = [
 # there, it is the one sanctioned inbound edge, and it is a human-typed entry
 # point with no LLM on it (D6 §17.2 note 2). T12 asserts it is the ONLY one.
 forbidden_modules = ["signalforge.execution"]
+
+# ---------------------------------------------------------------------------
+# S16 — the options paper decision boundary (D3 §12.1, I-O6).
+#
+# S11 / S13 / S14 / S15 run OUTWARD from a layer that must not reach a decision.
+# This one runs INWARD: it names the options paper decision path as the target
+# and forbids every layer that must never open a structure from importing it.
+# Nothing in the pre-existing contract set covered that direction —
+# signalforge.llm is never a *source* module anywhere, it appears only as a
+# forbidden target, so nothing stopped `llm -> paper.options_ledger`.
+#
+# signalforge.cli is deliberately absent from the sources: `options-paper status`
+# is a human-typed, read-only entry point, and the caller-allowlist test
+# (tests/paper/test_options_activation_guards.py) is what constrains it by PATH.
+# app/routers is NOT absent: an HTTP route that can open an options structure is
+# not a Phase 1 surface, and the equity precedent it would copy
+# (app/routers/dashboard.py's unguarded accept_candidate call) is exactly the
+# shape this contract exists to keep out.
+# ---------------------------------------------------------------------------
+[[tool.importlinter.contracts]]
+name = "S16: nothing in the LLM, agent, app, alert, SF1000 or grid layers may reach the options paper decision path"
+type = "forbidden"
+source_modules = [
+    "signalforge.llm",
+    "signalforge.agents",
+    "signalforge.app",
+    "signalforge.alerts",
+    "signalforge.sf1000",
+    "signalforge.grid",
+]
+forbidden_modules = [
+    "signalforge.paper.options_ledger",
+    "signalforge.paper.options_marks",
+    "signalforge.paper.options_auto_simulate",
+]

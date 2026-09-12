@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from signalforge.data.repository import get_daily_bars
 from signalforge.db.models import Instrument, PaperAccount, PaperPosition
 from signalforge.domain import PositionSide
+from signalforge.paper.equity_guard import assert_equity_instrument
 from signalforge.risk.portfolio import Holding, exposure_report
 
 
@@ -48,6 +49,11 @@ def portfolio_snapshot(
     for pos in open_positions:
         inst = session.get(Instrument, pos.instrument_id)
         assert inst is not None
+        # The same defect as ``mark_to_market``'s, at the same place: every open
+        # position is priced from the UNDERLYING's bars. map §3.3 names only
+        # ``mark_to_market``; the assertion belongs here too, and is equally a
+        # no-op today (D3 §7.2).
+        assert_equity_instrument(inst, "portfolio_snapshot")
         px = _last_close(session, inst.symbol, on) or float(pos.avg_price)
         d = 1 if pos.side is PositionSide.LONG else -1
         mv = px * pos.qty * d

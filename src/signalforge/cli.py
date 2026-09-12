@@ -290,6 +290,13 @@ options_app = typer.Typer(
     help="Options data + education simulators (execution only via the armed execution layer)."
 )
 app.add_typer(options_app, name="options")
+options_paper_app = typer.Typer(
+    help=(
+        "The SIMULATED options paper account (D3 / I-O6): a separate account, separate "
+        "tables, a collateral ledger, and a second guard that is OFF by default."
+    )
+)
+app.add_typer(options_paper_app, name="options-paper")
 news_app = typer.Typer(help="Licensed read-only news (never drives a recommendation).")
 app.add_typer(news_app, name="news")
 
@@ -1697,6 +1704,100 @@ def paper_mtm() -> None:
         f"checked {r.checked}, closed {r.closed}, realized {r.realized_pnl:+.2f}, "
         f"unrealized {r.unrealized_pnl:+.2f}"
     )
+
+
+@options_paper_app.command("status")
+def options_paper_status(
+    account: Annotated[
+        str | None,
+        typer.Option(help="Account name; defaults to the configured options account."),
+    ] = None,
+    as_of: Annotated[str | None, typer.Option(help="Session date (YYYY-MM-DD).")] = None,
+    json_out: Annotated[bool, typer.Option("--json", help="Print the raw snapshot.")] = False,
+) -> None:
+    """Show the SIMULATED options paper book: cash, collateral, open structures,
+    greeks against their caps, the last reconciliation, and whether the second
+    guard's setting is on. Read-only — it opens, closes and reconciles nothing."""
+    import json
+    from datetime import date as _date
+
+    from signalforge.db.session import session_scope
+    from signalforge.paper.options_marks import options_portfolio_snapshot
+    from signalforge.settings_store import effective_research_config
+
+    with session_scope() as session:
+        name = account or effective_research_config(session).options_risk.paper_account_name
+        snap = options_portfolio_snapshot(
+            session,
+            account_name=name,
+            as_of=_date.fromisoformat(as_of) if as_of else None,
+        )
+    if json_out:
+        typer.echo(json.dumps(snap, indent=2, default=str))
+        return
+    if not snap["exists"]:
+        typer.secho(
+            f"options paper account {snap['account']!r} does not exist — {snap['hint']}",
+            fg=typer.colors.YELLOW,
+        )
+        return
+    g = snap["greeks"]
+    lim = snap["limits"]
+    typer.secho(f"options paper account {snap['account']!r} (SIMULATED)", fg=typer.colors.CYAN)
+    typer.echo(
+        f"  cash {snap['cash']:,.2f}   collateral {snap['collateral_reserved']:,.2f}   "
+        f"spendable {snap['spendable_cash']:,.2f}   (initial {snap['initial_cash']:,.2f})"
+    )
+    typer.echo(
+        f"  open {snap['n_open']}/{lim['max_open_structures']} structures, open max loss "
+        f"{snap['open_max_loss_total']:,.2f}/{lim['total_open_max_loss_dollars']:,.2f}   "
+        f"closed {snap['n_closed']}"
+    )
+    typer.echo(
+        f"  P&L: unrealized {snap['unrealized_pnl']:+,.2f}  realized {snap['realized_pnl']:+,.2f}"
+        + (f"  expectancy {snap['expectancy_r']:+.4f}R" if snap["expectancy_r"] is not None else "")
+    )
+    typer.echo(
+        f"  net delta {g['options_net_delta_notional']:+,.2f}/"
+        f"{lim['max_net_delta_notional_dollars']:,.0f}   "
+        f"combined {g['combined_net_delta_notional']:+,.2f}/"
+        f"{lim['combined_max_net_delta_notional_dollars']:,.0f}   "
+        f"net vega {g['options_net_vega_per_vol_pt']:+,.2f}/"
+        f"{lim['max_net_vega_dollars_per_vol_pt']:,.0f}"
+    )
+    for s in snap["open_structures"]:
+        mark = s["last_mark"]
+        typer.echo(
+            f"    #{s['position_id']} {s['underlying']} {s['structure_type']} x{s['contracts']} "
+            f"exp {s['expiration']} (dte {s['dte']})  R {s['r_dollars']:,.2f}  "
+            f"collateral {s['collateral_reserved']:,.2f}"
+            + (
+                f"  mark {mark['net_premium']:,.2f} ({mark['legs_priced']} legs priced"
+                + (", SYNTHETIC" if mark["synthetic"] else "")
+                + ")"
+                if mark
+                else "  (never marked)"
+            )
+        )
+    rec = snap["reconciliation"]
+    if rec is None:
+        typer.secho(
+            "  reconciliation: NONE — the second guard refuses to open without a dated, "
+            "clean report (condition AA)",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        typer.secho(
+            f"  reconciliation {rec['as_of']}: "
+            + ("clean" if rec["clean"] else f"DIVERGENT {rec['findings']}"),
+            fg=typer.colors.GREEN if rec["clean"] else typer.colors.RED,
+        )
+    auto = snap["auto_simulate"]
+    typer.echo(
+        f"  {auto['setting_key']}: {'ON' if auto['enabled'] else 'OFF'} "
+        f"(cap {auto['max_per_day']}/day)"
+    )
+    typer.secho(f"  {snap['notice']}", fg=typer.colors.YELLOW)
 
 
 @paper_app.command("snapshot")

@@ -44,6 +44,15 @@ from signalforge.db.models.market import (
     Watchlist,
     WatchlistMember,
 )
+from signalforge.db.models.options_paper import (
+    CandidateOptionStructure,
+    OptionsCollateralEntry,
+    OptionsMark,
+    OptionsPosition,
+    OptionsPositionLeg,
+    OptionsReconcileReport,
+    OptionsTrade,
+)
 from signalforge.db.models.paper import (
     JournalEntry,
     PaperAccount,
@@ -140,6 +149,14 @@ __all__ = [
     "PaperTrade",
     "TradeCorrection",
     "JournalEntry",
+    # options paper (D3 / I-O6 — a separate account, separate tables, second guard)
+    "CandidateOptionStructure",
+    "OptionsPosition",
+    "OptionsPositionLeg",
+    "OptionsTrade",
+    "OptionsCollateralEntry",
+    "OptionsMark",
+    "OptionsReconcileReport",
     # execution (D6 ADR — inert until an operator arms a strategy version)
     "ArmedStrategy",
     "ExecutionLimits",

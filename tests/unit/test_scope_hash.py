@@ -69,6 +69,24 @@ def test_every_scope_field_exists_on_the_model() -> None:
         # config_hash the moment the section appeared, putting both live
         # PAPER_APPROVED approvals out of scope for nothing (D6 ADR §2).
         "execution",
+        # `options_risk` is REFUSAL-ONLY: every field can only ever refuse an
+        # options open, and none selects a structure or times an exit. An
+        # operator tightening a dollar cap must not un-scope an equity approval,
+        # and adding this section to the hash would move config_hash for every
+        # live PAPER_APPROVED strategy the moment it appeared — the 2026-09-11
+        # agents-section incident, repeated. The options stream gets its own
+        # blast radius instead: `paper.options_ledger.options_scope_hash` is
+        # computed separately, recorded on every options evidence snapshot, and
+        # compared by the second guard's condition I (D3 §1.4, §4).
+        "options_risk",
+        # `options_shaping` holds SELECTION/EXIT parameters, which DO belong
+        # inside a pre-registration hash. It is excluded here because the values
+        # on the config object are only DEFAULTS: a real options strategy carries
+        # them in its own `spec_json["options"]`, which is covered by
+        # `spec_json_hash` and compared as one of the five parts of the existing
+        # scope match. A shaping change therefore still costs a visible artifact,
+        # in the hash with the right blast radius.
+        "options_shaping",
     }
 
 

@@ -173,19 +173,43 @@ def test_the_options_order_path_is_blocked_until_the_options_ledger_lands() -> N
 
 
 def test_assert_auto_simulate_allowed_is_still_stock_and_etf_only() -> None:
-    """Map §3.6, binding: the existing guard is left UNCHANGED and is never
-    widened to admit options."""
+    """Map §3.6, binding: the existing guard is never WIDENED to admit options.
+
+    Tightened 2026-09-12 by I-O6, which added one NARROWING refusal to this
+    guard. The original assertion was ``"option" not in body`` — a substring
+    check that could not distinguish "the allowlist was widened to admit an
+    option" (forbidden) from "the guard refuses options harder than before"
+    (required by D3 §10.1, and the reason the word now appears at all). It is
+    replaced by two checks that are each strictly stronger than what the
+    substring bought:
+
+    * the admitted instrument types are still exactly ``("stock", "etf")``, and
+      no option-ish value appears anywhere as a string LITERAL — which is the
+      only form a widening could take;
+    * the guard carries the ``structure_kind`` refusal, and it runs FIRST,
+      before every pre-existing check. Without it an options candidate would
+      PASS the instrument-type check, because its ``instrument_id`` points at
+      the UNDERLYING and SPY's ``instrument_type`` is ``'etf'``.
+    """
     import inspect
 
     from signalforge.paper import ledger
 
     source = inspect.getsource(ledger.assert_auto_simulate_allowed)
     body = source[source.index('"""', source.index('"""') + 3) :]  # past the docstring
+
+    # 1. The allowlist is unchanged, and no option-ish value was added as a literal.
     assert '("stock", "etf")' in body
     # The explicitly refused resolution: widening this tuple would "silently let
     # options trades flow through equity-shaped sizing, cash, and
     # mark-to-market logic that is provably wrong for options".
-    assert "option" not in body
+    for literal in ('"option"', "'option'", '"option_spread"', '"options"'):
+        assert literal not in body, f"the instrument-type allowlist was widened with {literal}"
+
+    # 2. The NARROWING refusal exists and precedes every pre-existing check.
+    assert "cand.structure_kind is not None" in body
+    assert body.index("cand.structure_kind is not None") < body.index("auto_simulate_enabled(")
+    assert body.index("cand.structure_kind is not None") < body.index('("stock", "etf")')
 
 
 def test_importing_the_package_constructs_no_adapter() -> None:

@@ -34,6 +34,8 @@ __all__ = [
     "LiquidityFilters",
     "NewsConfig",
     "OptionsConfig",
+    "OptionsRiskLimits",
+    "OptionsStructureLimits",
     "PromotionThresholds",
     "QualityThresholds",
     "ResearchConfig",
@@ -327,6 +329,118 @@ class OptionsConfig(BaseModel):
     listing_as_of_enabled: bool = True
 
 
+class OptionsRiskLimits(BaseModel):
+    """REFUSAL-ONLY capital limits for the options paper book (D3 §4, decision 4).
+
+    Nothing here selects a structure or times an exit; every field can only ever
+    REFUSE an open. That is why the object sits **outside every hash**: an
+    operator tightening a dollar cap must not un-scope an approval. ``options_risk``
+    is deliberately absent from ``ResearchConfig.SCOPE_HASH_FIELDS`` — adding it
+    would move ``config_hash`` for every live PAPER_APPROVED equity strategy and
+    repeat the 2026-09-11 agents-section incident exactly (D3 §1.4). The
+    selection/exit parameters live in :class:`OptionsStructureLimits`, which is
+    read from the strategy's own ``spec_json`` when it carries one, so a shaping
+    change moves ``spec_json_hash`` and costs a counted sealed look.
+
+    Every value is decision 4's (``DECISIONS_2026-09-12_options_execution.md``),
+    recorded as an evaluation-grid CENTRE. The operator may change any of them
+    before arming.
+    """
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    per_structure_max_loss_dollars: PositiveFloat = 250.0
+    total_open_max_loss_dollars: PositiveFloat = 1_000.0
+    collateral_cap_dollars: PositiveFloat = 5_000.0
+    max_net_delta_notional_dollars: PositiveFloat = 10_000.0
+    max_net_vega_dollars_per_vol_pt: PositiveFloat = 50.0
+    # Computed over BOTH accounts and evaluated ONLY inside
+    # ``assert_options_auto_simulate_allowed`` (D3 §5.2 Finding 2), so it can only
+    # ever refuse an OPTIONS open. ``risk.size_position``, ``accept_candidate``
+    # and ``assert_auto_simulate_allowed`` never consult it: the equity path is
+    # byte-identical whether or not this limit exists.
+    combined_max_net_delta_notional_dollars: PositiveFloat = 10_000.0
+    per_order_notional_dollars: PositiveFloat = 1_000.0
+    daily_order_cap: PositiveInt = 10
+    account_exposure_cap_pct: PositiveFloat = 40.0
+    # Dead configuration at decision 4's numbers — $1,000 / $250 already caps the
+    # book at 4 structures (D3 §3.5). Kept because it binds if the per-structure
+    # cap falls, and every refusal reports WHICH limit actually bound.
+    max_open_structures: PositiveInt = 5
+    max_structures_per_underlying: PositiveInt = 1  # keyed on the UNDERLYING
+    # Decision 13's separate SIMULATED options account. The account is named in
+    # CONFIGURATION, not by the caller: a required keyword stops a *forgotten*
+    # account name and does nothing about a *wrong* one, and "default" is a
+    # perfectly valid string that resolves to the live equity account (D3 §2).
+    paper_account_name: str = "options"
+    paper_account_initial_cash: PositiveFloat = 25_000.0
+
+
+class OptionsStructureLimits(BaseModel):
+    """SELECTION / EXIT parameters — the shaping group (D3 §4, §5.3).
+
+    These do not limit capital: they decide **which** structure opens and
+    **when** it closes, exactly as ``RiskLimits.min_reward_to_risk`` decides
+    which candidates exist at all. They therefore belong inside a
+    pre-registration hash, and the repo already has the right one: a strategy's
+    ``spec_json["options"]`` is covered by ``spec_json_hash``, which
+    ``research.approval_scope.scan_scope_matches`` compares as one of the five
+    parts. The values here are **defaults** used when a strategy carries no
+    ``spec_json["options"]`` block; a real options strategy overrides them there,
+    where moving one is visible.
+
+    ``min_credit_to_width`` and ``max_short_delta`` are KEPT as a PAIR, per map
+    §3.2's Rule and D3 §5.3 (rev 1's proposal to retire the credit hurdle was
+    withdrawn: the "degeneracy" was -0.034..+0.064, monotone in sigma*sqrt(T),
+    not +/-0.02). D3 Finding 5 records that the pair and ``min_theta`` have a
+    jointly empty feasible set under the *illustrative* cost constants — that is
+    a finding about the cost model, not a licence to delete a gate, and it is
+    D2's frozen ``OptionCostModel`` that must move first.
+    """
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    structure_type: str = "vertical_credit"  # gate 0.5: exactly one per version
+    max_short_delta: PositiveFloat = 0.20  # SELECTION — entry delta ceiling
+    min_credit_to_width: NonNegativeFloat = 0.25  # SELECTION — kept as a gate
+    # theta: (net credit - modelled round-trip costs) / R, evaluated at BOTH the
+    # baseline and the 2x spread setting (gate 4b, decision 5).
+    min_net_credit_after_costs_to_max_loss: float = 0.0
+    dte_entry_min: PositiveInt = 21
+    dte_entry_max: PositiveInt = 45
+    width_min_dollars: PositiveFloat = 2.0
+    width_max_dollars: PositiveFloat = 3.0
+    profit_target_pct_of_credit: PositiveFloat = 0.50
+    stop_multiple_of_credit: PositiveFloat = 2.0
+    time_stop_dte: PositiveInt = 7  # EXIT — forces a close
+    pin_band_pct: PositiveFloat = 0.002
+    assignment_itm_threshold_pct: NonNegativeFloat = 0.0
+
+    @classmethod
+    def from_spec_json(
+        cls, spec_json: dict[str, object] | None, default: OptionsStructureLimits
+    ) -> OptionsStructureLimits:
+        """The strategy's own ``spec_json["options"]`` wins over the config default.
+
+        Returns ``default`` unchanged when the block is absent or is not a dict,
+        so a strategy that carries no options block is shaped by the recorded
+        configuration and a strategy that does carry one is shaped by a value
+        inside ``spec_json_hash``."""
+        block = (spec_json or {}).get("options")
+        if not isinstance(block, dict):
+            return default
+        merged = default.model_dump(mode="json")
+        merged.update({k: v for k, v in block.items() if k in merged})
+        return cls.model_validate(merged)
+
+    @property
+    def options_shaping_hash(self) -> str:
+        """A hash over the shaping group alone, recorded on every options
+        evidence snapshot so two evaluations of one strategy version whose
+        shaping differs are, by construction, two disclosable variants."""
+        return config_hash(self.model_dump(mode="json"))
+
+
 class OptionsEvaluationConfig(BaseModel):
     """The frozen, hashed identity of an options EVALUATION's assumptions.
 
@@ -521,6 +635,15 @@ class ResearchConfig(BaseModel):
     # SCOPE_HASH_FIELDS below (see GridConfig's docstring).
     grid: GridConfig = Field(default_factory=GridConfig)
     options: OptionsConfig = Field(default_factory=OptionsConfig)
+    # Options paper risk (D3 / I-O6). BOTH are deliberately absent from
+    # SCOPE_HASH_FIELDS: ``options_risk`` can only ever refuse an options open,
+    # and ``options_shaping`` is a set of DEFAULTS that a real options strategy
+    # overrides inside its own ``spec_json`` (hence inside ``spec_json_hash``).
+    # Adding either here would move ``config_hash`` for every live
+    # PAPER_APPROVED equity strategy — the 2026-09-11 incident, repeated.
+    # Asserted by tests/paper/test_options_config_scope.py.
+    options_risk: OptionsRiskLimits = Field(default_factory=OptionsRiskLimits)
+    options_shaping: OptionsStructureLimits = Field(default_factory=OptionsStructureLimits)
     # Order execution — OFF by default, deliberately absent from
     # SCOPE_HASH_FIELDS below (see ExecutionConfig's docstring).
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)

@@ -150,17 +150,27 @@ def test_automatic_acceptance_has_exactly_one_guarded_entry_point() -> None:
     """Operator-authorized 2026-09-10: automatic SIMULATED acceptance exists, but
     ONLY in ``paper/auto_simulate.py`` (which runs the full guard first), and it
     is wired ONLY into the approved-scope scan job. Nothing else in the tree may
-    call ``accept_candidate`` or ``auto_simulate_scan_runs``."""
+    call ``accept_candidate`` or ``auto_simulate_scan_runs``.
+
+    **Matched by PATH EQUALITY, never by basename** (repaired 2026-09-12 with
+    I-O6, whose options twin is copied from this test). The previous form was
+    ``p.name in {"ledger.py", "cli.py"}`` — a ``Path.name`` — so ANY file
+    anywhere under ``src/signalforge`` called ``ledger.py`` or ``cli.py`` could
+    call ``accept_candidate`` and this test still passed; ``agents/cli.py`` is
+    the obvious example, and the agents layer is live. The repair is strictly
+    more restrictive and changes no existing verdict: the two real callers are
+    ``paper/ledger.py`` (the definition) and ``cli.py``.
+    """
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2] / "src" / "signalforge"
-    manual_ok = {"ledger.py", "cli.py"}
+    manual_ok = {"paper/ledger.py", "cli.py"}
     for p in root.rglob("*.py"):
         text = p.read_text()
         rel = str(p.relative_to(root))
-        if "accept_candidate(" in text:
+        if "accept_candidate(" in text.replace("accept_options_candidate(", ""):
             assert (
-                p.name in manual_ok or "app/routers/" in rel or rel == "paper/auto_simulate.py"
+                rel in manual_ok or "app/routers/" in rel or rel == "paper/auto_simulate.py"
             ), f"{rel} must not accept paper trades automatically"
         if "auto_simulate_scan_runs(" in text and rel != "paper/auto_simulate.py":
             assert rel == "scheduler.py", f"{rel} may not invoke auto-simulation"

@@ -40,8 +40,19 @@ class PaperAccount(Base, IntPK, CreatedAt):
     name: Mapped[str] = mapped_column(String(64), unique=True, default="default")
     initial_cash: Mapped[Decimal] = mapped_column(_MONEY)
     cash: Mapped[Decimal] = mapped_column(_MONEY)
+    # Buying power held by open options structures (D3 §3.1). ADDITIVE, server
+    # default 0: on every existing account — including the live equity one — this
+    # is 0 and ``spendable_cash == cash``, so no equity arithmetic moves. Only
+    # ``paper.options_ledger`` ever writes it, and only for the options account.
+    collateral_reserved: Mapped[Decimal] = mapped_column(_MONEY, default=Decimal("0"))
 
     positions: Mapped[list[PaperPosition]] = relationship(back_populates="account")
+
+    @property
+    def spendable_cash(self) -> Decimal:
+        """``cash - collateral_reserved`` (D3 §3.2). Equal to ``cash`` on every
+        account that holds no options collateral, which is every account today."""
+        return self.cash - self.collateral_reserved
 
 
 class PaperOrder(Base, IntPK, CreatedAt):

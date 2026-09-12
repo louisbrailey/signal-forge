@@ -32,10 +32,12 @@ from signalforge.db.types import utcnow
 from signalforge.domain import Direction, PaperDecision, PositionSide, QualityGate
 from signalforge.killswitch import ensure_not_engaged
 from signalforge.observability import get_logger
+from signalforge.paper.equity_guard import NotAnEquityPosition, assert_equity_instrument
 
 __all__ = [
     "Decision",
     "ImmutablePaperTradeError",
+    "NotAnEquityPosition",
     "AcceptResult",
     "auto_simulate_enabled",
     "assert_auto_simulate_allowed",
@@ -141,6 +143,19 @@ def accept_candidate(
     cand = session.get(Candidate, candidate_id)
     if cand is None:
         raise ValueError(f"candidate {candidate_id} not found")
+    # NARROWING refusal (D3 §10.1(3)), and it belongs on the LEDGER function, not
+    # only on the automatic path: accept_candidate is reachable from cli.py and
+    # from app/routers/dashboard.py with no guard at all, so without it a single
+    # CLI invocation would put an options structure through the equity ledger —
+    # equity sizing, equity cash, an underlying-priced mark. It refuses a class of
+    # candidate that did not exist before this commit (structure_kind is NULL on
+    # every pre-existing row by the column default) and refuses nothing the
+    # function previously accepted.
+    if cand.structure_kind is not None:
+        raise AutoSimulateForbidden(
+            "candidate carries an options structure; the equity ledger cannot size, "
+            "fill, or mark it. Use paper.options_ledger.accept_options_candidate."
+        )
     if cand.direction is Direction.AVOID:
         raise ValueError("cannot paper-accept an AVOID candidate")
 
@@ -295,6 +310,10 @@ def mark_to_market(
     for pos in open_positions:
         inst = session.get(Instrument, pos.instrument_id)
         assert inst is not None
+        # NARROWS, never widens (map §3.3, D3 §7.1): the same predicate
+        # ``assert_auto_simulate_allowed`` already applies, applied at the second
+        # place it matters. Provably a no-op against current data.
+        assert_equity_instrument(inst, "mark_to_market")
         bars = get_daily_bars(session, inst.symbol, on - _lookback(), on)
         if not bars:
             continue
@@ -478,8 +497,11 @@ class AutoSimulateForbidden(RuntimeError):
 
 
 def assert_auto_simulate_allowed(session: Session, cand: Candidate) -> None:
-    """Every condition an automatic (non-manual) paper acceptance would need:
+    """Every condition an automatic (non-manual) EQUITY paper acceptance needs:
 
+    * the candidate carries NO options structure (``structure_kind is None``) —
+      an options structure is refused here and handled by the SECOND guard,
+      ``paper.options_ledger.assert_options_auto_simulate_allowed``;
     * the setting ``auto_simulate_qualified_signals`` is ON;
     * the candidate PASSED every quality gate;
     * the instrument is a U.S. stock/ETF (never an option, future, or currency);
@@ -495,6 +517,17 @@ def assert_auto_simulate_allowed(session: Session, cand: Candidate) -> None:
         scan_scope_matches,
     )
 
+    # NARROWING refusal, FIRST, before every existing check (D3 §10.1(2)). An
+    # options candidate points its ``instrument_id`` at the UNDERLYING — SPY's
+    # instrument_type is 'etf' — so it would PASS the instrument-type check below
+    # and be accepted through the equity ledger. This closes that route; it
+    # refuses nothing the guard previously accepted.
+    if cand.structure_kind is not None:
+        raise AutoSimulateForbidden(
+            "candidate carries an options structure; the equity auto-simulate path "
+            "cannot size, fill, or mark it. "
+            "Use paper.options_ledger.assert_options_auto_simulate_allowed."
+        )
     if not auto_simulate_enabled(session):
         raise AutoSimulateForbidden("auto_simulate_qualified_signals is off")
     if cand.quality_gate_status is not QualityGate.PASSED:

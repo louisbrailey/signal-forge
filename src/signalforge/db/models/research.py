@@ -128,6 +128,16 @@ class Candidate(Base, IntPK, CreatedAt):
     failed_gates: Mapped[list[str]] = mapped_column(JSON, default=list)
     rank_in_horizon: Mapped[int | None] = mapped_column(Integer, default=None)
 
+    # The POSITIVE discriminator for a multi-leg options candidate (D3 §10.1).
+    # NULL = a single-leg equity candidate, which is every existing row by the
+    # column default. It exists because ``instrument_id`` points at the
+    # UNDERLYING — SPY's ``instrument_type`` is 'etf' — so the equity guard's
+    # instrument-type check would PASS an options candidate and accept it
+    # through the equity ledger with equity sizing, equity cash and an
+    # underlying-priced mark. 'option_spread' is 13 characters, deliberately
+    # inside String(16) rather than exactly on it.
+    structure_kind: Mapped[str | None] = mapped_column(String(16), default=None)
+
     scan_run: Mapped[ScanRun] = relationship(back_populates="candidates")
 
 
