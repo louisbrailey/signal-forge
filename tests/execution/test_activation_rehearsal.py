@@ -28,7 +28,13 @@ from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
 from signalforge.cli import app
-from signalforge.db.models import ArmedStrategy, AuditLog, ExecutionLimits, StrategyVersion
+from signalforge.db.models import (
+    ArmedStrategy,
+    AuditLog,
+    ExecutionEvent,
+    ExecutionLimits,
+    StrategyVersion,
+)
 from signalforge.domain import StrategyStatus
 from signalforge.execution import arming
 from signalforge.execution.brokers.paper_reference import SIMULATED_ACCOUNT_PREFIX
@@ -243,3 +249,214 @@ def test_disable_turns_the_flag_off_and_ends_every_live_arming(
         for row in session.scalars(select(AuditLog))
         if row.action.startswith("execution.")
     )
+
+
+# ---------------------------------------------------------------------------
+# W4b — the armed day, carried through to a fill and a clean book.
+#
+# READ THIS BEFORE EXTENDING IT. `run_execution_cycle` does not submit anything,
+# and nothing in `src/signalforge/` calls `adapter.place()` or `place_combo()` at
+# all: the cycle's open lane is not built. The cycle evaluates, reconciles,
+# sweeps and reports `may_open_possible`; turning that into an order is a
+# separate increment with its own drills.
+#
+# So the fill below is placed the way the drills place one — through the OMS's
+# own durable path, `record_submitting` (written and COMMITTED first) then
+# `adapter.place`, which is the §6/§8 order — and the REAL cycle then runs
+# against the same adapter and has to come back CLEAN. That is what the W4b
+# wiring can actually be held to: the cycle takes a proven `is_paper` proof every
+# run, and it reconciles a HELD position CLEAN through the OMS-side attribution
+# rather than diverging on it.
+# ---------------------------------------------------------------------------
+
+
+def _rehearsal_broker(session: Session, *, quote_at: object) -> object:
+    """A `paper_reference` broker with a quote, so a marketable order can fill.
+
+    The ceremony's own adapter is built with an EMPTY information set on purpose
+    (it submits nothing), so a fill needs one that can price. Its book is held in
+    MEMORY, which is why the cycle below is handed this instance rather than
+    building its own: a `paper_reference` built fresh next cycle starts flat and
+    would reconcile CLEAN for the wrong reason — because it holds nothing, not
+    because the OMS explained what it holds.
+    """
+    from signalforge.execution.brokers.paper_reference import (
+        ExecutionEventAudit,
+        MarketClock,
+        PaperReferenceBroker,
+        PreSubmissionInformation,
+        ReferenceQuote,
+        SimulatedAccount,
+    )
+
+    return PaperReferenceBroker(
+        audit=ExecutionEventAudit(session),
+        account=SimulatedAccount(account_id=ACCOUNT_ID, initial_cash=25_000.0),
+        expected_account_id=ACCOUNT_ID,
+        information=PreSubmissionInformation.of(
+            [ReferenceQuote("SPY", 470.0, quote_at, available_qty=None)]
+        ),
+        clock=MarketClock(is_open=True, as_of=quote_at + timedelta(minutes=1)),
+    )
+
+
+def test_the_armed_cycle_takes_a_proof_and_reconciles_a_held_position_clean(
+    session: Session, rehearsal_version: StrategyVersion
+) -> None:
+    from signalforge.db.types import utcnow
+    from signalforge.execution import deadman
+    from signalforge.execution.cycle import run_execution_cycle
+    from signalforge.execution.events import ExecutionEventType
+    from signalforge.execution.intents import (
+        CostModelFeedback,
+        IntentKind,
+        OrderIntent,
+        OrderSide,
+    )
+    from signalforge.execution.oms import read_cycle_posture, record_submitting
+    from signalforge.execution.states import OrderState
+
+    version_id = rehearsal_version.id
+    session.commit()
+
+    _invoke("execution", "enable", "--yes")
+    _invoke("execution", "limits", "set", "--from-preregistration", PREREGISTRATION, "--yes")
+    session.commit()
+    _seed_evidence_under_the_active_row(session, session.get(StrategyVersion, version_id))
+    _invoke(
+        "execution",
+        "arm",
+        str(version_id),
+        "--account-id",
+        ACCOUNT_ID,
+        "--preregistration",
+        PREREGISTRATION,
+        "--yes",
+        "--confirm",
+        arming.confirmation_phrase(version_id, "paper_reference"),
+    )
+    session.commit()
+    armed = arming.live_armings(session)
+    assert len(armed) == 1
+
+    now = utcnow()
+    broker = _rehearsal_broker(session, quote_at=now - timedelta(minutes=5))
+
+    # ---- one SIMULATED fill, through the OMS's durable path --------------
+    intent = OrderIntent(
+        client_order_id="rehearsal-open-1",
+        intent_kind=IntentKind.OPEN,
+        side=OrderSide.BUY_TO_OPEN,
+        qty=1,
+        limit_price=475.0,
+        shares_per_contract=1,
+        adapter_name="paper_reference",
+        created_at=now,
+        expires_at=now + timedelta(minutes=15),
+        cost_model=CostModelFeedback(modelled_fill_price=470.0, modelled_spread_bps=5.0),
+        symbol="SPY",
+        strategy_version_id=version_id,
+        armed_strategy_id=armed[0].id,
+        state=OrderState.VALIDATED,
+    )
+    result = broker.place(record_submitting(session, intent, actor="test"))
+    assert result.state is OrderState.FILLED, result.raw_status_verbatim
+    assert list(broker.positions()), "the simulator is holding a position"
+
+    # ---- the REAL cycle, against that book -------------------------------
+    deadman.feed(session, now=now, detail="rehearsal: previous cycle")
+    report = run_execution_cycle(
+        session, read_cycle_posture(), now=now, adapter=broker, actor="test"
+    )
+
+    # §13: the proof is re-taken THIS cycle and it proves out.
+    proofs = [
+        e
+        for e in session.scalars(
+            select(ExecutionEvent).where(
+                ExecutionEvent.event_type == ExecutionEventType.IS_PAPER_PROOF.value
+            )
+        )
+        if e.reason.startswith("is_paper PROVEN") or e.reason.startswith("is_paper FAILED")
+    ]
+    assert proofs and proofs[-1].payload_json["proven"] is True, [p.reason for p in proofs]
+    assert proofs[-1].payload_json["expected_account_id"] == ACCOUNT_ID
+
+    # §10: a HELD position reconciles CLEAN, because the OMS explained it. This
+    # is the check the W4a attribution gap made impossible — before it, any
+    # adapter reconciled CLEAN only while flat.
+    assert report.reconciliation_status == "CLEAN", report.blocked_reasons
+    assert "R1: no adapter is configured" not in report.blocked_reasons
+    assert report.disarms == (), report.disarms
+    assert len(arming.live_armings(session)) == 1
+
+
+def test_a_foreign_position_ends_the_same_rehearsal_in_a_halt(
+    session: Session, rehearsal_version: StrategyVersion
+) -> None:
+    """The other half of the same promise: the cycle reconciles a held position
+    CLEAN because it can EXPLAIN it, not because it stopped checking."""
+    from signalforge.db.types import utcnow
+    from signalforge.execution import deadman
+    from signalforge.execution.cycle import run_execution_cycle
+    from signalforge.execution.intents import (
+        CostModelFeedback,
+        IntentKind,
+        OrderIntent,
+        OrderSide,
+    )
+    from signalforge.execution.oms import read_cycle_posture
+    from signalforge.execution.states import OrderState
+
+    version_id = rehearsal_version.id
+    session.commit()
+    _invoke("execution", "enable", "--yes")
+    _invoke("execution", "limits", "set", "--from-preregistration", PREREGISTRATION, "--yes")
+    session.commit()
+    _seed_evidence_under_the_active_row(session, session.get(StrategyVersion, version_id))
+    _invoke(
+        "execution",
+        "arm",
+        str(version_id),
+        "--account-id",
+        ACCOUNT_ID,
+        "--preregistration",
+        PREREGISTRATION,
+        "--yes",
+        "--confirm",
+        arming.confirmation_phrase(version_id, "paper_reference"),
+    )
+    session.commit()
+
+    now = utcnow()
+    broker = _rehearsal_broker(session, quote_at=now - timedelta(minutes=5))
+    # Straight at the broker: no OMS pre-submission record, so nothing local can
+    # explain the position it creates.
+    broker.place(
+        OrderIntent(
+            client_order_id="rehearsal-foreign",
+            intent_kind=IntentKind.OPEN,
+            side=OrderSide.BUY_TO_OPEN,
+            qty=1,
+            limit_price=475.0,
+            shares_per_contract=1,
+            adapter_name="paper_reference",
+            created_at=now,
+            expires_at=now + timedelta(minutes=15),
+            cost_model=CostModelFeedback(modelled_fill_price=470.0, modelled_spread_bps=5.0),
+            symbol="SPY",
+            state=OrderState.SUBMITTING,
+        )
+    )
+
+    deadman.feed(session, now=now, detail="rehearsal: previous cycle")
+    report = run_execution_cycle(
+        session, read_cycle_posture(), now=now, adapter=broker, actor="test"
+    )
+
+    assert report.reconciliation_status == "DIVERGED"
+    assert report.may_open_possible is False
+    assert any(
+        d.endswith(arming.DisarmTrigger.RECONCILIATION.value) for d in report.disarms
+    ), report.disarms
+    assert arming.live_armings(session) == []

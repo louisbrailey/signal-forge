@@ -39,11 +39,22 @@ promotion, auto-disarm, the limits evaluation — runs with ``adapter=None``, an
 the adapter-dependent half (reconciliation, the clock cross-check, the drain's
 ``cancel_all()``) reports "could not be evaluated", which BLOCKS opening and is
 the correct answer rather than a degraded one.
+
+**How the adapter gets here (``adapter_factory``).** An adapter's audit sink
+writes ``execution_event`` rows through a session, and the cycle opens its own
+session inside the job body — so an adapter constructed by the caller, before
+that session exists, would be writing through a session that is no longer open.
+``execution_cycle_job`` therefore accepts an ``adapter_factory`` that is called
+**with the cycle's own session**, once per cycle. ``adapter=`` is still accepted
+for tests and drills that own their session, and with neither the cycle runs
+adapter-free exactly as before. A factory that returns ``None`` or raises does
+not stop the cycle: the local half still runs, the failure is recorded, and
+opening blocks — which is the whole reason the two halves are separate.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -64,17 +75,25 @@ from signalforge.execution.oms import (
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sqlalchemy.orm import Session
 
+    from signalforge.db.models import ArmedStrategy
     from signalforge.execution.protocol import BrokerAdapter
     from signalforge.jobspec import JobSpec
 
 __all__ = [
     "EXECUTION_CYCLE_JOB",
+    "AdapterFactory",
     "CycleReport",
     "active_limits_created_at",
     "execution_cycle_job",
     "execution_job_specs",
+    "manual_job_entries",
     "run_execution_cycle",
 ]
+
+#: Called with the CYCLE's own session, once per cycle, to build the adapter it
+#: will use. ``None`` back is not an error — it is the fail-closed answer, and
+#: every adapter-dependent check then reports "could not be evaluated".
+AdapterFactory = Callable[["Session"], "BrokerAdapter | None"]
 
 #: The one job name. Kept as a constant so the CLI's manual-job entry, the spec
 #: and the ``JobRun`` rows cannot drift apart.
@@ -279,6 +298,26 @@ def run_execution_cycle(
     if verdict.blocks_opening:
         report.blocked_reasons.append(f"C1/C2: {verdict.detail}")
 
+    # -- 4b. §10 rule 2 / §13 — ONE adapter answers for ONE account ----------
+    #
+    # Evaluated on the armings as they stand BEFORE the sweep, and that placement
+    # is the point. ``expected_account_id_for`` resolves a single expected id —
+    # the most recent armed row's (§13 rule 4b) — so when two live armings name
+    # two different accounts the proof necessarily fails for the other one and
+    # the sweep disarms EVERYTHING on ``is_paper_failed_to_reprove``. Checked
+    # only after the sweep, this refusal would never be reachable, and the
+    # operator would be told "the broker answered for the wrong account" when
+    # what actually happened is "you armed two accounts on one adapter". Those
+    # are different mistakes with different fixes, and the record has to say
+    # which one it was.
+    account_scope_ok = _account_scope_ok(
+        session,
+        report,
+        arming.live_armings(session, adapter_name=adapter_name or None),
+        adapter_name=adapter_name,
+        actor=actor,
+    )
+
     # -- 5. the auto-disarm sweep (§12 step 7, decision 9) -------------------
     facts = arming.CycleFacts(
         kill_switch_engaged=posture.kill_switch_engaged,
@@ -299,6 +338,18 @@ def run_execution_cycle(
 
     # -- 6. what remains armed after the sweep is what MIGHT open ------------
     remaining = arming.live_armings(session, adapter_name=adapter_name or None)
+
+    # §13 — the proof is re-taken EVERY cycle and never cached from arm time.
+    # The sweep above already disarms on a FAILED proof; this states the refusal
+    # in the cycle's own report as well, so "why did nothing open" is answered
+    # from the JobRun note rather than inferred from a disarm.
+    if adapter is not None and facts.is_paper_proven is not True:
+        report.blocked_reasons.append(
+            "A2: is_paper() did not prove out against the armed account id this cycle"
+            if facts.is_paper_proven is False
+            else "A2: is_paper() could not be evaluated this cycle — not proved, and not disproved"
+        )
+
     report.may_open_possible = bool(
         remaining
         and posture.may_open
@@ -307,6 +358,8 @@ def run_execution_cycle(
         and recon.clean
         and not verdict.blocks_opening
         and limits is not None
+        and facts.is_paper_proven is True
+        and account_scope_ok
     )
     if not remaining:
         report.blocked_reasons.append(
@@ -324,6 +377,53 @@ def run_execution_cycle(
 
     report.detail = report.note()
     return report
+
+
+def _account_scope_ok(
+    session: Session,
+    report: CycleReport,
+    remaining: Sequence[ArmedStrategy],
+    *,
+    adapter_name: str,
+    actor: str,
+) -> bool:
+    """Do the live armings agree on ONE broker account? (§10 rule 2, §13.)
+
+    An adapter is pointed at exactly one account, and ``is_paper()`` proves the
+    account in the broker's own response against ONE expected id — the most
+    recent armed row's (§13 rule 4b). Two live armings naming different accounts
+    therefore leave at least one of them armed against an account nothing proved
+    anything about, and "the other arming's proof passed" is not a proof about
+    this one.
+
+    Fail-closed and audited: opening blocks for **all** of them, and an
+    ``execution_event`` records which ids disagreed. It does NOT disarm — that is
+    §12 step 7's job and its triggers are the ADR's list, not this function's —
+    and it does not touch the close lane, which needs no armed row at all.
+    """
+    ids = sorted(
+        {row.broker_account_id_expected for row in remaining if row.broker_account_id_expected}
+    )
+    if len(ids) <= 1:
+        return True
+    detail = (
+        f"§10 rule 2: {len(remaining)} live armings name {len(ids)} different broker accounts "
+        f"({', '.join(ids)}) — one adapter answers for ONE account, so the is_paper proof taken "
+        "this cycle proves nothing about the others; opening blocks for all of them"
+    )
+    report.blocked_reasons.append(f"A1/A2: {detail}")
+    record_execution_event(
+        session,
+        event_type=ExecutionEventType.LIMIT_BLOCKED,
+        adapter_name=adapter_name,
+        reason=detail[:300],
+        payload={
+            "expected_account_ids": ids,
+            "armed_strategy_ids": [row.id for row in remaining],
+        },
+        actor=actor,
+    )
+    return False
 
 
 def _is_paper_proven(
@@ -443,23 +543,65 @@ def _protective_branch(
 
 
 def execution_cycle_job(
-    *, adapter: BrokerAdapter | None = None, actor: str = "scheduler"
+    *,
+    adapter: BrokerAdapter | None = None,
+    adapter_factory: AdapterFactory | None = None,
+    actor: str = "scheduler",
 ) -> Callable[[], None]:
     """The registered job: ``execution_guarded`` wrapping one database-scoped
     cycle. Returns a zero-argument callable, which is what a ``JobSpec`` holds.
+
+    ``adapter_factory`` is called with the cycle's OWN session, once per cycle,
+    because an adapter's audit sink writes ``execution_event`` rows through a
+    session and the caller has none at registration time. ``adapter=`` still
+    wins when both are given — a caller that already owns the session (a test, a
+    drill) has said so explicitly. With neither, the cycle runs adapter-free and
+    every adapter-dependent check reports "could not be evaluated", which blocks
+    opening: byte-identical to the behaviour before factories existed.
     """
 
     def _body(posture: CyclePosture) -> str:
         from signalforge.db.session import session_scope
 
         with session_scope(write=True) as session:
-            report = run_execution_cycle(session, posture, adapter=adapter, actor=actor)
+            live = adapter if adapter is not None else _build(session, adapter_factory, actor)
+            report = run_execution_cycle(session, posture, adapter=live, actor=actor)
         return report.note()
 
     return execution_guarded(EXECUTION_CYCLE_JOB, _body)
 
 
-def execution_job_specs(*, adapter: BrokerAdapter | None = None) -> list[JobSpec]:
+def _build(
+    session: Session, adapter_factory: AdapterFactory | None, actor: str
+) -> BrokerAdapter | None:
+    """Build this cycle's adapter, or ``None`` — never raising out of the cycle.
+
+    A factory that fails must not take the cycle down with it. The local half —
+    the dead-man heartbeat above all — is exactly what must keep running when the
+    broker side is unavailable: a cycle that aborted here would stop feeding the
+    dead man, the dead man would lapse ~90 seconds later, and the lapse would
+    disarm the whole book and run the drain sequence. An unbuildable adapter is a
+    blocked open, not a cascade.
+    """
+    if adapter_factory is None:
+        return None
+    try:
+        return adapter_factory(session)
+    except Exception as exc:
+        record_execution_event(
+            session,
+            event_type=ExecutionEventType.LIMIT_BLOCKED,
+            reason=f"the broker adapter could not be built this cycle: {exc!r}"[:300],
+            actor=actor,
+        )
+        return None
+
+
+def execution_job_specs(
+    *,
+    adapter: BrokerAdapter | None = None,
+    adapter_factory: AdapterFactory | None = None,
+) -> list[JobSpec]:
     """The execution job, or **an empty list** when the layer is disabled.
 
     Deliberately the ``_intraday_scan_spec`` shape rather than an
@@ -506,7 +648,7 @@ def execution_job_specs(*, adapter: BrokerAdapter | None = None) -> list[JobSpec
     return [
         JobSpec(
             EXECUTION_CYCLE_JOB,
-            execution_cycle_job(adapter=adapter),
+            execution_cycle_job(adapter=adapter, adapter_factory=adapter_factory),
             minutes,
             "Execution cycle: dead-man heartbeat, reconciliation, auto-disarm, protective "
             "drain (registered only while execution.enabled is True; nothing is armed by "
@@ -516,11 +658,19 @@ def execution_job_specs(*, adapter: BrokerAdapter | None = None) -> list[JobSpec
     ]
 
 
-def manual_job_entries(*, adapter: BrokerAdapter | None = None) -> dict[str, Callable[[], None]]:
+def manual_job_entries(
+    *,
+    adapter: BrokerAdapter | None = None,
+    adapter_factory: AdapterFactory | None = None,
+) -> dict[str, Callable[[], None]]:
     """The manual-job table for ``signalforge run-job``.
 
     Runnable by hand even while ``execution.enabled`` is False — it is then a
     cycle that finds nothing armed and says so, which is the point: the operator
     can prove what it would do without enabling anything.
     """
-    return {EXECUTION_CYCLE_JOB: execution_cycle_job(adapter=adapter, actor="cli")}
+    return {
+        EXECUTION_CYCLE_JOB: execution_cycle_job(
+            adapter=adapter, adapter_factory=adapter_factory, actor="cli"
+        )
+    }

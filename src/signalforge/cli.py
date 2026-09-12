@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Any
@@ -3683,7 +3684,7 @@ def run_scheduler() -> None:
     from signalforge.execution.cycle import execution_job_specs
     from signalforge.scheduler import default_job_specs
 
-    extra = execution_job_specs(adapter=_execution_adapter())
+    extra = execution_job_specs(adapter_factory=_execution_cycle_adapter_factory())
     if extra:
         typer.secho(
             f"execution.enabled is True — registering {len(extra)} execution job(s). "
@@ -3760,7 +3761,7 @@ def run_job(
     from signalforge.paper.options_eod import OPTIONS_EOD_JOB, job_options_paper_eod
     from signalforge.scheduler import MANUAL_JOBS, default_job_specs, guarded
 
-    execution_jobs = manual_job_entries(adapter=_execution_adapter())
+    execution_jobs = manual_job_entries(adapter_factory=_execution_cycle_adapter_factory())
     if name in execution_jobs:
         execution_jobs[name]()
         typer.secho(f"job {name} finished (self-guarded)", fg=typer.colors.GREEN)
@@ -3951,6 +3952,43 @@ def _dt_now_utc() -> datetime:
     from datetime import datetime as _dt
 
     return _dt.now(_UTC)
+
+
+def _execution_cycle_adapter_factory() -> Callable[[Session], BrokerAdapter | None]:
+    """The adapter factory the execution cycle is registered with.
+
+    Called with the CYCLE's own session, once per cycle, which is the whole
+    reason a factory exists rather than an instance: an adapter's audit sink
+    writes ``execution_event`` rows through a session, and at registration time
+    — inside ``run-scheduler``, before the job has ever fired — there is no such
+    session to bind to.
+
+    The expected account id comes from ``expected_account_id_for``, §13 rule 4b's
+    own resolver: the most recent ``armed_strategy`` row for this adapter,
+    **including disarmed and expired ones**. That inclusion is deliberate and is
+    not laxity — disarming ends the authority to open, not the record of which
+    account this adapter was pointed at, and the reconciliation that clears an
+    ``UNKNOWN`` runs *after* an auto-disarm by construction. Without it the
+    system can enter a state it cannot leave without editing the database by
+    hand.
+
+    No row has ever been written for this adapter -> ``""`` -> **no adapter**.
+    §13 rule 4b's last step is a refusal, not a default: there is nothing to
+    prove the account against, so nothing is built and every adapter-dependent
+    check reports "could not be evaluated", which blocks opening.
+    """
+
+    def factory(session: Session) -> BrokerAdapter | None:
+        from signalforge.execution.reconcile import expected_account_id_for
+        from signalforge.settings_store import effective_research_config
+
+        adapter_name = effective_research_config(session).execution.adapter_name
+        account_id = expected_account_id_for(session, adapter_name)
+        if not account_id:
+            return None
+        return _execution_adapter(session, expected_account_id=account_id)
+
+    return factory
 
 
 #: Every audited operator action on this group runs as this actor. Not "cli" and
@@ -4726,7 +4764,7 @@ def execution_cycle_cmd() -> None:
     """
     from signalforge.execution.cycle import EXECUTION_CYCLE_JOB, manual_job_entries
 
-    manual_job_entries(adapter=_execution_adapter())[EXECUTION_CYCLE_JOB]()
+    manual_job_entries(adapter_factory=_execution_cycle_adapter_factory())[EXECUTION_CYCLE_JOB]()
     typer.secho(f"{EXECUTION_CYCLE_JOB} finished", fg=typer.colors.GREEN)
 
 
