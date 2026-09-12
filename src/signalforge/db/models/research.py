@@ -247,6 +247,19 @@ class DataSnapshot(Base, IntPK, CreatedAt):
     # fallback so a new evaluation can never silently re-attach to a row
     # whose own description promises it will never be reused.
     reusable_by_new_evaluations: Mapped[bool] = mapped_column(default=True)
+    # The options dataset's identity (D1 §9): band, ladder, IV policy, q policy,
+    # rate policy, spread multiplier, strike-listing basis, coverage thresholds.
+    # NULL on every equity snapshot, and deliberately NOT part of any database
+    # constraint: ``UniqueConstraint("key")`` above is the ONLY declared identity
+    # and is not altered, because a UNIQUE over a nullable column would let two
+    # rows with the same key and a NULL scope both be legal — silently removing
+    # the protection the two live PAPER_APPROVED equity snapshots rely on.
+    # Scope identity is enforced procedurally in
+    # ``research.promotion.get_or_create_dataset_snapshot`` instead: a key hit
+    # whose stored scope differs from the request refuses, NULL-vs-present
+    # included, and the unkeyed symbol-match fallback refuses to match at all
+    # when a scope is supplied.
+    options_scope_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=None)
 
 
 class StrategySealedTest(Base, IntPK, CreatedAt):

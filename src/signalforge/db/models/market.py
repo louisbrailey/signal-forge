@@ -156,6 +156,68 @@ class CorporateAction(Base, IntPK, CreatedAt):
     source: Mapped[str] = mapped_column(String(40))
 
 
+class DividendEvent(Base, IntPK, CreatedAt):
+    """One DECLARED cash dividend for an underlying, as published by the vendor.
+
+    Additive and independent of ``CorporateAction`` (which the current feed
+    never populates — ``fetch_corporate_actions`` returns ``()``). It exists for
+    exactly one reason: the options pricing path takes a continuous dividend
+    yield ``q`` and **may not leave it at its 0.0 default** — at ``q = 0`` puts
+    are underpriced and calls overpriced on a dividend-paying underlying, which
+    is a one-directional bias in a premium-SELLING strategy's favour (map §2.4a,
+    gate 0.g). Decision 11 sources and records ``q`` rather than restricting the
+    underlying set, and this is the rank-1 source it rests on.
+
+    Declared amounts keyed on the ex-date are point-in-time safe: the trailing
+    yield for session S sums only ex-dates on or before S.
+    """
+
+    __tablename__ = "dividend_event"
+    __table_args__ = (
+        UniqueConstraint("symbol", "ex_dividend_date", "source"),
+        Index("ix_dividend_event_symbol_ex", "symbol", "ex_dividend_date"),
+    )
+
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    ex_dividend_date: Mapped[date] = mapped_column(index=True)
+    cash_amount: Mapped[float] = mapped_column(Float)
+    declaration_date: Mapped[date | None] = mapped_column(default=None)
+    record_date: Mapped[date | None] = mapped_column(default=None)
+    pay_date: Mapped[date | None] = mapped_column(default=None)
+    frequency: Mapped[int | None] = mapped_column(Integer, default=None)  # payments per year
+    dividend_type: Mapped[str] = mapped_column(String(8), default="")  # CD | SC | LT | ST
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    source: Mapped[str] = mapped_column(String(40), index=True)
+    ingested_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
+class SplitEvent(Base, IntPK, CreatedAt):
+    """One EXECUTED share split for an underlying, as published by the vendor.
+
+    The stored ``ohlcv_daily`` series is back-adjusted with no marker
+    (``split_factor`` is 1.0 on every row, ``adj_close == close`` everywhere),
+    while option **strikes are not** back-adjusted. A point-in-time reference
+    price taken from the adjusted series for a pre-split cycle is therefore off
+    by the split factor, and the strike band computed from it asks the vendor
+    for strikes that never existed — a failure that looks exactly like "that
+    cycle had no contracts" (D1 §2.3). This table is what lets a cycle crossing
+    an adjustment be NAMED and excluded rather than silently mis-struck.
+    """
+
+    __tablename__ = "split_event"
+    __table_args__ = (
+        UniqueConstraint("symbol", "execution_date", "source"),
+        Index("ix_split_event_symbol_exec", "symbol", "execution_date"),
+    )
+
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    execution_date: Mapped[date] = mapped_column(index=True)
+    split_from: Mapped[float] = mapped_column(Float)  # shares before
+    split_to: Mapped[float] = mapped_column(Float)  # shares after
+    source: Mapped[str] = mapped_column(String(40), index=True)
+    ingested_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
 class SymbolContinuityMapping(Base, IntPK, CreatedAt):
     """An explicit, versioned, auditable bridge from one symbol's price
     history to a successor symbol across a corporate action (ticker and/or
@@ -364,8 +426,11 @@ class IngestionRun(Base, IntPK):
 
     provider: Mapped[str] = mapped_column(String(40), index=True)
     feed_type: Mapped[FeedType] = mapped_column(SAEnum(FeedType, **_ENUM_KW))
+    # 32, not 16: the options backfill writes 'options_agg_backfill' (20 chars)
+    # and 'options_cycle_backfill' (22). SQLite does not enforce VARCHAR length
+    # so the overflow was silent there; Postgres would truncate or error (D12).
     kind: Mapped[str] = mapped_column(
-        String(16), default="incremental"
+        String(32), default="incremental"
     )  # incremental | full_history
     requested_start: Mapped[date] = mapped_column()
     requested_end: Mapped[date] = mapped_column()
