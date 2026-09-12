@@ -996,5 +996,5 @@ def test_s1_ruff_and_importlinter_denylists_are_not_shortened() -> None:
     assert set(banned_api) == expected
     s1 = _contract("S1:")
     assert s1 is not None
-    assert set(s1["forbidden_modules"]) == expected
+    assert set(cast("list[str]", s1["forbidden_modules"])) == expected
     assert s1["source_modules"] == ["signalforge"]

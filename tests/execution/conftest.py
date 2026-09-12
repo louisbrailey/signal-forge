@@ -9,6 +9,11 @@ watch the factory refuse.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from signalforge.execution.arming import ArmingRequest
+    from signalforge.execution.protocol import IsPaperProof
 from decimal import Decimal
 
 import pytest
@@ -456,7 +461,7 @@ def armable(
     return strategy_version
 
 
-def arming_request(**overrides: object):
+def arming_request(**overrides: object) -> ArmingRequest:
     """A complete, passing :class:`ArmingRequest`, for tests that break one field."""
     from signalforge.execution.arming import ArmingRequest
 
@@ -474,7 +479,7 @@ def arming_request(**overrides: object):
     return ArmingRequest(**base)  # type: ignore[arg-type]
 
 
-def paper_proof(account_id: str = "PAPER-ACCOUNT-1", *, proven: bool = True):
+def paper_proof(account_id: str = "PAPER-ACCOUNT-1", *, proven: bool = True) -> IsPaperProof:
     """An :class:`IsPaperProof` in the shape an adapter would return."""
     from signalforge.execution.protocol import IsPaperProof
 
