@@ -26,9 +26,23 @@ Migration `b9d41e07c6aa` is applied live. Nothing is scheduled or armed by any o
   reader, clustered bootstrap by `(underlying, expiry cycle)`).
 - No options sensitivity-grid runner for gate 5 (96 pre-sealed re-runs; `None` fails gate 5).
 - D2 §14.3 append-only variant ledger and D5 §5.3 same-session surface are not built.
-- I-O6's `auto_simulate_options_scan_runs` has **no scheduler caller** (asserted by test).
+- ~~I-O6's `auto_simulate_options_scan_runs` has **no scheduler caller** (asserted by test).
   Wiring it needs mark → reconcile → expiry in front of it in the EOD chain, plus the
-  health-monitor / probation options branches (D3 §7.3) — both readers are options-blind.
+  health-monitor / probation options branches (D3 §7.3) — both readers are options-blind.~~
+  **CLOSED by W3c (branch `options-w3c-eod-chain`, same day.)** `options_paper_eod` runs
+  mark → reconcile → expiry → auto-simulate at 18:30 ET, config-gated OFF behind the new
+  `research.options.paper_eod_enabled`; off, it returns before it opens a write
+  transaction. The auto-simulation step still needs its own `auto_simulate_options_enabled`
+  (off, cap 0/day). Both readers gained their explicit D3 §7.3 options branch; the equity
+  numbers are unchanged (`tests/research/test_options_health_and_probation.py`). The
+  "no scheduled caller" test was replaced, not deleted, by one that pins the ordering and
+  the single call site, and the equity single-entry-point test names the second door
+  explicitly. **Still open:** the chain refuses (`OptionsEodUnpriceable`) a book spanning
+  more than one underlying, because `mark_options_to_market` /
+  `process_option_expiries` / `auto_simulate_options_scan_runs` each take ONE
+  `OptionsPricingContext` per call and one `q` cannot honestly serve two names
+  (decision 11). Widening that needs a per-underlying pricing resolver in
+  `paper/options_marks.py`, which W3c deliberately did not open.
 - The real options backfill (~29,376 requests, ~98.7 h) has not started; runbook
   `docs/research/options_designs/IO2_RUNBOOK.md` (nightly `--max-minutes 590`, never in the
   17:30–19:00 ET window, coverage-summary-only rule).

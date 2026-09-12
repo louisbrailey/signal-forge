@@ -649,13 +649,26 @@ job once by hand (kill-switch guarded):
 uv run signalforge run-job daily_eod_update
 ```
 
-Valid names are the eight in `default_job_specs()`
+Valid names are the ones in `default_job_specs()`
 (`src/signalforge/scheduler.py`) — `daily_eod_update`, `paper_mtm`,
 `feed_probe`, `health_check`, `news_poll`, `daily_briefing`, `alerts`,
 `strategy_health`, `universe_update` (18:15 ET, config-gated OFF via
-`research.universe_pipeline.enabled`) — plus `MANUAL_JOBS` entries that are not on a
+`research.universe_pipeline.enabled`), `grid_daily` (18:50 ET, config-gated OFF),
+`catch_up`, `options_paper_eod` (18:30 ET, config-gated OFF via
+`research.options.paper_eod_enabled`) — plus `MANUAL_JOBS` entries that are not on a
 schedule of their own: `approved_scope_scan` (it normally only runs as the
 last step of `daily_eod_update` and at catch-up).
+
+`options_paper_eod` is the SIMULATED options paper end-of-day chain: mark →
+reconcile → expiry → auto-simulate, in that order. With
+`research.options.paper_eod_enabled` off (the default) it returns before it opens
+a write transaction and writes nothing but its own `JobRun` row. Turning it on
+buys marks, the dated collateral reconciliation and expiry handling; it does
+**not** let anything open a structure — that needs the separate
+`auto_simulate_options_enabled` setting, which is off with a cap of 0/day.
+`signalforge paper-probation-status` prints the book's state (account, open
+structures, reconciliation age, last chain run), and `signalforge options-paper
+status --json` prints the full snapshot.
 
 If specifically the approved-scope scan keeps showing `blocked` rather than
 `ok`/`completed`, its readiness gate is refusing to run on the current data

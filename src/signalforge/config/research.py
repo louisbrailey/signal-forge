@@ -275,6 +275,24 @@ class OptionsConfig(BaseModel):
     poll_enabled: bool = False  # OFF by default; snapshots are on-demand
     risk_free_rate: NonNegativeFloat = 0.04  # simulator assumption, not vendor data
 
+    # --- the SIMULATED options paper EOD chain (I-O6 wiring, W3c) -------------
+    # OFF by default, and OFF means the scheduled ``options_paper_eod`` job
+    # returns before it opens a single write transaction: no mark, no
+    # reconciliation report, no expiry processing, no options auto-simulation.
+    # It is deliberately a SECOND, independent switch from
+    # ``auto_simulate_options_enabled``: turning the chain on buys marks,
+    # reconciliation and expiry handling (all protective / read-mostly) and buys
+    # NOTHING that can open a structure — the auto-simulation step inside the
+    # chain still requires its own setting, which is off with a cap of 0/day.
+    #
+    # It lives in ``options``, which is absent from ``SCOPE_HASH_FIELDS``, so
+    # flipping it cannot move ``config_hash`` for a live PAPER_APPROVED equity
+    # strategy (the 2026-09-11 agents-section incident). It is also absent from
+    # ``OptionsEvaluationConfig``, so it cannot move ``options_config_hash``
+    # either: whether a scheduler runs the paper book is an OPERATING policy and
+    # changes no evaluation's assumptions.
+    paper_eod_enabled: bool = False
+
     # --- bounded historical-aggregates backfill (education only) --------------
     # OFF by default. Every limit below is a HARD cap the backfill enforces
     # *before* any per-contract fetch; whatever it drops to stay under a cap is

@@ -160,6 +160,19 @@ def test_automatic_acceptance_has_exactly_one_guarded_entry_point() -> None:
     the obvious example, and the agents layer is live. The repair is strictly
     more restrictive and changes no existing verdict: the two real callers are
     ``paper/ledger.py`` (the definition) and ``cli.py``.
+
+    **Adapted explicitly by W3c (2026-09-12), and the adaptation is stated rather
+    than absorbed.** ``scheduler.py`` now contains a SECOND automatic-acceptance
+    entry point: ``job_options_paper_eod`` calls
+    ``paper.options_auto_simulate.auto_simulate_options_scan_runs``. That call
+    does not accidentally satisfy the assertions below —
+    ``"auto_simulate_options_scan_runs("`` does not contain the substring
+    ``"auto_simulate_scan_runs("`` — so this test would have stayed green while
+    a whole second door opened in the file it is guarding. Silence is not
+    permission: the second entry point is named here, counted here, and pinned to
+    the one job that may hold it, so the invariant this test asserts is now
+    "exactly one guarded entry point PER ASSET CLASS, each in its own module,
+    each called from exactly one scheduler job", not "exactly one call site".
     """
     from pathlib import Path
 
@@ -175,11 +188,28 @@ def test_automatic_acceptance_has_exactly_one_guarded_entry_point() -> None:
         if "auto_simulate_scan_runs(" in text and rel != "paper/auto_simulate.py":
             assert rel == "scheduler.py", f"{rel} may not invoke auto-simulation"
     sched = (root / "scheduler.py").read_text()
-    assert "accept_candidate(" not in sched
+    assert "accept_candidate(" not in sched.replace("accept_options_candidate(", "")
     assert sched.count("auto_simulate_scan_runs(") == 1  # only job_approved_scope_scan
     auto = (root / "paper" / "auto_simulate.py").read_text()
     assert auto.index("assert_auto_simulate_allowed(session, cand)") < auto.index(
         "accept_candidate(session, cand.id"
+    )
+
+    # --- the SECOND sanctioned caller, named ------------------------------- #
+    assert sched.count("auto_simulate_options_scan_runs(") == 1
+    equity_job = sched.index("def job_approved_scope_scan(")
+    options_job = sched.index("def job_options_paper_eod(")
+    equity_body = sched[equity_job : sched.index("\ndef ", equity_job + 1)]
+    options_body = sched[options_job : sched.index("\ndef ", options_job + 1)]
+    # each auto-simulation lives in its own job, and only there
+    assert "auto_simulate_scan_runs(session, [" in equity_body
+    assert "auto_simulate_options_scan_runs(" in options_body
+    # neither job may open the other asset class's door
+    assert "auto_simulate_options_scan_runs(" not in equity_body
+    assert "mark_options_to_market(" not in equity_body
+    assert "accept_options_candidate(" not in options_body
+    assert "auto_simulate_scan_runs(" not in options_body.replace(
+        "auto_simulate_options_scan_runs(", ""
     )
 
 

@@ -5,7 +5,7 @@
 | Process | How it connects | Writes |
 |---|---|---|
 | **API** (`uvicorn signalforge.app.main:app`) | one session per request (`db/session.py::get_db`); GET = plain reader, POST/PUT/DELETE = write-intent | Settings, paper actions, kill switch, promotion run (long!), briefing build |
-| **Worker** (`signalforge run-scheduler`) | one write-intent session per job (`session_scope(write=True)`), plus a heartbeat session every 30 s and a `JobRun`/`AuditLog` record after every job | Ingest, scans, approved-scope scan, mark-to-market, briefing, health monitor, alert log, universe update |
+| **Worker** (`signalforge run-scheduler`) | one write-intent session per job (`session_scope(write=True)`), plus a heartbeat session every 30 s and a `JobRun`/`AuditLog` record after every job | Ingest, scans, approved-scope scan, mark-to-market, briefing, health monitor, alert log, universe update, the options EOD chain (one short write session **per step**, 18:30 ET, config-gated OFF) |
 | **CLI one-offs** (`signalforge …`, `alembic`) | their own sessions | Ingest/scan/screen on demand, migrations |
 | **API with `APP_RUN_SCHEDULER=true`** | an embedded worker inside the API process | Same as the worker — takes the same single-instance lock; refuses if a worker already holds it |
 | `make dev` (`--reload`) | a reloader parent + a child API process | If Ctrl-C orphans the child, it keeps reading; harmless in WAL mode but stop it before smoke testing |
@@ -28,8 +28,8 @@
    session's bind — `commit()` alone never demotes a writer to a reader.
 5. **Bounded retry for transient lock contention only** (`db/retry.py`): an idempotent job
    body is retried 3× (0.5 s, 2 s, 5 s) only on `database is locked`; jobs that persist
-   per-unit results (scans per horizon, bulk files per session) retry per unit instead
-   (`NO_JOB_LEVEL_LOCK_RETRY`) so nothing is duplicated. After that the job is recorded
+   per-unit results (scans per horizon, bulk files per session, the options EOD chain's
+   four steps) retry per unit instead (`NO_JOB_LEVEL_LOCK_RETRY`) so nothing is duplicated. After that the job is recorded
    **failed** with `database lock contention: … after 3 attempts`. The alert cycle commits
    each `AlertLog` right after its send, so a retried cycle can never re-send an alert. Heartbeat and
    job-record writes retry briefly and log a WARNING if they still fail — they never raise.

@@ -65,18 +65,37 @@ def test_the_options_branch_is_reachable_through_no_other_door() -> None:
     assert "accept_candidate(" not in code.replace("accept_options_candidate(", "")
 
 
-def test_there_is_no_scheduled_caller_yet_and_that_is_deliberate() -> None:
-    """I-O6 implements and guards the options branch but does not schedule it.
+def test_the_only_scheduled_caller_is_the_options_eod_chain() -> None:
+    """W3c REPLACES I-O6's ``test_there_is_no_scheduled_caller_yet``.
 
-    Wiring it into the EOD chain is a separate, operator-visible change that must
-    land with the mark / reconcile / expiry step in FRONT of it: the guard's
-    condition AA refuses without a dated, clean reconciliation report for the
-    fill session, so a scan wired in ahead of that step would simply refuse
-    everything — which is safe, but is not the same as being wired correctly.
+    I-O6 asserted ``"auto_simulate_options_scan_runs(" not in scheduler.py`` and
+    said, in the assertion's own docstring, exactly what would have to be true
+    before that line could be deleted: the wiring must land *with* the mark /
+    reconcile / expiry step in FRONT of it, because the second guard's condition
+    AA refuses without a dated, clean reconciliation report for the fill session,
+    so a scan wired in ahead of that step would refuse everything — safe, but not
+    the same as wired correctly.
+
+    That is the change this test now pins, rather than the absence it used to.
+    The negative assertion is kept in the strongest form still available: the
+    scheduler invokes the options auto-simulation EXACTLY ONCE, from
+    ``job_options_paper_eod``, it never calls the acceptance directly, and the
+    three protective steps precede the auto-simulation in source order inside
+    that one job.
     """
     sched = (SRC / "scheduler.py").read_text()
-    assert "auto_simulate_options_scan_runs(" not in sched
     assert "accept_options_candidate(" not in sched
+    assert sched.count("auto_simulate_options_scan_runs(") == 1
+
+    body = sched[sched.index("def job_options_paper_eod(") :]
+    body = body[: body.index("\ndef ", 1)]  # up to the next top-level def
+    order = [
+        body.index("mark_options_to_market("),
+        body.index("reconcile_options_collateral("),
+        body.index("process_option_expiries("),
+        body.index("auto_simulate_options_scan_runs("),
+    ]
+    assert order == sorted(order), "mark -> reconcile -> expiry -> auto-simulate, in that order"
 
 
 def test_the_equity_caller_allowlist_is_repaired_to_path_equality() -> None:

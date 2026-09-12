@@ -702,7 +702,18 @@ def paper_probation_context(session: Session) -> dict[str, Any]:
     """Every PAPER_APPROVED strategy's approved scope, sealed/walk-forward
     evidence, and real live-paper performance vs. what the promotion
     pipeline expected — plus whether candidate-trade alerts are currently
-    enabled for the probation."""
+    enabled for the probation.
+
+    It also carries ``options_paper`` (D3 §7.3): the SIMULATED options book's
+    account, open structures, reconciliation age and last EOD-chain run. That
+    block is built by ``research.paper_probation.options_paper_status``, which is
+    the only hook this layer may use — it reads ORM models and nothing else.
+    Contract S16 forbids ``signalforge.app`` from importing
+    ``paper.options_ledger`` / ``options_marks`` / ``options_auto_simulate`` by
+    any number of hops, so ``paper.options_marks.options_portfolio_snapshot`` —
+    the richer reader the ``options-paper status`` CLI uses — is deliberately NOT
+    reachable from here. The panel is therefore minimal by design, not by
+    omission."""
     from signalforge.research.paper_probation import paper_probation_context as _ctx
 
     ctx = _ctx(session)

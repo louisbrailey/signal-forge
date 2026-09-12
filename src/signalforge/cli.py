@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Annotated, Any
 import typer
 
 if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
     from signalforge.data.options_backfill import (
         BackfillRequestPlan,
         OptionsCoverageSummary,
@@ -2626,10 +2628,70 @@ def scan_approved_scope_cmd(
     typer.echo("Research signal only — no order was placed.")
 
 
+def _echo_options_paper_section(session: Session) -> None:
+    """Print the SIMULATED options paper book's operating state. READ-ONLY.
+
+    Deliberately printed even when the account does not exist: "no options
+    account" is the state of this deployment today and the honest thing to show,
+    not something to hide behind a conditional."""
+    from signalforge.research.paper_probation import options_paper_status
+
+    s = options_paper_status(session)
+    chain = s["eod_chain"]
+    auto = s["auto_simulate"]
+    typer.secho("\noptions paper book (SIMULATED, separate account)", fg=typer.colors.CYAN)
+    if not s["exists"]:
+        typer.secho(
+            f"  account {s['account']!r}: DOES NOT EXIST — the options EOD chain returns "
+            "immediately and nothing options-side can run",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        typer.echo(
+            f"  account {s['account']!r}: cash {s['cash']:,.2f}  collateral "
+            f"{s['collateral_reserved']:,.2f}  spendable {s['spendable_cash']:,.2f}"
+        )
+        typer.echo(f"  open structures: {s['n_open']}")
+        for st in s["open_structures"]:
+            typer.echo(
+                f"    #{st['position_id']} {st['underlying']} {st['structure_type']} "
+                f"x{st['contracts']} exp {st['expiration']} (dte {st['dte']})  "
+                f"R {st['r_dollars']:,.2f}  collateral {st['collateral_reserved']:,.2f}"
+            )
+    rec = s["reconciliation"]
+    if rec is None:
+        typer.secho(
+            "  reconciliation: NONE — condition AA refuses to open without a dated, clean "
+            "report (absence is never evidence of health)",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        typer.secho(
+            f"  reconciliation {rec['as_of']} ({rec['age_days']}d old): "
+            + ("clean" if rec["clean"] else f"DIVERGENT {rec['findings']}"),
+            fg=typer.colors.GREEN if rec["clean"] and rec["age_days"] <= 1 else typer.colors.YELLOW,
+        )
+    typer.echo(
+        f"  {chain['setting_key']}: {'ON' if chain['enabled'] else 'OFF'}"
+        f"   {auto['setting_key']}: {'ON' if auto['enabled'] else 'OFF'} "
+        f"(cap {auto['max_per_day']}/day)"
+    )
+    if chain["last_run_at"] is None:
+        typer.echo(f"  {chain['job']}: never run")
+    else:
+        typer.echo(
+            f"  {chain['job']}: last {chain['last_run_status']} at {chain['last_run_at']} "
+            f"({chain['hours_since_last_run']}h ago)"
+        )
+    typer.secho(f"  {s['notice']}", fg=typer.colors.YELLOW)
+
+
 @app.command("paper-probation-status")
 def paper_probation_status_cmd() -> None:
-    """Show every PAPER_APPROVED strategy's exact approved scope and whether
-    paper_probation_enabled is currently on."""
+    """Show every PAPER_APPROVED strategy's exact approved scope, whether
+    paper_probation_enabled is currently on, and the SIMULATED options paper
+    book's state (account, open structures, reconciliation age, last EOD chain
+    run). Read-only."""
     from sqlalchemy import select
 
     from signalforge.db.models import Strategy, StrategyVersion
@@ -2653,6 +2715,7 @@ def paper_probation_status_cmd() -> None:
         ).all()
         if not rows:
             typer.echo("No PAPER_APPROVED strategy exists.")
+            _echo_options_paper_section(session)
             return
         groups, skipped = approved_scan_groups(session)
         scanned_by_version = {vid: g for g in groups for vid in g.strategy_version_ids}
@@ -2692,6 +2755,7 @@ def paper_probation_status_cmd() -> None:
                     ),
                     fg=typer.colors.RED,
                 )
+        _echo_options_paper_section(session)
     typer.echo("\nResearch signal only — no order was placed.")
 
 
@@ -3174,9 +3238,74 @@ ACTIVATION_SETTINGS: dict[str, object] = {
 }
 
 
+def _options_activation_rows(session: Session) -> list[tuple[str, bool, str]]:
+    """The options paper book, REPORTED inside the activation checklist.
+
+    Every row here is ``True`` by construction and that is deliberate: the
+    activation ceremony switches on candidate-only alerts for the EQUITY trial,
+    and the options book can neither block it nor be enabled by it. Reporting the
+    options state as a *gate* would let an absent options account refuse the
+    equity activation, which is exactly backwards. It is reported because an
+    operator about to turn something on is owed the state of everything that is
+    already wired — the same reason the auto-simulation row is informational.
+    """
+    from signalforge.research.paper_probation import options_paper_status
+
+    s = options_paper_status(session)
+    chain = s["eod_chain"]
+    auto = s["auto_simulate"]
+    rec = s["reconciliation"]
+    if not s["exists"]:
+        account_detail = f"{s['account']!r} does not exist — nothing options-side can run"
+    else:
+        account_detail = (
+            f"{s['account']!r} exists: cash {s['cash']:,.0f}, "
+            f"collateral {s['collateral_reserved']:,.0f}"
+        )
+    return [
+        ("options paper account (reported; never gates the equity trial)", True, account_detail),
+        (
+            "options open structures (reported)",
+            True,
+            f"{s['n_open']} open"
+            + (
+                ""
+                if not s["open_structures"]
+                else " on " + ", ".join(sorted({o["underlying"] for o in s["open_structures"]}))
+            ),
+        ),
+        (
+            "options collateral reconciliation (reported; condition AA reads it)",
+            True,
+            (
+                "NONE — the second guard refuses to open without a dated clean report"
+                if rec is None
+                else f"{rec['as_of']} ({rec['age_days']}d old), "
+                + ("clean" if rec["clean"] else f"DIVERGENT {rec['findings']}")
+            ),
+        ),
+        (
+            f"options EOD chain {chain['job']} (reported)",
+            True,
+            f"{chain['setting_key']}={'ON' if chain['enabled'] else 'OFF'}; "
+            + (
+                "never run"
+                if chain["last_run_at"] is None
+                else f"last {chain['last_run_status']} {chain['hours_since_last_run']}h ago"
+            ),
+        ),
+        (
+            "options auto-simulation (reported; separate second setting)",
+            True,
+            f"{'ON' if auto['enabled'] else 'OFF'} (cap {auto['max_per_day']}/day)",
+        ),
+    ]
+
+
 def _activation_preconditions() -> list[tuple[str, bool, str]]:
     """Every fact that must hold before the limited paper-only trial may be
-    switched on. Read-only."""
+    switched on, plus a read-only options section that reports and never gates.
+    Read-only throughout."""
     from sqlalchemy import select
 
     from signalforge.alerts.channels.discord import DiscordChannel
@@ -3312,6 +3441,9 @@ def _activation_preconditions() -> list[tuple[str, bool, str]]:
                     ops["readiness"]["reason"],
                 )
             )
+        # Appended LAST and always True: reported, never a gate (see the
+        # helper's docstring). The equity verdict above is unchanged.
+        checks.extend(_options_activation_rows(session))
     return checks
 
 

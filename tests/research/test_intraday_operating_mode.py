@@ -65,12 +65,17 @@ def test_off_schedules_no_intraday_job(db_url: str) -> None:
 
     names = [s.name for s in default_job_specs()]
     assert "intraday_scan" not in names
-    # the pre-existing job list, unchanged and in its original order
+    # The pinned job list, in order. ``options_paper_eod`` was inserted by W3c
+    # between ``catch_up`` and ``agents_daily``: after the equity approved-scope
+    # scan (which runs INSIDE ``daily_eod_update``) and before the two jobs whose
+    # reports and cycle should see a marked, reconciled options book. Every other
+    # name and every other position is unchanged.
     assert names == [
         "daily_eod_update",
         "universe_update",
         "grid_daily",
         "catch_up",
+        "options_paper_eod",
         "agents_daily",
         "paper_mtm",
         "feed_probe",

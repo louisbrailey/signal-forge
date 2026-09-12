@@ -5,6 +5,14 @@ REAL paper trades compare to what the promotion pipeline expected.
 Read-only. Never writes a status, never places anything — the same
 downgrade/disable rules already enforced by ``research.health_monitor`` are
 only *reported* here, not duplicated.
+
+The options section (D3 §7.3) is read-only in the same sense and one degree
+stronger: :func:`options_paper_status` touches ORM models and nothing else. It
+deliberately does **not** import ``paper.options_ledger`` / ``options_marks`` /
+``options_auto_simulate``, because ``signalforge.app`` imports this module and
+contract S16 forbids the app layer from reaching the options paper decision path
+— by any number of hops. A status panel is a reader; it must not drag the door
+it reports on into the app's import graph.
 """
 
 from __future__ import annotations
@@ -17,14 +25,35 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from signalforge.db.models import (
+    JobRun,
+    OptionsPosition,
+    OptionsReconcileReport,
+    PaperAccount,
     PaperPosition,
     Strategy,
     StrategySealedTest,
     StrategyVersion,
 )
+from signalforge.db.types import utcnow
 from signalforge.domain import StrategyStatus
 from signalforge.research.approval_scope import approved_scopes
-from signalforge.research.health_monitor import _latest_oos_expectancy, latest_health_by_strategy
+from signalforge.research.health_monitor import (
+    _latest_oos_expectancy,
+    closed_options_r_multiples,
+    is_options_strategy_version,
+    latest_health_by_strategy,
+)
+from signalforge.settings_store import effective_research_config, get_setting
+
+#: The scheduled EOD chain's job name (``scheduler.OPTIONS_EOD_JOB``). Spelled
+#: here rather than imported: ``signalforge.scheduler`` pulls in the agents,
+#: alerts and briefing layers, and this module is on the app's import path.
+OPTIONS_EOD_JOB_NAME = "options_paper_eod"
+
+#: The second guard's own setting (``paper.options_ledger.OPTIONS_AUTO_SIM_*``),
+#: spelled here for the same reason — reporting a switch must not import the door.
+OPTIONS_AUTO_SIM_SETTING = "auto_simulate_options_enabled"
+OPTIONS_AUTO_SIM_CAP_SETTING = "auto_simulate_options_max_per_day"
 
 
 @dataclass(slots=True)
@@ -86,6 +115,157 @@ def _paper_trade_summary(
         max_drawdown_pct=round(max_dd * 100, 2),
         equity_multiple=round(equity, 4),
     )
+
+
+def options_paper_status(session: Session, *, as_of: date | None = None) -> dict[str, Any]:
+    """The SIMULATED options paper book's operating state — READ-ONLY.
+
+    Four facts, which are the four that decide whether the options branch could
+    do anything at all (D3 §7.3):
+
+    * **account** — the configured options account, or its absence. Absence is
+      not an error here: it is the state of every deployment that has not opted
+      in, and it is one of the two conditions the EOD chain returns early on.
+    * **open structures** — how many, on which underlyings, and how much
+      collateral they hold.
+    * **reconciliation age** — the second guard's condition AA needs a dated,
+      CLEAN ``options_reconcile_report`` for the fill session. A missing row
+      refuses exactly as a divergent row refuses, so "none" and "stale" are
+      reported as distinct facts, never collapsed into a warning.
+    * **last EOD chain run** — whether ``options_paper_eod`` ran, when, and with
+      what outcome. A clean reconciliation that is four days old means the chain
+      is not running, which is precisely what a status page must show.
+
+    Writes nothing, opens nothing, reconciles nothing.
+    """
+    on = as_of or date.today()
+    cfg = effective_research_config(session)
+    account_name = cfg.options_risk.paper_account_name
+    acct = session.scalar(select(PaperAccount).where(PaperAccount.name == account_name))
+
+    last_run = session.scalar(
+        select(JobRun)
+        .where(JobRun.name == OPTIONS_EOD_JOB_NAME)
+        .order_by(JobRun.started_at.desc())
+        .limit(1)
+    )
+    chain = {
+        "job": OPTIONS_EOD_JOB_NAME,
+        "enabled": bool(cfg.options.paper_eod_enabled),
+        "setting_key": "research.options.paper_eod_enabled",
+        "last_run_at": last_run.started_at.isoformat() if last_run else None,
+        "last_run_status": last_run.status if last_run else None,
+        "last_run_detail": (last_run.detail or "")[:200] if last_run else None,
+        "hours_since_last_run": (
+            round((utcnow() - last_run.started_at).total_seconds() / 3600, 1) if last_run else None
+        ),
+    }
+    auto_sim = {
+        "setting_key": OPTIONS_AUTO_SIM_SETTING,
+        "enabled": get_setting(session, OPTIONS_AUTO_SIM_SETTING, False) is True,
+        "max_per_day": get_setting(session, OPTIONS_AUTO_SIM_CAP_SETTING, 0),
+    }
+    if acct is None:
+        return {
+            "exists": False,
+            "account": account_name,
+            "as_of": on.isoformat(),
+            "open_structures": [],
+            "n_open": 0,
+            "collateral_reserved": 0.0,
+            "reconciliation": None,
+            "eod_chain": chain,
+            "auto_simulate": auto_sim,
+            "notice": "SIMULATED options paper account — no order was ever placed.",
+        }
+
+    open_rows = list(
+        session.scalars(
+            select(OptionsPosition).where(
+                OptionsPosition.account_id == acct.id, OptionsPosition.closed_at.is_(None)
+            )
+        )
+    )
+    n_closed = (
+        session.scalar(
+            select(OptionsPosition.id)
+            .where(OptionsPosition.account_id == acct.id, OptionsPosition.closed_at.is_not(None))
+            .limit(1)
+        )
+        is not None
+    )
+    report = session.scalar(
+        select(OptionsReconcileReport)
+        .where(OptionsReconcileReport.account_id == acct.id)
+        .order_by(OptionsReconcileReport.as_of.desc(), OptionsReconcileReport.id.desc())
+        .limit(1)
+    )
+    reconciliation = (
+        None
+        if report is None
+        else {
+            "as_of": report.as_of.isoformat(),
+            "clean": bool(report.clean),
+            "age_days": (on - report.as_of).days,
+            "findings": [str(f.get("check")) for f in report.findings_json],
+            "open_structures": report.open_structures,
+        }
+    )
+    return {
+        "exists": True,
+        "account": acct.name,
+        "as_of": on.isoformat(),
+        "cash": float(acct.cash),
+        "collateral_reserved": float(acct.collateral_reserved),
+        "spendable_cash": float(acct.spendable_cash),
+        "n_open": len(open_rows),
+        "has_closed_structures": n_closed,
+        "open_structures": [
+            {
+                "position_id": p.id,
+                "underlying": p.underlying_symbol,
+                "structure_type": p.structure_type,
+                "contracts": p.contracts,
+                "expiration": p.expiration_date.isoformat(),
+                "dte": (p.expiration_date - on).days,
+                "r_dollars": float(p.r_dollars),
+                "collateral_reserved": float(p.collateral_reserved),
+            }
+            for p in open_rows
+        ],
+        "reconciliation": reconciliation,
+        "eod_chain": chain,
+        "auto_simulate": auto_sim,
+        "notice": "SIMULATED options paper account — no order was ever placed.",
+    }
+
+
+def _options_version_summary(session: Session, strategy_version_id: int) -> dict[str, Any] | None:
+    """The options half of ONE version's live evidence, or ``None`` for an
+    equity family — asked through the health monitor's own explicit predicate so
+    the two readers cannot drift apart on what "an options strategy" means."""
+    if not is_options_strategy_version(session, strategy_version_id):
+        return None
+    series = closed_options_r_multiples(session, strategy_version_id)
+    n_open = len(
+        list(
+            session.scalars(
+                select(OptionsPosition.id).where(
+                    OptionsPosition.strategy_version_id == strategy_version_id,
+                    OptionsPosition.closed_at.is_(None),
+                )
+            )
+        )
+    )
+    return {
+        "n_closed_structures": series.n,
+        "n_open_structures": n_open,
+        "realized_expectancy_r": (
+            round(sum(series.r_multiples) / series.n, 4) if series.n else None
+        ),
+        "clamped_at_minus_1r": series.clamped,
+        "unclamped_min_r": series.unclamped_min,
+    }
 
 
 def paper_probation_context(session: Session) -> dict[str, Any]:
@@ -164,6 +344,9 @@ def paper_probation_context(session: Session) -> dict[str, Any]:
                     "equity_multiple": paper.equity_multiple,
                     "shortfall_vs_expected_r": shortfall,
                 },
+                # None for an equity family — the equity block above is
+                # untouched either way (D3 §7.3).
+                "options": _options_version_summary(session, ver.id),
                 "health": (
                     {
                         "window_label": health.window_label,
@@ -180,5 +363,6 @@ def paper_probation_context(session: Session) -> dict[str, Any]:
 
     return {
         "strategies": rows,
+        "options_paper": options_paper_status(session),
         "generated_at": date.today().isoformat(),
     }

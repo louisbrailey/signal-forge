@@ -9,6 +9,17 @@ The rules live in ``HealthMonitorConfig`` (version-controlled, folded into
 ``config_hash``, shown in Strategy Lab). Every transition writes a
 ``strategy_health`` row, an ``audit_log`` row, and a JSONL audit line.
 
+Two asset classes, one monitor (D3 §7.3). Options structures never write a
+``paper_position`` row, so the equity reader here is structurally blind to them —
+and blind means never downgraded, a fail-open in the one place this system must
+fail closed. The options branch is therefore EXPLICIT
+(:func:`is_options_strategy_version` -> :func:`closed_options_r_multiples`), is
+entered only for an options family, and uses the options definition of R:
+``realized_pnl / r_dollars``, max-loss-normalised and clamped at -1R, with the
+clamp count and the unclamped minimum reported beside it rather than absorbed.
+An equity version's series, expectancy, z-score, note and ``strategy_health`` row
+are unchanged, to the digit.
+
 Deterministic: no RNG, no LLM, no network.
 """
 
@@ -27,6 +38,8 @@ from signalforge.db.models import (
     AuditLog,
     BacktestMetric,
     BacktestRun,
+    Candidate,
+    OptionsPosition,
     PaperPosition,
     Strategy,
     StrategyHealth,
@@ -100,6 +113,121 @@ def closed_paper_r_multiples(
 
 #: The monitor's own internal name, kept so this module reads as it did.
 _paper_returns_r = closed_paper_r_multiples
+
+
+#: D3 §7.3 / D3 §2.6: an options structure's R is its MAX LOSS at entry after
+#: entry costs, and the live series is CLAMPED at -1 so R means what it means in
+#: the backtest. Two mechanisms can push the raw ratio below -1 (the intrinsic
+#: floor on a forced close, and exit costs on a structure closed at max loss), so
+#: the clamp is real and its rate is a finding, not a footnote.
+OPTIONS_R_FLOOR = -1.0
+
+
+@dataclass(frozen=True, slots=True)
+class OptionsRSeries:
+    """The options half of a version's live R series, with its own honesty
+    counters kept ALONGSIDE the numbers rather than summarised away."""
+
+    r_multiples: list[float]  # clamped at OPTIONS_R_FLOOR
+    clamped: int
+    unclamped_min: float | None
+
+    @property
+    def n(self) -> int:
+        return len(self.r_multiples)
+
+    def note(self) -> str:
+        if not self.r_multiples:
+            return ""
+        worst = "n/a" if self.unclamped_min is None else f"{self.unclamped_min:+.3f}"
+        return (
+            f"; {self.n} closed options structure(s) included "
+            f"({self.clamped} clamped at {OPTIONS_R_FLOOR:+.0f}R, unclamped min {worst})"
+        )
+
+
+def is_options_strategy_version(session: Session, strategy_version_id: int) -> bool:
+    """Is this version an OPTIONS family? Asked EXPLICITLY, never inferred from
+    an empty result.
+
+    D3 §7.3 is blunt about why: options structures never write a
+    ``paper_position`` row, so both R-computing readers are structurally blind to
+    them by default — and blind means never downgraded, which is a fail-open in
+    the one place this system must fail closed. The options branch therefore has
+    to be *written*, and it has to be written behind a positive predicate so that
+    "no options rows" and "not an options strategy" stay distinguishable.
+
+    Two positive signals, either of which settles it: the version already holds
+    (or held) an options structure, or it has ever produced a candidate carrying
+    a ``structure_kind`` — the same discriminator ``paper.ledger`` refuses on.
+    """
+    has_structure = session.scalar(
+        select(OptionsPosition.id)
+        .where(OptionsPosition.strategy_version_id == strategy_version_id)
+        .limit(1)
+    )
+    if has_structure is not None:
+        return True
+    return (
+        session.scalar(
+            select(Candidate.id)
+            .where(
+                Candidate.strategy_version_id == strategy_version_id,
+                Candidate.structure_kind.is_not(None),
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
+def closed_options_r_multiples(
+    session: Session,
+    strategy_version_id: int,
+    *,
+    closed_since: datetime | None = None,
+) -> OptionsRSeries:
+    """R-multiples of every closed options STRUCTURE for this strategy version.
+
+    R is max-loss-normalised: ``realized_pnl / r_dollars``, where ``r_dollars``
+    is the structure's maximum loss at entry **after entry costs** — the same
+    denominator every capital limit in D3 §5 is stated against, and the same one
+    ``options_marks`` stores as ``pnl_r``. It is NOT the equity definition
+    (entry-to-stop distance x shares): a structure has no stop level and no
+    per-share price, which is exactly why D3 §13 gave it its own table.
+
+    The returned series is CLAMPED at ``OPTIONS_R_FLOOR``; the clamp count and
+    the unclamped minimum come back with it so a high clamp rate is visible
+    rather than absorbed (D3 open question 16).
+
+    ``closed_since`` mirrors :func:`closed_paper_r_multiples` so the arming
+    ceremony's evidence window means the same thing on both asset classes.
+    """
+    stmt = select(OptionsPosition).where(
+        OptionsPosition.strategy_version_id == strategy_version_id,
+        OptionsPosition.closed_at.is_not(None),
+    )
+    if closed_since is not None:
+        stmt = stmt.where(OptionsPosition.closed_at >= closed_since)
+    clamped = 0
+    raw: list[float] = []
+    out: list[float] = []
+    for p in session.scalars(stmt):
+        r_dollars = float(p.r_dollars)
+        if r_dollars <= 0:
+            continue
+        value = float(p.realized_pnl) / r_dollars
+        raw.append(value)
+        if value < OPTIONS_R_FLOOR:
+            clamped += 1
+            value = OPTIONS_R_FLOOR
+        out.append(value)
+    return OptionsRSeries(r_multiples=out, clamped=clamped, unclamped_min=min(raw) if raw else None)
+
+
+#: The "this version is not an options family" answer, so the equity path never
+#: constructs an options object at all.
+_NO_OPTIONS = OptionsRSeries(r_multiples=[], clamped=0, unclamped_min=None)
 
 
 def _latest_oos_expectancy(session: Session, strategy_version_id: int) -> float | None:
@@ -178,6 +306,14 @@ def evaluate_strategy_health(
             continue
 
         returns = _paper_returns_r(session, ver.id)
+        # D3 §7.3's explicit options branch. Asked per version and only for an
+        # options family, so an equity version's series — and therefore its
+        # expectancy, its z-score, its note and its StrategyHealth row — is the
+        # identical list this function has always built.
+        options = _NO_OPTIONS
+        if is_options_strategy_version(session, ver.id):
+            options = closed_options_r_multiples(session, ver.id)
+            returns = [*returns, *options.r_multiples]
         n = len(returns)
         window = f"last_{n}_paper_trades"
 
@@ -222,12 +358,29 @@ def evaluate_strategy_health(
         z = (paper_exp - bt_exp) / std_err
 
         new_status, action = _decide(strat.status, z, paper_exp, cfg)
-        note = f"paper {paper_exp:+.3f}R vs backtest {bt_exp:+.3f}R over {n} trades (z={z:+.2f})"
+        note = (
+            f"paper {paper_exp:+.3f}R vs backtest {bt_exp:+.3f}R over {n} trades (z={z:+.2f})"
+            + options.note()
+        )
 
         if action != _NO_ACTION:
             strat.status = new_status
             ver.status = new_status
             session.flush()
+            after_json: dict[str, object] = {
+                "status": new_status.value,
+                "z_score": round(z, 3),
+                "paper_expectancy_r": round(paper_exp, 4),
+                "backtest_expectancy_r": round(bt_exp, 4),
+                "n_paper_trades": n,
+                "rule": f"z<={cfg.downgrade_z} (downgrade) / z<={cfg.disable_z} (disable)",
+            }
+            # Added ONLY when the options branch actually contributed, so an
+            # equity transition's audit payload is the identical dict it was.
+            if options.n:
+                after_json["n_options_structures"] = options.n
+                after_json["options_clamped_at_minus_1r"] = options.clamped
+                after_json["options_unclamped_min_r"] = options.unclamped_min
             session.add(
                 AuditLog(
                     ts=utcnow(),
@@ -235,14 +388,7 @@ def evaluate_strategy_health(
                     action=f"strategy.{action}",
                     entity=f"{strat.name}@{ver.version}",
                     before_json={"status": from_status},
-                    after_json={
-                        "status": new_status.value,
-                        "z_score": round(z, 3),
-                        "paper_expectancy_r": round(paper_exp, 4),
-                        "backtest_expectancy_r": round(bt_exp, 4),
-                        "n_paper_trades": n,
-                        "rule": f"z<={cfg.downgrade_z} (downgrade) / z<={cfg.disable_z} (disable)",
-                    },
+                    after_json=after_json,
                 )
             )
             audit.record(

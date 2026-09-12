@@ -40,6 +40,52 @@
   </p>
 </section>
 
+{% if options_paper %}
+<section class="mt-4 rounded-lg border border-slate-200 bg-white p-4">
+  <h2 class="text-sm font-semibold text-slate-900">Options paper book (SIMULATED, separate account)</h2>
+  <p class="mt-1 text-xs text-slate-500">
+    Read-only. A separate account, a separate ledger and a second guard — nothing here can be
+    opened from this page, and the options branch has its own setting, off by default.
+  </p>
+  {% if not options_paper.exists %}
+  <p class="mt-2 text-sm text-amber-700">
+    Account <code>{{ options_paper.account }}</code> does not exist — the options EOD chain returns
+    immediately and nothing options-side can run.
+  </p>
+  {% else %}
+  <dl class="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-slate-600 sm:grid-cols-4">
+    <div><dt class="text-slate-400">Account</dt><dd><code>{{ options_paper.account }}</code></dd></div>
+    <div><dt class="text-slate-400">Cash</dt><dd class="font-mono">{{ '%.2f' % options_paper.cash }}</dd></div>
+    <div><dt class="text-slate-400">Collateral reserved</dt><dd class="font-mono">{{ '%.2f' % options_paper.collateral_reserved }}</dd></div>
+    <div><dt class="text-slate-400">Open structures</dt><dd class="font-mono">{{ options_paper.n_open }}</dd></div>
+  </dl>
+  {% for o in options_paper.open_structures %}
+  <p class="mt-1 text-xs text-slate-600 font-mono">
+    #{{ o.position_id }} {{ o.underlying }} {{ o.structure_type }} &times;{{ o.contracts }} exp {{ o.expiration }} (dte {{ o.dte }}) — R {{ '%.2f' % o.r_dollars }}
+  </p>
+  {% endfor %}
+  {% endif %}
+  <p class="mt-2 text-xs {{ 'text-emerald-700' if options_paper.reconciliation and options_paper.reconciliation.clean else 'text-amber-700' }}">
+    {% if options_paper.reconciliation %}
+      Collateral reconciliation {{ options_paper.reconciliation.as_of }} ({{ options_paper.reconciliation.age_days }}d old):
+      {{ 'clean' if options_paper.reconciliation.clean else 'DIVERGENT — ' ~ options_paper.reconciliation.findings|join(', ') }}
+    {% else %}
+      No collateral reconciliation report — the second guard's condition AA refuses to open without a dated, clean one.
+    {% endif %}
+  </p>
+  <p class="mt-1 text-xs text-slate-500">
+    <code>{{ options_paper.eod_chain.setting_key }}</code>:
+    <span class="font-medium {{ 'text-emerald-700' if options_paper.eod_chain.enabled else 'text-slate-500' }}">{{ 'ON' if options_paper.eod_chain.enabled else 'OFF' }}</span>
+    &middot; <code>{{ options_paper.auto_simulate.setting_key }}</code>:
+    <span class="font-medium {{ 'text-emerald-700' if options_paper.auto_simulate.enabled else 'text-slate-500' }}">{{ 'ON' if options_paper.auto_simulate.enabled else 'OFF' }}</span>
+    (cap {{ options_paper.auto_simulate.max_per_day }}/day)
+    &middot; <code>{{ options_paper.eod_chain.job }}</code>:
+    {% if options_paper.eod_chain.last_run_at %}last {{ options_paper.eod_chain.last_run_status }}, {{ options_paper.eod_chain.hours_since_last_run }}h ago{% else %}never run{% endif %}
+  </p>
+  <p class="mt-2 text-xs text-amber-700">{{ options_paper.notice }}</p>
+</section>
+{% endif %}
+
 <div class="mt-6 space-y-6">
 {% for s in strategies %}
   <section class="rounded-lg border border-slate-200 bg-white p-4">
