@@ -40,7 +40,7 @@ from alembic import op
 import signalforge.db.types
 
 revision: str = "a7f3c2b8e451"
-down_revision: str | None = "f1c4a8b2d6e7"
+down_revision: str | None = "a7c3e91b45d2"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
