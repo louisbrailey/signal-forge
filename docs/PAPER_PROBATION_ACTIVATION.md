@@ -175,3 +175,41 @@ the activation preconditions now report whether the live hash matches an approve
 scope. Precondition list re-run: all OK.
 
 **Exposure.** No trade, alert, or decision was affected (0 candidates in the window).
+
+
+## Change 2026-09-11 — the approved-scope scan is per strategy version
+
+**Why.** `research/approved_scope_scan.py` scanned every PAPER_APPROVED horizon on
+ONE fixed dataset (the `ex_meta` variant → `DataSnapshot` #3, 24 symbols). Approval
+scope is per `StrategyVersion`, so when `trend_continuation.medium_swing` v3 was
+approved on `DataSnapshot` #11 (`research_150_massive_10y_presealed_sel`, 150 symbols)
+while versions 2 and 5 stayed on #3, v3's approval could never have produced an
+in-scope candidate — and therefore never an alert or an auto-simulated paper trade.
+
+**Now.** Each PAPER_APPROVED version's **newest** approved scope decides its dataset.
+Versions are grouped by `(dataset_snapshot_id, horizon, source)` and each group is
+scanned once, over that snapshot's exact `symbols_json`, from that scope's single
+recorded source. The live grouping is three scans:
+
+| Snapshot | Horizon | Symbols | Strategy versions |
+|---|---|---|---|
+| #3 `universe_24_ex_meta` | SHORT_SWING | 24 | 2 (`trend_continuation.short_swing`) |
+| #3 `universe_24_ex_meta` | MEDIUM_SWING | 24 | 5 (`relative_strength.medium_swing`) |
+| #11 `research_150_massive_10y_presealed_sel` | MEDIUM_SWING | 150 | 3 (`trend_continuation.medium_swing`) |
+
+**Gates.** Every gate above is retained. The data-readiness gate is now evaluated
+**per approved universe** — a stale or incomplete 150-symbol universe blocks only its
+own scans, never the 24-symbol one — and each block records its own `AUDIT_BLOCKED`
+row naming the snapshot. A version whose newest scope could never match (no passing
+evaluation, no snapshot, no single source, a missing/empty snapshot, or a universe
+that disagrees with the snapshot) is skipped with an explicit reason rather than
+scanned on another version's data. Each persisted run is verified against the approved
+scope on dataset snapshot, source **and** universe; a mismatch raises loudly.
+INTRADAY remains excluded.
+
+**Surfaces.** `job_approved_scope_scan` is unchanged as a call, but now hands
+`paper/auto_simulate.py` every group's `scan_run_id`. `/ops` and the activation
+preconditions report "daily bars current" and "approved-scope scan data readiness"
+once per distinct approved universe. The activation precondition
+"exactly two PAPER_APPROVED strategy versions" is replaced by
+**"every PAPER_APPROVED version has a live-matching scope"** — no count is hard-coded.

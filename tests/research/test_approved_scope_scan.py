@@ -37,7 +37,12 @@ from signalforge.research.approved_scope_scan import (
     universe_readiness,
 )
 
-NOW = datetime(2026, 9, 9, 22, 0, tzinfo=UTC)
+# Clock-RELATIVE, deliberately: data_readiness takes an explicit ``now`` but
+# the feed-staleness gate underneath it (data.feeds.feed_status_report) reads
+# the real wall clock, so a hard-coded NOW turns every readiness test into a
+# time bomb that starts failing a couple of days after it was written.
+NOW = datetime.now(UTC)
+TODAY = NOW.date()
 SYMS = ["AAA", "BBB", "CCC", "DDD"]
 OTHER_SYMS = ["EEE", "FFF", "GGG", "HHH", "III", "JJJ"]
 SRC = "massive"
@@ -61,8 +66,8 @@ def _ingest(session: Session, *, status: str = "ok", age: timedelta = timedelta(
         IngestionRun(
             provider=SRC,
             feed_type=FeedType.BAR_DAILY,
-            requested_start=date(2026, 8, 1),
-            requested_end=date(2026, 9, 9),
+            requested_start=TODAY - timedelta(days=40),
+            requested_end=TODAY,
             status=status,
             started_at=NOW - age - timedelta(minutes=5),
             finished_at=NOW - age,
@@ -84,7 +89,8 @@ def _bars(
             inst = Instrument(symbol=sym, name=sym)
             session.add(inst)
             session.flush()
-        for d in (date(2026, 8, 20), latest.get(sym, date(2026, 9, 9))):
+        newest = latest.get(sym, TODAY)
+        for d in (newest - timedelta(days=20), newest):
             session.add(
                 OHLCVDaily(
                     instrument_id=inst.id,
@@ -210,8 +216,8 @@ def test_readiness_blocks_on_failed_or_old_ingest(session: Session) -> None:
 def test_readiness_blocks_on_incomplete_bars(session: Session) -> None:
     _feed(session, stale=False)
     _ingest(session)
-    # two of four symbols never got the 09-09 bar -> 50% coverage
-    _bars(session, {"CCC": date(2026, 9, 8), "DDD": date(2026, 9, 8)})
+    # two of four symbols never got the newest session's bar -> 50% coverage
+    _bars(session, {"CCC": TODAY - timedelta(days=1), "DDD": TODAY - timedelta(days=1)})
     reason = data_readiness(session, SYMS, source=SRC, now=NOW) or ""
     assert reason.startswith("incomplete data") and "CCC" in reason and "DDD" in reason
 
@@ -219,7 +225,7 @@ def test_readiness_blocks_on_incomplete_bars(session: Session) -> None:
 def test_readiness_blocks_on_old_bars(session: Session) -> None:
     _feed(session, stale=False)
     _ingest(session)
-    _bars(session, dict.fromkeys(SYMS, date(2026, 9, 1)))
+    _bars(session, dict.fromkeys(SYMS, TODAY - timedelta(days=8)))
     assert "older than 5 days" in (data_readiness(session, SYMS, source=SRC, now=NOW) or "")
 
 
@@ -246,7 +252,7 @@ def test_readiness_is_independent_per_universe(session: Session) -> None:
     _feed(session, stale=False)
     _ingest(session)
     _bars(session, {})  # SYMS current
-    _bars(session, dict.fromkeys(OTHER_SYMS, date(2026, 8, 1)), symbols=OTHER_SYMS)
+    _bars(session, dict.fromkeys(OTHER_SYMS, TODAY - timedelta(days=40)), symbols=OTHER_SYMS)
     assert data_readiness(session, SYMS, source=SRC, now=NOW) is None
     assert "older than 5 days" in (data_readiness(session, OTHER_SYMS, source=SRC, now=NOW) or "")
 
@@ -523,7 +529,8 @@ def test_a_blocked_universe_does_not_block_the_other(
     _feed(session, stale=False)
     _ingest(session)
     _bars(session, {})  # SYMS current
-    _bars(session, dict.fromkeys(OTHER_SYMS, date(2026, 8, 1)), symbols=OTHER_SYMS)  # stale
+    # OTHER_SYMS stale: their newest bar is far older than MAX_BAR_AGE_DAYS
+    _bars(session, dict.fromkeys(OTHER_SYMS, TODAY - timedelta(days=40)), symbols=OTHER_SYMS)
     small = _snapshot(session, "u4", SYMS)
     big = _snapshot(session, "u6", OTHER_SYMS)
     v_small = _approve(session, name="a", horizon=Horizon.SHORT_SWING, snapshot=small)
@@ -548,8 +555,8 @@ def test_every_universe_blocked_means_not_run(
 ) -> None:
     _feed(session, stale=False)
     _ingest(session)
-    _bars(session, dict.fromkeys(SYMS, date(2026, 8, 1)))
-    _bars(session, dict.fromkeys(OTHER_SYMS, date(2026, 8, 1)), symbols=OTHER_SYMS)
+    _bars(session, dict.fromkeys(SYMS, TODAY - timedelta(days=40)))
+    _bars(session, dict.fromkeys(OTHER_SYMS, TODAY - timedelta(days=40)), symbols=OTHER_SYMS)
     small = _snapshot(session, "u4", SYMS)
     big = _snapshot(session, "u6", OTHER_SYMS)
     _approve(session, name="a", horizon=Horizon.SHORT_SWING, snapshot=small)
@@ -615,7 +622,7 @@ def test_universe_readiness_reports_one_row_per_universe(session: Session) -> No
     _feed(session, stale=False)
     _ingest(session)
     _bars(session, {})
-    _bars(session, dict.fromkeys(OTHER_SYMS, date(2026, 8, 1)), symbols=OTHER_SYMS)
+    _bars(session, dict.fromkeys(OTHER_SYMS, TODAY - timedelta(days=40)), symbols=OTHER_SYMS)
     small = _snapshot(session, "u4", SYMS)
     big = _snapshot(session, "u6", OTHER_SYMS)
     _approve(session, name="a", horizon=Horizon.SHORT_SWING, snapshot=small)
@@ -760,6 +767,4 @@ def test_each_versions_candidates_match_only_its_own_scope(session: Session) -> 
         approved_ids = set(version_ids.values())
         for cand in session.scalars(select(Candidate).where(Candidate.scan_run_id == run.id)):
             if cand.strategy_version_id in approved_ids:
-                assert _matches(run, cand.strategy_version_id) is (
-                    cand.strategy_version_id == own
-                )
+                assert _matches(run, cand.strategy_version_id) is (cand.strategy_version_id == own)
