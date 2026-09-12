@@ -80,6 +80,10 @@ def cost_model(spread_multiplier: float = 1.0) -> OptionCostModel:
     )
 
 
+#: D5a §3: a version-fixed width in dollars of strike distance per contract.
+STUB_WIDTH_DECLARED: float = 2.0
+
+
 @dataclass
 class StubOptionsStrategy:
     """Enters one short vertical per expiry, on the first session 35+ days out.
@@ -141,13 +145,13 @@ class StubOptionsStrategy:
     def oat_parameters(self) -> Mapping[str, Sequence[float | int]]:
         return {"stop_multiple": [1.5, 3.0]}
 
-    def structure_identity(self, *, width_declared: float) -> StructureIdentity:
+    def structure_identity(self) -> StructureIdentity:
         return StructureIdentity(
             structure_type=StructureType.VERTICAL_CREDIT,
             r_basis_formula="R = width x M x contracts - net_credit + entry_costs",
             legs_per_structure=2,
             leg_sign_pattern=(-1, +1),
-            width_declared=width_declared,
+            width_declared=STUB_WIDTH_DECLARED,
             m_declared=100,
         )
 

@@ -206,7 +206,7 @@ class OptionsStrategy(Protocol):
 
     def oat_parameters(self) -> Mapping[str, Sequence[float | int]]: ...
 
-    def structure_identity(self, *, width_declared: float) -> StructureIdentity: ...
+    def structure_identity(self) -> StructureIdentity: ...
 
     def mechanical_benchmark(self) -> OptionsStrategy: ...
 
@@ -1051,23 +1051,6 @@ def _sharpe(
     ).sharpe
 
 
-def _declared_width(
-    strategy: OptionsStrategy, trades: Sequence[OptionTrade], fallback_close: float
-) -> float:
-    """The width gate 0.5 compares against, recovered from the R identity.
-
-    ``R_at_print + net_credit_at_print = width x M x contracts``, so the realised
-    scale is a fact about the trades rather than a restatement of the parameter.
-    With no trades there is nothing to recover and the declared ``width_pct x U``
-    is used, which gate 0.5 then checks against an empty observed set.
-    """
-    if trades:
-        return round((trades[0].r_at_print + trades[0].net_credit_at_print) / 100.0, 6)
-    axes = strategy.sensitivity_axes()
-    width_pct = float(next(iter(axes.get("width_pct", [0.01]))))
-    return round(width_pct * fallback_close, 6)
-
-
 def _limits_are_hashed(evaluation: OptionsEvaluationConfig) -> bool:
     """Is the arming limit set inside ``options_config_hash``?  Asked, not assumed.
 
@@ -1177,9 +1160,9 @@ def assemble_options_evidence(
             if len(series):
                 closes[r.symbol] = float(series.close[-1])
 
-    identity = strategy.structure_identity(
-        width_declared=_declared_width(strategy, trades, max(closes.values(), default=0.0))
-    )
+    # D5a §3: the width is a constant of the version, so the declared half of gate 0.5
+    # takes no argument; the observed half is recovered from the trades by the gate.
+    identity = strategy.structure_identity()
     r_scale = identity.r_scale_usd or 1.0
 
     availability = _availability(
@@ -1528,7 +1511,17 @@ def _availability(
         structures_breaching_per_structure_cap=sum(
             1 for r in r_values if r > th.options_per_structure_max_loss
         ),
-        width_grid_declared=tuple(float(v) for v in axes.get("width_pct", ())),
+        # D5a §3: widths are declared in DOLLARS of strike distance per contract; the
+        # grid no longer carries a width axis, so the OAT table (or the identity's
+        # single width) is what gate 0.i discloses.
+        width_grid_declared=tuple(
+            float(v)
+            for v in (
+                axes.get("width_usd")
+                or strategy.oat_parameters().get("width_usd")
+                or (identity.width_declared,)
+            )
+        ),
         limits_source=limits_source,
         limits_in_options_config_hash=_limits_are_hashed(ev),
     )
