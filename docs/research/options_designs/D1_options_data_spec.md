@@ -1635,3 +1635,22 @@ loosened. Four were added (`IV_MAX_PRICE_RESIDUAL`, `IV_MIN_VEGA`, `SPREAD_MULTI
 R4 permits. One constant moved **toward** the map: `DTE_ENTRY_MIN` 20 → 21.
 
 Nothing under `src/` or `tests/` was changed to produce this revision.
+
+## Appendix P — Provider probes run by the orchestrator (2026-09-12, FACT)
+
+Five read-only requests against the live plan (no rows written; key never printed):
+
+| Question | Request | Result |
+|---|---|---|
+| OQ-1 dividends entitlement | `/v3/reference/dividends?ticker=SPY&limit=2` | **200 OK** — fields `cash_amount, declaration_date, ex_dividend_date, pay_date, frequency` → `q` can rest on declared dividends |
+| OQ-1 splits entitlement | `/v3/reference/splits?ticker=AAPL&limit=2` | **200 OK** — `execution_date, split_from, split_to` → corporate-action source exists (D7/OQ-3 resolved) |
+| OQ-2 expired contracts | `/v3/reference/options/contracts?underlying_ticker=SPY&expired=true&expiration_date=2023-11-17` | **200 OK**, results returned → §7 is no longer VOID; `expired=true` is the flag |
+| OQ-2 history depth | `/v2/aggs/ticker/O:SPY221216C00400000/range/1/day/…` | **200**, 44 bars; `O:SPY220617…` → **403 "plan doesn't include this data timeframe"** |
+| OQ-2 depth boundary | expiries 2022-12-16 → 2024-09-20 | all **200** (43–44 bars each) |
+
+**Consequence.** Options daily aggregates are served from approximately **2022-10** onward
+(the 2022-06 expiry's window is refused; the 2022-12 expiry's 60-day window is served in
+full). The D1 window 2023-09-04 → 2026-09-04 (1,096 days) sits inside the entitled depth,
+and up to ~10 extra monthly cycles (2022-11 → 2023-08) are available if D4's gate-2/gate-6
+arithmetic needs them. Rate limit for options traffic remains unmeasured (OQ-2 second half);
+the §7 request count (~29,370) and hours (~99 at 12.1 s pacing) stand until it is.
