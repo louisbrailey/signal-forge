@@ -273,13 +273,27 @@ def test_approved_horizons_excludes_intraday(session: Session) -> None:
     assert approved_horizons(session) == [Horizon.SHORT_SWING]
 
 
-def test_groups_exclude_intraday_versions(session: Session) -> None:
+def test_groups_follow_the_intraday_operating_policy(session: Session) -> None:
+    """INTRADAY is excluded by research.intraday_policy's single flag (default
+    off), not by a hard-coded condition here — the same answer every other
+    policy surface gives."""
+    from signalforge.config.research import ResearchConfig
+
+    off = ResearchConfig()
+    on = off.model_copy(
+        update={"intraday": off.intraday.model_copy(update={"operating_enabled": True})}
+    )
     snap = _snapshot(session, "u4", SYMS)
-    _approve(session, name="intra", horizon=Horizon.INTRADAY, snapshot=snap)
+    intra = _approve(session, name="intra", horizon=Horizon.INTRADAY, snapshot=snap)
     swing = _approve(session, name="swing", horizon=Horizon.SHORT_SWING, snapshot=snap)
-    groups, skipped = approved_scan_groups(session)
+
+    groups, skipped = approved_scan_groups(session, off)
     assert [g.strategy_version_ids for g in groups] == [(swing.id,)]
     assert skipped == []  # an INTRADAY version is out of scope, not "skipped"
+
+    groups_on, _ = approved_scan_groups(session, on)
+    assert {g.horizon for g in groups_on} == {Horizon.INTRADAY, Horizon.SHORT_SWING}
+    assert {g.strategy_version_ids for g in groups_on} == {(intra.id,), (swing.id,)}
 
 
 def test_versions_sharing_a_snapshot_and_horizon_are_one_group(session: Session) -> None:
