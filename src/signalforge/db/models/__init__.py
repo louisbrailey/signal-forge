@@ -7,6 +7,10 @@ autogenerate and ``Base.metadata.create_all`` see the full schema.
 from __future__ import annotations
 
 from signalforge.db.base import Base
+from signalforge.db.models.grid import (
+    GridPosition,
+    GridTradeRow,
+)
 from signalforge.db.models.market import (
     CorporateAction,
     DataFeedStatus,
@@ -127,6 +131,9 @@ __all__ = [
     "PaperTrade",
     "TradeCorrection",
     "JournalEntry",
+    # grid (mechanical strategy — NOT promotion-gated)
+    "GridPosition",
+    "GridTradeRow",
     # system
     "User",
     "AppSetting",

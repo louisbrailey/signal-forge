@@ -58,6 +58,10 @@ def test_every_scope_field_exists_on_the_model() -> None:
         # config_hash the moment it appeared and put both live PAPER_APPROVED
         # approvals out of scope for nothing.
         "intraday",
+        # The mechanical grid is not a registered, promotion-gated strategy: it
+        # produces no candidate and can never be approved, so its parameters
+        # must not appear in — or be able to change — an approval scope hash.
+        "grid",
     }
 
 
@@ -68,3 +72,14 @@ def test_the_intraday_operating_flag_does_not_move_the_scope_hash() -> None:
     )
     assert on.config_hash == base.config_hash  # not a signal-shaping change
     assert on.full_config_hash != base.full_config_hash  # but still audited
+
+
+def test_grid_settings_can_never_change_the_approval_scope_hash() -> None:
+    from signalforge.config.research import GridConfig
+
+    base = ResearchConfig()
+    grid_on = ResearchConfig(
+        grid=GridConfig(enabled=True, per_symbol_cap=5.0, universe_size=1_000, buy_usd=1.0)
+    )
+    assert base.config_hash == grid_on.config_hash
+    assert base.full_config_hash != grid_on.full_config_hash

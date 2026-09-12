@@ -320,6 +320,7 @@ def test_eod_update_and_catch_up_never_overlap(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(sched, "job_ingest", lambda: calls.append("ingest"))
     monkeypatch.setattr(sched, "job_scan_all", lambda: calls.append("scan"))
     monkeypatch.setattr(sched, "job_approved_scope_scan", lambda: calls.append("approved"))
+    monkeypatch.setattr(sched, "job_grid_daily", lambda: calls.append("grid"))
     monkeypatch.setattr(sched, "catch_up_pending", lambda now=None: (True, "owed"))
     monkeypatch.setattr(sched, "guarded", lambda name, fn: fn)  # keep the nested guard out of it
 
@@ -332,5 +333,6 @@ def test_eod_update_and_catch_up_never_overlap(monkeypatch: pytest.MonkeyPatch) 
         sched._EOD_UPDATE_LOCK.release()
 
     sched.job_catch_up()  # once free, catch-up runs the full update exactly once
-    assert calls == ["ingest", "scan", "approved"]
+    # The mechanical grid runs LAST, on the bars the ingest just completed.
+    assert calls == ["ingest", "scan", "approved", "grid"]
     assert not sched._EOD_UPDATE_LOCK.locked()  # released after the run

@@ -380,7 +380,8 @@ def job_intraday_scan() -> None:
 
 def job_daily_eod_update() -> None:
     """The single post-close update: fetch the day's completed bars, rescan,
-    then run the approved-scope scan on the freshly completed data.
+    run the approved-scope scan on the freshly completed data, then the
+    mechanical grid job (config-gated OFF).
 
     End-of-day only. Never runs intraday. ``job_ingest`` throttles to the
     provider's rate limit; a stale/failed feed just leaves the last scan in
@@ -398,8 +399,39 @@ def job_daily_eod_update() -> None:
         # Operational Status page shows it by name) — a failure still propagates
         # and also marks daily_eod_update failed.
         guarded("approved_scope_scan", job_approved_scope_scan)()
+        # The mechanical grid runs last, on the freshly completed bars, behind
+        # its own config flag (research.grid.enabled, default False). Nested
+        # guard so it leaves its OWN JobRun row and obeys the kill switch.
+        guarded("grid_daily", job_grid_daily)()
     finally:
         _EOD_UPDATE_LOCK.release()
+
+
+def job_grid_daily() -> None:
+    """Mechanical grid strategy, one evaluation per symbol per session.
+
+    Runs AFTER ``daily_eod_update`` has ingested the day's completed bars (it is
+    chained at the end of that job). Evaluates the previous session's close and
+    fills at today's open on a dedicated ``grid`` paper account.
+
+    Config-gated OFF (``research.grid.enabled``). The grid is NOT a registered,
+    promotion-gated strategy: it never produces a candidate, never alerts, and
+    never touches the research paper account.
+    """
+    from signalforge.db.session import session_scope
+    from signalforge.grid.live import run_grid_daily
+    from signalforge.settings_store import effective_research_config
+
+    # Read the flag as a plain reader first: a disabled run must not take the
+    # SQLite write lock (BEGIN IMMEDIATE) for nothing.
+    with session_scope() as session:
+        cfg = effective_research_config(session).grid
+    if not cfg.enabled:
+        _log.info("grid.skipped_disabled")
+        return
+    with session_scope(write=True) as session:
+        res = run_grid_daily(session, cfg=cfg)
+    _log.info("grid.daily", **res.to_dict())
 
 
 def job_universe_update() -> None:
@@ -448,6 +480,7 @@ MANUAL_JOBS: dict[str, JobFn] = {
     # Runnable by hand even while intraday operation is off — it is then a
     # logged no-op, which is the point: the operator can prove what it would do.
     "intraday_scan": job_intraday_scan,
+    "grid_daily": job_grid_daily,
 }
 
 

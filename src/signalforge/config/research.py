@@ -19,6 +19,7 @@ from signalforge.domain import Horizon
 __all__ = [
     "DataQualityConfig",
     "EventFilters",
+    "GridConfig",
     "HealthMonitorConfig",
     "Horizon",
     "IntradayOperationsConfig",
@@ -191,6 +192,38 @@ class AgentsConfig(BaseModel):
     llm_narratives: bool = False  # even when the LLM layer is configured, narratives are opt-in
 
 
+class GridConfig(BaseModel):
+    """Mechanical grid strategy — live (paper) parameters.
+
+    **This is NOT a promotion-gated strategy.** The grid never produces a
+    ``Candidate``, never enters the scan/promotion pipeline, never alerts, and
+    has no walk-forward or sealed-test evidence behind it; it is a mechanical
+    rebalancing rule run on its own dedicated paper account. Accordingly these
+    fields are deliberately **excluded from**
+    ``ResearchConfig.SCOPE_HASH_FIELDS`` — changing them cannot un-scope, and
+    must never appear to re-scope, a genuinely PAPER_APPROVED strategy. They
+    still appear in ``full_config_hash`` for the audit trail.
+
+    OFF by default: with ``enabled=False`` the scheduled ``grid_daily`` job is
+    a logged no-op that writes nothing.
+    """
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    enabled: bool = False
+    universe_name: str = "top1000"
+    universe_size: PositiveInt = 1000
+    starting_cash: PositiveFloat = 5_000.0
+    per_symbol_cap: PositiveFloat = 50.0
+    buy_usd: PositiveFloat = 5.0
+    sell_usd: PositiveFloat = 10.0
+    drop_pct: PositiveFloat = 0.05  # fraction, not percent: 0.05 == 5%
+    rise_pct: PositiveFloat = 0.05
+    min_order_usd: NonNegativeFloat = 1.0
+    account_name: str = "grid"
+    source: str = "massive_grouped"  # ohlcv_daily.source the live job reads
+
+
 class OptionsConfig(BaseModel):
     """Options coverage (education / simulation only). Deliberately narrow —
     a small liquid ETF + large-cap set, bounded expirations and strikes."""
@@ -350,6 +383,9 @@ class ResearchConfig(BaseModel):
     universe_filters: UniverseFilters = Field(default_factory=UniverseFilters)
     universe_pipeline: UniversePipelineConfig = Field(default_factory=UniversePipelineConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    # Mechanical grid strategy — NOT promotion-gated, deliberately absent from
+    # SCOPE_HASH_FIELDS below (see GridConfig's docstring).
+    grid: GridConfig = Field(default_factory=GridConfig)
     options: OptionsConfig = Field(default_factory=OptionsConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
     intraday: IntradayOperationsConfig = Field(default_factory=IntradayOperationsConfig)
@@ -389,6 +425,9 @@ class ResearchConfig(BaseModel):
     # narrowed to prevent — while buying no protection, because with the flag
     # off no intraday candidate exists to be scoped and with it on the
     # candidate's own hash is recorded like any other.
+    #
+    # The mechanical grid (``grid``) is likewise absent: it
+    # is not a registered, promotion-gated strategy and produces no candidate.
     SCOPE_HASH_FIELDS: ClassVar[tuple[str, ...]] = (
         "schema_version",
         "watchlist",
