@@ -1073,6 +1073,25 @@ def _render_markdown(out: Mapping[str, Any]) -> str:
         "gate 4 would actually read."
     )
     a("")
+    gs = [int(v["oos_ci_month_clustered"]["G"]) for v in (v1, v2)]
+    ratios = [
+        float(v["oos_ci_month_clustered"]["half_width"]) / float(v["oos_ci_iid"]["half_width"])
+        for v in (v1, v2)
+        if float(v["oos_ci_iid"]["half_width"])
+    ]
+    if any(x < 30 for x in gs):
+        shown = ", ".join(f"{r:.3f}×" for r in ratios)
+        a(
+            "**Caveat, and it is exactly why K3b's SE was pre-registered rather than "
+            f"measured.** The OOS pool spans only **{min(gs)} distinct entry months**, and "
+            "`clustered_bootstrap_all.md` §4.2 records that a cluster bootstrap on fewer than "
+            "~30 clusters is unreliable and erratic in both directions. The measured "
+            f"half-width ratios above ({shown}) straddle the pre-registered "
+            f"{CLUSTER_SE_FACTOR} rather than confirming it, and must not be read as a better "
+            "estimate of it. K3b binds on the **fixed** factor precisely so that the SE could "
+            "not be chosen once the difference was known."
+        )
+        a("")
 
     # ---- sweeps -----------------------------------------------------------
     a("## 6. Leave-one-month-out and leave-one-symbol-out (§12.7 item 5)")

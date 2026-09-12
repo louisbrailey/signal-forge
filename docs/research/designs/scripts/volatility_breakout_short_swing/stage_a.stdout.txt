@@ -1,0 +1,27 @@
+[repro] snapshot 3 degenerate cell: 211 pre-sealed / 51 OOS @ +0.06135R -> MATCH
+[snapshot] id=11 key=research_150_massive_10y_presealed_sel n=150 (15 ETFs + 135 single names)
+[run] v0.1.0 (degenerate cell) over 150 symbols ...
+       E01 OOS +0.10651R  n=212  sd=1.3286  SE=0.0912  (28.3s)
+[run] v0.2.0 (defaults) over 150 symbols ...
+       E02 OOS +0.17618R  n=184  sd=1.2322  SE=0.0908  (30.0s)
+[K3] diff +0.06967R  iid 0.54 SE  clustered 0.33 SE  K3a=PASS K3b=FIRED
+[gates] v0_1_0: 1/6/7 computed
+[gates] v0_2_0: 1/6/7 computed
+[gate5] loaded the 81-cell grid from /private/tmp/claude-501/-Users-louisbrailey-signal-forge/9b769e15-df02-479e-a959-24e4a2bdee81/scratchpad/stage_a_grid.json
+[sweeps] LOMO / LOSO computed
+[spread] v0_1_0 @ 11 bps RT: OOS +0.10651R (n=212)
+[spread] v0_1_0 @ 16 bps RT: OOS +0.08533R (n=212)
+[spread] v0_1_0 @ 26 bps RT: OOS +0.04458R (n=212)
+[spread] v0_1_0 @ 31 bps RT: OOS +0.02494R (n=212)
+[spread] v0_1_0 @ 66 bps RT: OOS -0.10062R (n=212)
+[spread] v0_2_0 @ 11 bps RT: OOS +0.17618R (n=184)
+[spread] v0_2_0 @ 16 bps RT: OOS +0.15893R (n=184)
+[spread] v0_2_0 @ 26 bps RT: OOS +0.12534R (n=184)
+[spread] v0_2_0 @ 31 bps RT: OOS +0.10899R (n=184)
+[spread] v0_2_0 @ 66 bps RT: OOS +0.00203R (n=184)
+[subuniverse] single_names_135 (n=135): E01 +0.14247R / E02 +0.17245R
+[subuniverse] new_vs_snapshot3_126 (n=126): E01 +0.12082R / E02 +0.14658R
+
+[emit] docs/research/designs/scripts/volatility_breakout_short_swing/stage_a.json
+[emit] docs/research/designs/scripts/volatility_breakout_short_swing/stage_a.md
+[verdict] STOP — write §11
