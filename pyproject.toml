@@ -253,6 +253,28 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "S15: the mechanical grid is not a promotion-gated strategy — no candidates, no alerts, no promotion, no LLM, no brokerage"
+type = "forbidden"
+# The grid is a mechanical rebalancing rule on its own paper account. It must
+# never reach the candidate/scan/promotion pipeline, the alert path, or the LLM
+# layer — which is also why GridConfig is excluded from the approval scope hash.
+source_modules = ["signalforge.grid"]
+forbidden_modules = [
+    "signalforge.alerts",
+    "signalforge.llm",
+    "signalforge.research.scan",
+    "signalforge.research.candidates",
+    "signalforge.research.promotion",
+    "signalforge.research.approval_scope",
+    "signalforge.paper.ledger",
+    "signalforge.paper.auto_simulate",
+    "signalforge.data.ingest",
+    "signalforge.data.adapters.registry",
+    "httpx",
+    "requests",
+]
+
+[[tool.importlinter.contracts]]
 name = "S14: research agents are read-only reporters — no trades, candidates, alerts, settings, promotion, or brokerage"
 type = "forbidden"
 source_modules = ["signalforge.agents"]
