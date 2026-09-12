@@ -32,6 +32,7 @@ the learning UI and offline validation read.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
@@ -41,7 +42,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from signalforge.data.adapters.base import AdapterError
-from signalforge.data.adapters.massive_options import MassiveOptionsAdapter
+from signalforge.data.adapters.massive_options import MassiveOptionsAdapter, OptionAggregateRow
 from signalforge.data.calendar import sessions as _sessions
 from signalforge.data.options_cycles import (
     BASIS_NONE,
@@ -67,8 +68,10 @@ from signalforge.data.options_cycles import (
 )
 from signalforge.db.models import IngestionRun, OHLCVDaily, OptionAggregateDaily, OptionContract
 from signalforge.db.models.market import Instrument
+from signalforge.db.session import set_write_intent
 from signalforge.db.types import utcnow
 from signalforge.domain import FeedType
+from signalforge.killswitch import KillSwitchEngaged
 from signalforge.observability import get_logger
 
 _log = get_logger("options.backfill")
@@ -550,6 +553,95 @@ _RETRYABLE_EXCLUSIONS = frozenset({EXCL_CONTRACT_FETCH_FAILED, EXCL_BAR_BUDGET_E
 # raised from 200,000, by this decision".
 _MAX_TOTAL_BARS_PRIOR = 200_000
 
+# Terminal statuses for a pass that ended before the window was complete. Both
+# are distinct from ``failed``/``partial`` on purpose: neither is a data
+# problem, both are resumable by id, and neither should read as an ingest
+# failure to anything that watches run status.
+RUN_STATUS_KILLED = "killed"  # the kill switch was engaged mid-run
+RUN_STATUS_STOPPED = "stopped"  # a pre-set --max-cycles / --max-minutes bound
+_STOP_KEY = "stopped"  # inside the run provenance blob
+
+
+@dataclass(frozen=True, slots=True)
+class RunBounds:
+    """Bounds on ONE PASS of a resumable run — never on the dataset.
+
+    A ~29,000-request backfill is ~99 hours at the only pacing this repo knows,
+    so it is scheduled in overnight windows that must not overlap the 17:30-19:00
+    ET EOD / universe / grid jobs. Neither bound changes what the dataset will
+    eventually contain: the pass stops at a **committed (underlying, cycle)
+    boundary**, records why, and the next pass resumes from exactly there.
+
+    Both are checked between cycles, never inside one. One (underlying, cycle)
+    unit is up to ``2 x len(ladder) + pages`` paced requests — about seven
+    minutes at 12.1 s — so a pass may overrun ``max_minutes`` by at most one
+    cycle. Size the window with that slack, rather than cutting a cycle in half.
+    """
+
+    max_cycles: int | None = None
+    max_minutes: float | None = None
+
+    def deadline(self, started_monotonic: float) -> float | None:
+        if self.max_minutes is None:
+            return None
+        return started_monotonic + self.max_minutes * 60.0
+
+    def reached(self, *, units_done: int, now: float, deadline: float | None) -> str | None:
+        """The bound that has been reached, as a recordable string, or None."""
+        if self.max_cycles is not None and units_done >= self.max_cycles:
+            return f"max_cycles={self.max_cycles}"
+        if deadline is not None and now >= deadline:
+            return f"max_minutes={self.max_minutes:g}"
+        return None
+
+
+class _Phases:
+    """Write-lock discipline for a long, paced run (D1 §7.7 fix 1, blocker D16).
+
+    The shipped path ran the whole backfill inside one ``session_scope(write=True)``
+    — on SQLite a ``BEGIN IMMEDIATE`` held for the lifetime of the scope. At
+    ~99 hours that is a four-day write lock against the file the paper probation
+    worker is writing to, and ``session_scope`` rolls back on any exception, so
+    a kill switch engaged on day three discarded every bar **and** the
+    ``IngestionRun`` row that a ``--resume`` needs.
+
+    This class makes the three phases explicit and non-overlapping:
+
+    * :meth:`read` — plain ``BEGIN``; never blocks the worker.
+    * network — **no transaction at all**; every paced request happens here.
+    * :meth:`write` — ``BEGIN IMMEDIATE``, one short burst, then :meth:`commit`.
+
+    :meth:`write` is idempotent so a cycle's bars and that cycle's provenance
+    checkpoint land in ONE transaction: a committed cycle is always a cycle
+    whose coverage record was committed with it.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+        self._mode = ""
+
+    def read(self) -> None:
+        self.commit()
+        set_write_intent(self._session, False)
+        self._mode = "read"
+
+    def write(self) -> None:
+        if self._mode == "write":
+            return  # already inside the write phase; do NOT split the transaction
+        self.commit()
+        set_write_intent(self._session, True)
+        self._mode = "write"
+
+    def commit(self) -> None:
+        if self._session.in_transaction():
+            self._session.commit()
+
+    def abandon(self) -> None:
+        """Discard an interrupted cycle's uncommitted work, keeping every
+        committed one. Called at the loop boundary, never inside a cycle."""
+        if self._session.in_transaction():
+            self._session.rollback()
+
 
 @dataclass(frozen=True, slots=True)
 class CycleBackfillCaps:
@@ -643,6 +735,11 @@ class OptionsCoverageSummary:
     max_total_bars_prior: int
     pacing_s: float
     status: str
+    # Why the last pass ended early, if it did: a kill switch, or a pre-set
+    # ``--max-cycles`` / ``--max-minutes`` window bound. An identity string, so
+    # an operator reading a nightly summary can tell "the window closed" from
+    # "the data ran out" without opening the run row.
+    stopped_reason: str = ""
 
     # Any field name containing one of these could carry an outcome. The check
     # is on NAMES, so it fires when a field is added, not when one is populated.
@@ -758,6 +855,7 @@ def coverage_summary(run: IngestionRun) -> OptionsCoverageSummary:
         max_total_bars_prior=int(prov.get("max_total_bars_prior", 0)),
         pacing_s=float(prov.get("pacing_s", 0.0)),
         status=run.status,
+        stopped_reason=str((prov.get(_STOP_KEY) or {}).get("reason", "")),
     )
 
 
@@ -939,6 +1037,39 @@ def _cycle_provenance(
     }
 
 
+def _existing_dates_many(
+    session: Session, tickers: Sequence[str], source: str
+) -> dict[str, set[date]]:
+    """One query for a whole cycle's stored sessions, instead of one per contract.
+
+    The per-contract query is what the shipped path did between paced fetches,
+    which is exactly the read-then-fetch-then-write interleaving the write-lock
+    discipline forbids. Reading the cycle's coverage up front lets the whole
+    network phase run with no transaction open at all.
+    """
+    if not tickers:
+        return {}
+    out: dict[str, set[date]] = {t: set() for t in tickers}
+    for tk, d in session.execute(
+        select(OptionAggregateDaily.option_ticker, OptionAggregateDaily.session_date).where(
+            OptionAggregateDaily.option_ticker.in_(list(tickers)),
+            OptionAggregateDaily.source == source,
+        )
+    ):
+        out.setdefault(tk, set()).add(d)
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class _CycleBars:
+    written: int = 0
+    skipped: int = 0
+    fetched: int = 0
+    first: date | None = None
+    last: date | None = None
+    failure: str | None = None
+
+
 def _fetch_cycle_bars(
     session: Session,
     adapter: MassiveOptionsAdapter,
@@ -947,27 +1078,40 @@ def _fetch_cycle_bars(
     underlying: str,
     span: tuple[date, date],
     bars_left: int,
-) -> tuple[int, int, int, date | None, date | None, str | None]:
-    """Fetch and store one cycle's bars.
+    phases: _Phases,
+) -> _CycleBars:
+    """Fetch and store one cycle's bars in three non-overlapping phases.
 
-    ``(written, skipped, contracts_fetched, first, last, failure_reason)``. The
-    per-contract range is the CYCLE'S OWN trade window, not the whole backfill
-    window — the shipped path fetches every contract from the window start,
-    which is ~10x the bars needed and is what puts a three-year run over the
-    ceiling.
+    READ: which sessions this cycle's contracts already have. NETWORK: every
+    paced request, with **no transaction open** — the project rule, and the one
+    the shipped path broke by holding ``BEGIN IMMEDIATE`` across the whole run.
+    WRITE: one short ``BEGIN IMMEDIATE`` that inserts the cycle. It is left
+    OPEN on return so the caller's provenance checkpoint commits in the same
+    transaction as the bars it describes.
+
+    The per-contract range is the CYCLE'S OWN trade window, not the whole
+    backfill window — the shipped path fetches every contract from the window
+    start, which is ~10x the bars needed and is what puts a three-year run over
+    the ceiling.
     """
     fetch_start, fetch_end = span
-    written = skipped = fetched = 0
-    first: date | None = None
-    last: date | None = None
+
+    phases.read()
+    have = _existing_dates_many(
+        session, [c.option_ticker for c in sel.carriers], adapter.provider_name
+    )
+    phases.commit()  # end the read transaction: no snapshot is held across the fetch
+
+    pending: list[OptionAggregateRow] = []
+    skipped = fetched = 0
     failure: str | None = None
     for carrier in sel.carriers:
-        if written >= bars_left:
-            return written, skipped, fetched, first, last, EXCL_BAR_BUDGET_EXHAUSTED
-        _upsert_contract_meta(session, carrier)
+        if len(pending) >= bars_left:
+            failure = EXCL_BAR_BUDGET_EXHAUSTED
+            break
+        stored = have.setdefault(carrier.option_ticker, set())
         hard_end = min(fetch_end, carrier.expiration_date)
-        have = _existing_dates(session, carrier.option_ticker, adapter.provider_name)
-        covered = {d for d in have if fetch_start <= d <= hard_end}
+        covered = {d for d in stored if fetch_start <= d <= hard_end}
         if covered and max(covered) >= hard_end:
             continue  # already covered to this cycle's end for this contract
         resume_from = (max(covered) + timedelta(days=1)) if covered else fetch_start
@@ -985,36 +1129,179 @@ def _fetch_cycle_bars(
             bars = bars[:_MAX_BARS_PER_CONTRACT]
         fetched += 1
         for b in bars:
-            if written >= bars_left:
-                return written, skipped, fetched, first, last, EXCL_BAR_BUDGET_EXHAUSTED
+            if len(pending) >= bars_left:
+                failure = EXCL_BAR_BUDGET_EXHAUSTED
+                break
             if b.session_date > hard_end or b.session_date < fetch_start:
                 continue
-            if b.session_date in have:
+            if b.session_date in stored:
                 skipped += 1
                 continue
-            session.add(
-                OptionAggregateDaily(
-                    option_ticker=b.option_ticker,
-                    underlying_symbol=underlying,
-                    session_date=b.session_date,
-                    open=b.open,
-                    high=b.high,
-                    low=b.low,
-                    close=b.close,
-                    volume=b.volume,
-                    vwap=b.vwap,
-                    transactions=b.transactions,
-                    source=b.source,
-                    latency_category=b.latency_category,
-                    ingested_at=utcnow(),
-                    quality_flags=[],
-                )
+            stored.add(b.session_date)
+            pending.append(b)
+        if failure == EXCL_BAR_BUDGET_EXHAUSTED:
+            break
+
+    phases.write()
+    # Contract metadata for every SELECTED contract, including one whose bar
+    # fetch failed: the selection is evidence about the ladder even when the
+    # aggregates behind it are not yet there.
+    for carrier in sel.carriers:
+        _upsert_contract_meta(session, carrier)
+    now = utcnow()
+    for b in pending:
+        session.add(
+            OptionAggregateDaily(
+                option_ticker=b.option_ticker,
+                underlying_symbol=underlying,
+                session_date=b.session_date,
+                open=b.open,
+                high=b.high,
+                low=b.low,
+                close=b.close,
+                volume=b.volume,
+                vwap=b.vwap,
+                transactions=b.transactions,
+                source=b.source,
+                latency_category=b.latency_category,
+                ingested_at=now,
+                quality_flags=[],
             )
-            have.add(b.session_date)
-            written += 1
-            first = b.session_date if first is None else min(first, b.session_date)
-            last = b.session_date if last is None else max(last, b.session_date)
-    return written, skipped, fetched, first, last, failure
+        )
+    dates = [b.session_date for b in pending]
+    return _CycleBars(
+        written=len(pending),
+        skipped=skipped,
+        fetched=fetched,
+        first=min(dates) if dates else None,
+        last=max(dates) if dates else None,
+        failure=failure,
+    )
+
+
+@dataclass(slots=True)
+class _Totals:
+    """Run-level counters carried across cycles (and across resumes)."""
+
+    written: int = 0
+    skipped: int = 0
+    cov_first: date | None = None
+    cov_last: date | None = None
+    earliest: date | None = None
+
+
+def _run_one_cycle(
+    session: Session,
+    adapter: MassiveOptionsAdapter,
+    *,
+    underlying: str,
+    expiry: date,
+    caps: CycleBackfillCaps,
+    basis: str,
+    phases: _Phases,
+    totals: _Totals,
+) -> dict[str, object]:
+    """Resolve, fetch and store ONE (underlying, cycle); return its record.
+
+    On return the write transaction is **open** and holds this cycle's bars.
+    The caller writes the run-level checkpoint into the same transaction and
+    commits it, so a committed cycle is always a cycle whose coverage record
+    was committed with it — there is no state in which bars exist that the
+    provenance does not describe.
+    """
+    record: dict[str, object] = {
+        "strike_listing_basis": basis,
+        "print_time_known": False,
+        "excluded": None,
+    }
+    entry = entry_as_of(expiry, dte_entry_max=caps.dte_entry_max)
+    span = fetch_span(
+        expiry,
+        dte_entry_max=caps.dte_entry_max,
+        pre_entry_buffer_sessions=caps.pre_entry_buffer_sessions,
+        window_start=caps.window_start,
+        window_end=caps.window_end,
+    )
+    record["entry_as_of"] = entry.isoformat() if entry else None
+    if entry is None or span is None:
+        record["excluded"] = EXCL_NO_BAR_ON_OR_BEFORE
+        return record
+
+    phases.read()
+    ref, why = reference_price(
+        session, underlying, entry, max_staleness_sessions=caps.reference_max_staleness_sessions
+    )
+    phases.commit()  # the listing call below is network: no transaction may be open
+    if ref is None:
+        record["excluded"] = why
+        return record
+    record["reference_price"] = ref.price
+    record["reference_priced_on"] = ref.priced_on.isoformat()
+    record["reference_staleness_sessions"] = ref.staleness_sessions
+
+    sel = _select_cycle(
+        adapter,
+        underlying,
+        expiry=expiry,
+        entry=entry,
+        ref=ref.price,
+        caps=caps,
+        strike_listing_basis=basis,
+    )
+    record.update(
+        {
+            "ladder_rungs_seen": sel.ladder_rungs_seen,
+            "ladder_min_strike": sel.ladder_min_strike,
+            "ladder_max_strike": sel.ladder_max_strike,
+            "pages_walked": sel.pages_walked,
+            "next_url_exhausted": sel.next_url_exhausted,
+            "rows_unparseable": sel.rows_unparseable,
+            "selected_calls": sel.selected_calls,
+            "selected_puts": sel.selected_puts,
+            "rungs_per_side": list(sel.rungs_per_side),
+            "shares_per_contract_refusals": sel.refusals,
+            "brackets_band": sel.excluded is None,
+        }
+    )
+    if sel.excluded is not None:
+        record["excluded"] = sel.excluded
+        return record
+
+    bars = _fetch_cycle_bars(
+        session,
+        adapter,
+        sel,
+        underlying=underlying,
+        span=span,
+        bars_left=max(0, caps.max_total_bars - totals.written),
+        phases=phases,
+    )
+    totals.written += bars.written
+    totals.skipped += bars.skipped
+    if bars.first is not None:
+        totals.cov_first = (
+            bars.first if totals.cov_first is None else min(totals.cov_first, bars.first)
+        )
+        # Discovered provider depth: the earliest session any contract actually
+        # returned. Never hard-coded — a later run at a deeper entitlement is
+        # distinguishable from this one.
+        totals.earliest = (
+            bars.first if totals.earliest is None else min(totals.earliest, bars.first)
+        )
+    if bars.last is not None:
+        totals.cov_last = bars.last if totals.cov_last is None else max(totals.cov_last, bars.last)
+    record.update(
+        {
+            "contracts_fetched": bars.fetched,
+            "bars_written": bars.written,
+            "sessions_expected": len(_sessions(*span)),
+            "fetch_start": span[0].isoformat(),
+            "fetch_end": span[1].isoformat(),
+        }
+    )
+    if bars.failure is not None:
+        record["excluded"] = bars.failure
+    return record
 
 
 def backfill_option_cycles(
@@ -1025,6 +1312,7 @@ def backfill_option_cycles(
     caps: CycleBackfillCaps,
     options_config_hash: str = "",
     resume_run_id: int | None = None,
+    bounds: RunBounds | None = None,
 ) -> IngestionRun:
     """Per-(underlying, monthly cycle) historical options backfill.
 
@@ -1038,6 +1326,21 @@ def backfill_option_cycles(
     skipped, an exclusion that a later run could genuinely fix (a transient
     fetch failure, a bar-budget shortfall) is retried, and a deterministic
     exclusion is not re-attempted.
+
+    Run-control properties, all of which the ~99-hour real run depends on
+    (D1 §7.7, blockers D9 and D16):
+
+    * **the ``IngestionRun`` row is committed before the first network call**,
+      so a resume id survives an abort of any kind — including the kind a
+      multi-day run actually takes;
+    * **one transaction per (underlying, cycle)**, holding that cycle's bars and
+      its coverage record together, with every paced request issued outside any
+      transaction;
+    * ``KillSwitchEngaged`` is caught at the **loop boundary**: the interrupted
+      cycle is discarded, every earlier cycle stays committed, and the run ends
+      ``killed`` — terminal, never retried, but never destructive;
+    * ``bounds`` stops the pass at a cycle boundary so a run can be scheduled in
+      windows that never overlap the live EOD / universe / grid jobs.
     """
     syms = [u.upper().strip() for u in underlyings if u.strip()]
     basis = resolve_strike_listing_basis(
@@ -1047,11 +1350,18 @@ def backfill_option_cycles(
     provenance = _cycle_provenance(
         adapter, caps, strike_listing_basis=basis, options_config_hash=options_config_hash
     )
+    limits = bounds or RunBounds()
+    phases = _Phases(session)
+    phases.write()
 
     if resume_run_id is not None:
         run = session.get(IngestionRun, resume_run_id)
         if run is None:
             raise ValueError(f"ingestion_run {resume_run_id} not found")
+        # A re-entered run is running again; a previous pass's terminal status
+        # and finish time would otherwise outlive the pass that set them.
+        run.status = "running"
+        run.finished_at = None
     else:
         run = IngestionRun(
             provider=adapter.provider_name,
@@ -1080,154 +1390,274 @@ def backfill_option_cycles(
     failed: dict[str, str] = dict(run.symbols_failed or {})
     detail: dict[str, object] = dict(run.gaps_json or {})
     detail[_RUN_PROVENANCE_KEY] = provenance
-    written = int(run.bars_written or 0)
-    skipped = int(run.bars_skipped or 0)
-    cov_first: date | None = run.coverage_first
-    cov_last: date | None = run.coverage_last
-    earliest: date | None = run.earliest_available_date
+    run.gaps_json = dict(detail)
+    totals = _Totals(
+        written=int(run.bars_written or 0),
+        skipped=int(run.bars_skipped or 0),
+        cov_first=run.coverage_first,
+        cov_last=run.coverage_last,
+        earliest=run.earliest_available_date,
+    )
+    # COMMITTED BEFORE THE FIRST NETWORK CALL. Without this the run row lives
+    # only in a transaction that any abort rolls back, and a multi-day job
+    # leaves no id to --resume (blocker D16).
+    phases.commit()
+
+    started = time.monotonic()
+    deadline = limits.deadline(started)
+    units = 0
+    stop_status = ""
+    stop_reason = ""
 
     for u in syms:
+        if stop_status:
+            break
         if u in ok:
             continue
         stored = detail.get(u)
         prior: dict[str, Any] = stored if isinstance(stored, dict) else {}
         per_cycle: dict[str, object] = dict(prior.get("cycles", {}) or {})
         failed.pop(u, None)
-        retryable_left = False
 
         for expiry in cycles:
             key = expiry.isoformat()
             done = per_cycle.get(key)
             if isinstance(done, dict) and done.get("excluded") not in _RETRYABLE_EXCLUSIONS:
                 continue  # already covered, or deterministically excluded
-            entry = entry_as_of(expiry, dte_entry_max=caps.dte_entry_max)
-            span = fetch_span(
-                expiry,
-                dte_entry_max=caps.dte_entry_max,
-                pre_entry_buffer_sessions=caps.pre_entry_buffer_sessions,
-                window_start=caps.window_start,
-                window_end=caps.window_end,
-            )
-            record: dict[str, object] = {
-                "entry_as_of": entry.isoformat() if entry else None,
-                "strike_listing_basis": basis,
-                "print_time_known": False,
-                "excluded": None,
-            }
-            if entry is None or span is None:
-                record["excluded"] = EXCL_NO_BAR_ON_OR_BEFORE
-                per_cycle[key] = record
-                continue
-            ref, why = reference_price(
-                session,
-                u,
-                entry,
-                max_staleness_sessions=caps.reference_max_staleness_sessions,
-            )
-            if ref is None:
-                record["excluded"] = why
-                per_cycle[key] = record
-                continue
-            record["reference_price"] = ref.price
-            record["reference_priced_on"] = ref.priced_on.isoformat()
-            record["reference_staleness_sessions"] = ref.staleness_sessions
-            sel = _select_cycle(
-                adapter,
-                u,
-                expiry=expiry,
-                entry=entry,
-                ref=ref.price,
-                caps=caps,
-                strike_listing_basis=basis,
-            )
-            record.update(
-                {
-                    "ladder_rungs_seen": sel.ladder_rungs_seen,
-                    "ladder_min_strike": sel.ladder_min_strike,
-                    "ladder_max_strike": sel.ladder_max_strike,
-                    "pages_walked": sel.pages_walked,
-                    "next_url_exhausted": sel.next_url_exhausted,
-                    "rows_unparseable": sel.rows_unparseable,
-                    "selected_calls": sel.selected_calls,
-                    "selected_puts": sel.selected_puts,
-                    "rungs_per_side": list(sel.rungs_per_side),
-                    "shares_per_contract_refusals": sel.refusals,
-                    "brackets_band": sel.excluded is None,
-                }
-            )
-            if sel.excluded is not None:
-                record["excluded"] = sel.excluded
-                retryable_left = retryable_left or sel.excluded in _RETRYABLE_EXCLUSIONS
-                per_cycle[key] = record
-                session.flush()
-                continue
-
-            sessions_expected = len(_sessions(*span))
-            w, s, fetched, first, last, failure = _fetch_cycle_bars(
-                session,
-                adapter,
-                sel,
-                underlying=u,
-                span=span,
-                bars_left=max(0, caps.max_total_bars - written),
-            )
-            written += w
-            skipped += s
-            cov_first = first if cov_first is None else min(cov_first, first or cov_first)
-            cov_last = last if cov_last is None else max(cov_last, last or cov_last)
-            if first is not None:
-                # Discovered provider depth: the earliest session any contract
-                # actually returned. Never hard-coded — a later run at a deeper
-                # entitlement is distinguishable from this one.
-                earliest = first if earliest is None else min(earliest, first)
-                if run.earliest_probe_at is None:
-                    run.earliest_probe_at = utcnow()
-            record.update(
-                {
-                    "contracts_fetched": fetched,
-                    "bars_written": w,
-                    "sessions_expected": sessions_expected,
-                    "fetch_start": span[0].isoformat(),
-                    "fetch_end": span[1].isoformat(),
-                }
-            )
-            if failure is not None:
-                record["excluded"] = failure
-                retryable_left = True
+            hit = limits.reached(units_done=units, now=time.monotonic(), deadline=deadline)
+            if hit:
+                stop_status, stop_reason = RUN_STATUS_STOPPED, hit
+                break
+            try:
+                record = _run_one_cycle(
+                    session,
+                    adapter,
+                    underlying=u,
+                    expiry=expiry,
+                    caps=caps,
+                    basis=basis,
+                    phases=phases,
+                    totals=totals,
+                )
+            except KillSwitchEngaged as exc:
+                # THE LOOP BOUNDARY. Every earlier cycle is already committed;
+                # this one's partial work is discarded; the run keeps its id.
+                # Terminal — the kill switch is never retried — but never
+                # destructive (blocker D16).
+                phases.abandon()
+                stop_status, stop_reason = RUN_STATUS_KILLED, str(exc)[:180]
+                break
+            units += 1
             per_cycle[key] = record
-            run.bars_written = written
-            run.bars_skipped = skipped
-            run.coverage_first = cov_first
-            run.coverage_last = cov_last
-            run.earliest_available_date = earliest
+            phases.write()  # no-op when the cycle already opened it: ONE transaction
+            if totals.earliest is not None and run.earliest_probe_at is None:
+                run.earliest_probe_at = utcnow()
+            run.bars_written = totals.written
+            run.bars_skipped = totals.skipped
+            run.coverage_first = totals.cov_first
+            run.coverage_last = totals.cov_last
+            run.earliest_available_date = totals.earliest
             detail[u] = _cycle_rollup(per_cycle, len(cycles))
             run.gaps_json = dict(detail)
-            session.flush()
+            phases.commit()
 
+        phases.write()
         detail[u] = _cycle_rollup(per_cycle, len(cycles))
         run.gaps_json = dict(detail)
-        run.symbols_failed = failed
-        if not retryable_left:
-            ok.append(u)
-            run.symbols_ok = list(ok)
-        else:
+        retryable_left = any(
+            isinstance(rec, dict) and rec.get("excluded") in _RETRYABLE_EXCLUSIONS
+            for rec in per_cycle.values()
+        )
+        if stop_status:
+            # The pass ended inside this underlying: it is neither done nor
+            # broken, and marking it ok would make `if u in ok: continue` skip
+            # the cycles this pass never reached.
+            failed[u] = f"pass ended before this underlying completed ({stop_reason})"[:200]
+        elif retryable_left:
             failed[u] = "retryable cycle exclusions remain (fetch failure or bar budget)"
-            run.symbols_failed = failed
-        session.flush()
+        else:
+            ok.append(u)
+        run.symbols_ok = list(ok)
+        run.symbols_failed = dict(failed)
+        phases.commit()
 
-    run.status = "ok" if not failed else ("partial" if ok else "failed")
+    phases.write()
+    if stop_status:
+        provenance[_STOP_KEY] = {
+            "status": stop_status,
+            "reason": stop_reason,
+            "at": utcnow().isoformat(),
+            "cycles_this_pass": units,
+            "resume_with": run.id,
+        }
+        detail[_RUN_PROVENANCE_KEY] = provenance
+        run.gaps_json = dict(detail)
+        run.notes = (run.notes + "; " if run.notes else "") + (
+            f"pass ended {stop_status} after {units} cycle(s): {stop_reason}; "
+            f"resume with --resume {run.id}"
+        )
+        run.status = stop_status
+    else:
+        provenance.pop(_STOP_KEY, None)
+        detail[_RUN_PROVENANCE_KEY] = provenance
+        run.gaps_json = dict(detail)
+        run.status = "ok" if not failed else ("partial" if ok else "failed")
+    run.symbols_ok = list(ok)
+    run.symbols_failed = dict(failed)
     run.finished_at = utcnow()
-    session.flush()
+    phases.commit()
     _log.info(
         "options.cycle_backfill.done",
         provider=adapter.provider_name,
         underlyings=len(syms),
         cycles=len(cycles),
-        bars_written=written,
+        cycles_this_pass=units,
+        bars_written=totals.written,
         status=run.status,
+        stopped=stop_reason,
         strike_listing_basis=basis,
     )
     return run
+
+
+# =========================================================================== #
+# The request plan — what a run WOULD cost, computed with zero network.
+# =========================================================================== #
+# How many listing pages one (underlying, cycle) costs. HYPOTHESIS, not FACT
+# (D1 §3.4): the true vendor ladder's depth is what decides it, and only SPY's
+# is established, only within +/-8%. Stage A measures it; until then 2 is the
+# planning assumption, and it is reported as an assumption.
+DEFAULT_LISTING_PAGES_PER_CYCLE = 2
+
+
+@dataclass(frozen=True, slots=True)
+class BackfillRequestPlan:
+    """The exact request plan for a run, derived from pre-registered parameters.
+
+    Counts, dates and identities only — the same discipline as
+    :class:`OptionsCoverageSummary`, for the same reason: a plan is printed
+    before the data exists, and nothing that reaches an operator's eye before
+    the strategy pre-registration is committed may be an outcome.
+
+    Every figure is an **upper bound with no retries**: the ladder de-duplicates
+    downward (two adjacent rungs can resolve to one strike), an excluded cycle
+    costs its listing call and no aggregate calls, and the adapter is allowed up
+    to five attempts per request. A run never costs more than this; it commonly
+    costs less.
+    """
+
+    underlyings: tuple[str, ...]
+    cycles: tuple[date, ...]
+    ladder_id: str
+    ladder_rungs: int
+    rights: tuple[str, ...]
+    contracts_per_cycle_max: int
+    listing_pages_assumed: int
+    units_total: int
+    units_done: int
+    units_remaining: int
+    listing_requests: int
+    aggregate_requests: int
+    requests_total: int
+    pacing_s: float
+    sessions_per_cycle_min: int
+    sessions_per_cycle_max: int
+    sessions_per_cycle_mean: float
+    bars_max: int
+    max_total_bars: int
+    window_start: date
+    window_end: date
+    cycle_rule: str
+    strike_listing_basis: str
+
+    @property
+    def hours_at_pacing(self) -> float:
+        return self.requests_total * self.pacing_s / 3600.0
+
+    @property
+    def bars_fraction_of_ceiling(self) -> float:
+        return (self.bars_max / self.max_total_bars) if self.max_total_bars else 0.0
+
+
+def completed_cycle_units(run: IngestionRun) -> int:
+    """(underlying, cycle) units a previous pass has already settled.
+
+    A unit recorded with a RETRYABLE exclusion is not settled: the next pass
+    re-attempts it, so it still costs requests and must stay in the plan.
+    """
+    detail = dict(run.gaps_json or {})
+    detail.pop(_RUN_PROVENANCE_KEY, None)
+    done = 0
+    for payload in detail.values():
+        if not isinstance(payload, dict):
+            continue
+        for rec in (payload.get("cycles") or {}).values():
+            if isinstance(rec, dict) and rec.get("excluded") not in _RETRYABLE_EXCLUSIONS:
+                done += 1
+    return done
+
+
+def plan_cycle_backfill(
+    underlyings: Sequence[str],
+    *,
+    caps: CycleBackfillCaps,
+    pacing_s: float,
+    listing_pages: int = DEFAULT_LISTING_PAGES_PER_CYCLE,
+    units_done: int = 0,
+) -> BackfillRequestPlan:
+    """What the run would ask the provider for — computed, never fetched.
+
+    Pure arithmetic over the pre-registered parameters and the XNYS calendar.
+    It issues no request, opens no session and constructs no adapter, so it is
+    safe to run at any hour against any configuration, including one with no
+    API key at all.
+    """
+    syms = tuple(u.upper().strip() for u in underlyings if u.strip())
+    cycles = monthly_cycles(caps.window_start, caps.window_end, dte_entry_max=caps.dte_entry_max)
+    spans = [
+        fetch_span(
+            e,
+            dte_entry_max=caps.dte_entry_max,
+            pre_entry_buffer_sessions=caps.pre_entry_buffer_sessions,
+            window_start=caps.window_start,
+            window_end=caps.window_end,
+        )
+        for e in cycles
+    ]
+    session_counts = [len(_sessions(*s)) for s in spans if s is not None]
+    mean_sessions = (sum(session_counts) / len(session_counts)) if session_counts else 0.0
+    per_cycle = len(caps.rights) * len(caps.ladder)
+    units_total = len(syms) * len(cycles)
+    remaining = max(0, units_total - max(0, units_done))
+    listing = remaining * max(0, listing_pages)
+    aggregate = remaining * per_cycle
+    return BackfillRequestPlan(
+        underlyings=syms,
+        cycles=cycles,
+        ladder_id=LADDER_ID,
+        ladder_rungs=len(caps.ladder),
+        rights=caps.rights,
+        contracts_per_cycle_max=per_cycle,
+        listing_pages_assumed=listing_pages,
+        units_total=units_total,
+        units_done=max(0, units_done),
+        units_remaining=remaining,
+        listing_requests=listing,
+        aggregate_requests=aggregate,
+        requests_total=listing + aggregate,
+        pacing_s=pacing_s,
+        sessions_per_cycle_min=min(session_counts) if session_counts else 0,
+        sessions_per_cycle_max=max(session_counts) if session_counts else 0,
+        sessions_per_cycle_mean=mean_sessions,
+        bars_max=round(aggregate * mean_sessions),
+        max_total_bars=caps.max_total_bars,
+        window_start=caps.window_start,
+        window_end=caps.window_end,
+        cycle_rule=caps.cycle_rule,
+        strike_listing_basis=resolve_strike_listing_basis(
+            as_of_sent=caps.listing_as_of_enabled, first_bar_proxy_available=False
+        ),
+    )
 
 
 def _cycle_rollup(per_cycle: dict[str, object], cycles_total: int) -> dict[str, object]:
