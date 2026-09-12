@@ -751,7 +751,7 @@ def _intraday_symbol_gaps(
     end: date,
 ) -> list[list[str]]:
     """Runs of exchange sessions with no RTH bar for this symbol/source/size."""
-    from signalforge.db.models import Instrument as _Inst
+    from zoneinfo import ZoneInfo
 
     rows = session.execute(
         select(OHLCVIntraday.bar_start)
@@ -763,14 +763,13 @@ def _intraday_symbol_gaps(
         )
         .order_by(OHLCVIntraday.bar_start)
     )
-    from zoneinfo import ZoneInfo
-
     et = ZoneInfo("America/New_York")
+    # Session membership is an EASTERN-date question: a UTC date would file a
+    # 16:00 ET bar under the following day for part of the year.
     have = {
         (b.astimezone(et) if b.tzinfo else b.replace(tzinfo=_UTC).astimezone(et)).date()
         for (b,) in rows
     }
-    assert _Inst is not None  # keeps the import meaningful for mypy's narrowing
     gaps: list[list[str]] = []
     run_start: date | None = None
     prev: date | None = None
