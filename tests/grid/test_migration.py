@@ -64,7 +64,11 @@ def test_grid_migration_matches_the_declared_models(db_url: str) -> None:
 #: this test is about what the GRID migration adds, and ``-1`` means "one step
 #: back from head", which silently becomes a different migration the moment
 #: anything lands after it (it did, when the execution skeleton landed).
-GRID_REVISION = "f1c4a8b2d6e7"
+#: (An Alembic revision id. The secret-scan baseline auto-excludes the
+#: `revision:`/`down_revision:` assignment form only, so referring to one by
+#: name anywhere else needs the pragma inline — the baseline is never rewritten
+#: to accommodate new code.)
+GRID_REVISION = "f1c4a8b2d6e7"  # pragma: allowlist secret
 
 
 def test_downgrade_removes_only_the_grid_tables(db_url: str) -> None:
