@@ -23,6 +23,9 @@ class AppEnv(StrEnum):
     PROD = "prod"
 
 
+LOCAL_LLM_PROVIDERS = frozenset({"lmstudio", "openai_compat", "openai-compatible"})
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -66,9 +69,12 @@ class Settings(BaseSettings):
     discord_webhook_url: SecretStr = SecretStr("")
 
     # --- LLM (optional; never on the decision path) ---
-    llm_provider: str = ""
-    llm_api_key: SecretStr = SecretStr("")
+    llm_provider: str = ""  # "anthropic" | "lmstudio" | "openai_compat"
+    llm_api_key: SecretStr = SecretStr("")  # not needed for a local LM Studio server
     llm_model: str = "claude-sonnet-5"
+    llm_base_url: str = "http://127.0.0.1:1234/v1"  # OpenAI-compatible local server (LM Studio)
+    llm_reasoning_effort: str = "none"  # local reasoning models: keep hidden reasoning OFF
+    llm_timeout_s: float = 120.0
 
     # --- Notifications (Phase 1: all off until setup complete) ---
     notification_provider: str = ""
@@ -107,7 +113,10 @@ class Settings(BaseSettings):
 
     @property
     def llm_enabled(self) -> bool:
-        return bool(self.llm_provider) and bool(self.llm_api_key.get_secret_value())
+        provider = self.llm_provider.strip().lower()
+        if provider in LOCAL_LLM_PROVIDERS:
+            return True  # a local OpenAI-compatible server needs no key
+        return bool(provider) and bool(self.llm_api_key.get_secret_value())
 
     def session_secret(self) -> str:
         """Secret for signing the session cookie.
