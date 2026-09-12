@@ -462,7 +462,7 @@ def test_alert_cycle_commits_each_sent_alert_so_a_retry_never_resends(
             return True
 
     monkeypatch.setattr(dispatch, "available_channels", lambda: [_Chan()])
-    monkeypatch.setattr(dispatch, "feed_status_report", lambda session: {"feeds": []})
+    monkeypatch.setattr(dispatch, "feed_status_report", lambda session, **_: {"feeds": []})
     planned = [
         PlannedAlert(
             AlertType.SYSTEM_HEALTH, dedupe_key="a1", subject="first", body="b", overnight_ok=True

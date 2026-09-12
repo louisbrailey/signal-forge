@@ -44,11 +44,11 @@ from signalforge.research.approved_scope_scan import (
     universe_readiness,
 )
 
-# Clock-RELATIVE, deliberately: data_readiness takes an explicit ``now`` but
-# the feed-staleness gate underneath it (data.feeds.feed_status_report) reads
-# the real wall clock, so a hard-coded NOW turns every readiness test into a
-# time bomb that starts failing a couple of days after it was written.
-NOW = datetime.now(UTC)
+# A FIXED clock, deliberately: ``data_readiness`` threads its ``now`` into
+# every freshness decision it makes, including the feed-staleness gate in
+# ``data.feeds.feed_status_report``, so these fixtures are deterministic and
+# must never be made relative to the wall clock.
+NOW = datetime(2026, 9, 9, 22, 0, tzinfo=UTC)
 TODAY = NOW.date()
 SYMS = ["AAA", "BBB", "CCC", "DDD"]
 OTHER_SYMS = ["EEE", "FFF", "GGG", "HHH", "III", "JJJ"]

@@ -8,7 +8,7 @@ records it here with rationale, and lists the three that remain the operator's.
 
 | # | Decision | Taken |
 |---|---|---|
-| 1 | Supersede the roadmap's "no brokerage, at any phase" boundary | **Yes, by operator direction (2026-09-11).** Recorded as ADR `docs/decisions/ADR-execution-layer.md` (Phase D6). Paper-first evidence discipline (R1–R10) is unchanged. |
+| 1 | Supersede the roadmap's "no brokerage, at any phase" boundary | **Yes, by operator direction (2026-09-11).** Recorded as ADR `docs/decisions/0003-execution-layer.md` (Phase D6). Paper-first evidence discipline (R1–R10) is unchanged. |
 | 2 | Broker for the first paper adapter | **Assumed: Alpaca paper-trading API** (free paper endpoint, fractional shares — also required by the grid strategy's $5 orders, options on paper). **Operator must confirm and supply keys via env/keychain.** No other broker code is written until then. |
 | 3 | Options approval level | **Operator-only.** Design assumes Level 2 (defined-risk spreads, cash-secured puts, covered calls). Nothing is armed for real money until the level is confirmed. |
 | 4 | Capital limits (§3.2) — defaults | Per-structure max loss $250; aggregate open max loss $1,000; collateral cap $5,000; net delta ±$10,000 notional; net vega cap $50/vol-pt; per-order notional $1,000; daily order cap 10; account exposure cap 40%; arming expiry 7 days; PDT threshold acknowledged at $25,000 equity. **Operator may change any of these before arming.** |

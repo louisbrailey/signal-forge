@@ -8,7 +8,7 @@ live alerts (invariant S8).
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -22,10 +22,10 @@ from signalforge.db.types import utcnow
 DEFAULT_STALE_AFTER = timedelta(hours=36)
 
 
-def _row_to_dict(row: DataFeedStatus, *, stale_after: timedelta) -> dict[str, Any]:
+def _row_to_dict(row: DataFeedStatus, *, stale_after: timedelta, now: datetime) -> dict[str, Any]:
     last = row.last_success_at
-    age_seconds = (utcnow() - last).total_seconds() if last else None
-    is_stale = last is None or (utcnow() - last) > stale_after
+    age_seconds = (now - last).total_seconds() if last else None
+    is_stale = last is None or (now - last) > stale_after
     return {
         "provider": row.provider,
         "feed_type": row.feed_type.value,
@@ -47,14 +47,21 @@ def _row_to_dict(row: DataFeedStatus, *, stale_after: timedelta) -> dict[str, An
 def feed_status_report(
     session: Session | None = None,
     stale_after: timedelta = DEFAULT_STALE_AFTER,
+    *,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
+    """``now`` is the clock every ``age_seconds``/``is_stale`` value is measured
+    against. Callers that already run on an injected clock (the readiness gate,
+    the alert planner) pass theirs so one clock governs every freshness
+    decision; everyone else gets the wall clock."""
+    now = now or utcnow()
     if session is not None:
         rows = list(session.scalars(select(DataFeedStatus).order_by(DataFeedStatus.provider)))
-        feeds = [_row_to_dict(r, stale_after=stale_after) for r in rows]
+        feeds = [_row_to_dict(r, stale_after=stale_after, now=now) for r in rows]
     else:
         with session_scope() as own:
             rows = list(own.scalars(select(DataFeedStatus).order_by(DataFeedStatus.provider)))
-            feeds = [_row_to_dict(r, stale_after=stale_after) for r in rows]
+            feeds = [_row_to_dict(r, stale_after=stale_after, now=now) for r in rows]
     any_live_capable = any(f["is_live"] for f in feeds)
     return {
         "feeds": feeds,

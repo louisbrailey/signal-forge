@@ -179,7 +179,7 @@ def _recent_job_failures(session: Session, now: datetime, *, hours: int = 6) -> 
 
 def plan_alerts(session: Session, now: datetime) -> list[PlannedAlert]:
     planned: list[PlannedAlert] = []
-    feeds = feed_status_report(session)
+    feeds = feed_status_report(session, now=now)
     stale_reasons = [
         f"{f['provider']}/{f['feed_type']} stale" for f in feeds["feeds"] if f["is_stale"]
     ]

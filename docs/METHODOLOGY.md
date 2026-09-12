@@ -1,7 +1,7 @@
 # Methodology & data entitlement
 
 Signal Forge is **research / paper-trading / education only**, with one narrow,
-written exception recorded on 2026-09-12 in `docs/decisions/ADR-execution-layer.md`:
+written exception recorded on 2026-09-12 in `docs/decisions/0003-execution-layer.md`:
 a `signalforge.execution` package may submit orders to a broker's **paper/sandbox**
 endpoint, disabled by default and armed only by an audited per-strategy-version
 operator ceremony. **No such code exists yet.** Outside that one package there is no

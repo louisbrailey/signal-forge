@@ -335,7 +335,7 @@ def data_readiness(
     # unrelated options/news/secondary feed nobody is using.)
     feeds = [
         f
-        for f in feed_status_report(session)["feeds"]
+        for f in feed_status_report(session, now=now)["feeds"]
         if f["provider"] == source and f["feed_type"] == FeedType.BAR_DAILY.value
     ]
     if not feeds:

@@ -30,7 +30,7 @@ These hold across every module in this document. **One of them was superseded in
 writing on 2026-09-12** — see the first bullet; the rest stand with no exception
 planned at any phase:
 
-- **SUPERSEDED 2026-09-12 by `docs/decisions/ADR-execution-layer.md`** (full text:
+- **SUPERSEDED 2026-09-12 by `docs/decisions/0003-execution-layer.md`** (full text:
   `docs/research/options_designs/D6_execution_adr.md`), on the operator's direction
   of 2026-09-11 that Signal Forge is no longer research-use-only. The bullet used
   to read "**No brokerage, no order placement, no trade mirroring, anywhere.**"
@@ -74,7 +74,7 @@ planned at any phase:
   profitability, anywhere in this system.** Every test-methodology section
   below reports risk-adjusted, cost-inclusive, out-of-sample evidence or it
   reports nothing.
-- **SUPERSEDED 2026-09-12 by `docs/decisions/ADR-execution-layer.md`.** This
+- **SUPERSEDED 2026-09-12 by `docs/decisions/0003-execution-layer.md`.** This
   bullet used to read "**No brokerage/Webull/order-placement integration is in
   scope for any module, at any phase.** This roadmap does not create one and does
   not plan to." It now reads: **no brokerage or order-placement integration is in

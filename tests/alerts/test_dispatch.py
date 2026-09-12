@@ -66,7 +66,7 @@ def test_briefing_alert_is_sent_once_then_deduped(session: Session) -> None:
 def test_stale_feed_yields_only_a_data_issue_alert(session: Session) -> None:
     _seed_feed_and_briefing(session)
     for row in session.scalars(select(DataFeedStatus)):
-        row.last_success_at = utcnow() - timedelta(days=30)
+        row.last_success_at = NOON - timedelta(days=30)
     session.flush()
 
     planned = plan_alerts(session, NOON)
@@ -146,7 +146,7 @@ def test_every_alert_carries_the_research_only_notice(session: Session) -> None:
     )
     session.flush()
     for row in session.scalars(select(DataFeedStatus)):
-        row.last_success_at = utcnow() - timedelta(days=30)
+        row.last_success_at = NOON - timedelta(days=30)
     session.flush()
 
     for p in plan_alerts(session, NOON):
