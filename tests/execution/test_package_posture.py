@@ -13,18 +13,23 @@ import ast
 import pytest
 
 from signalforge.config.research import ResearchConfig
-from tests.support import iter_source_files, run_python
+from tests.support import PKG_ROOT, iter_source_files, run_python
 
 EXECUTION_MODULES = (
     "signalforge.execution",
     "signalforge.execution.brokers",
     "signalforge.execution.brokers.paper_reference",
+    "signalforge.execution.arming",
+    "signalforge.execution.calendarcheck",
     "signalforge.execution.credentials",
+    "signalforge.execution.cycle",
+    "signalforge.execution.deadman",
     "signalforge.execution.events",
     "signalforge.execution.intents",
     "signalforge.execution.limits",
     "signalforge.execution.oms",
     "signalforge.execution.protocol",
+    "signalforge.execution.reconcile",
     "signalforge.execution.states",
 )
 
@@ -128,18 +133,35 @@ def test_the_execution_package_imports_nothing_s15a_forbids() -> None:
     assert not offenders, "\n".join(offenders)
 
 
-def test_nothing_outside_the_execution_package_imports_it_yet() -> None:
-    """S15b's direction, at the state this phase leaves the tree in: the
-    execution spec is injected from ``signalforge.cli`` and from nowhere else,
-    and this phase adds no inbound edge at all."""
+def test_signalforge_cli_is_the_only_thing_outside_the_package_that_names_it() -> None:
+    """S15b's direction (D6 §2, §17.2 note 2, safety test T12).
+
+    I-E2 left the tree with NO inbound edge at all. I-E4 adds exactly one, and
+    it is the sanctioned one: the arming ceremony and the execution job spec are
+    injected from ``signalforge.cli``, a human-typed entry point with no LLM on
+    it. ``signalforge.scheduler`` must gain none (``signalforge.app`` imports it,
+    and a forbidden contract reports indirect chains), and ``signalforge/app/**``
+    must gain none either — so this list is one file long and stays that way.
+    """
     offenders: list[str] = []
     for path in iter_source_files():
         if "execution" in path.parts:
             continue
         text = path.read_text(encoding="utf-8")
         if "signalforge.execution" in text:
-            offenders.append(str(path))
-    assert not offenders, "\n".join(offenders)
+            offenders.append(str(path.relative_to(PKG_ROOT)))
+    assert offenders == ["cli.py"], offenders
+
+
+def test_the_scheduler_and_the_app_still_name_the_execution_layer_nowhere() -> None:
+    """The two modules the §2 registration rule exists to keep clean."""
+    paths = [PKG_ROOT / "scheduler.py", *sorted((PKG_ROOT / "app").rglob("*.py"))]
+    named = [
+        str(p.relative_to(PKG_ROOT))
+        for p in paths
+        if "signalforge.execution" in p.read_text(encoding="utf-8")
+    ]
+    assert named == [], named
 
 
 def test_the_options_order_path_is_blocked_until_the_options_ledger_lands() -> None:

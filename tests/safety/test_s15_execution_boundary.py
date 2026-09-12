@@ -518,6 +518,26 @@ def test_t6_is_paper_mismatch_fails_arming() -> None:
     assert "is_paper proof failed" in result.error_verbatim
     assert adapter.fills_for("cid-mismatch") == ()  # type: ignore[attr-defined]
 
+    # 5 — an ABSENT account id is equally refused: "absent" is not "matching" (§13).
+    with pytest.raises(ValueError):
+        IsPaperProof(
+            proven=True,
+            observed_account_id="",
+            observed_host="paper.example.invalid",
+            expected_account_id="PAPER-ACCOUNT-1",
+            checked_at=PAPER_REFERENCE_DRILL_NOW,
+        )
+
+    # 6 — the arming ceremony (I-E4) compares the OBSERVED id against the id the
+    # operator typed, and treats a missing proof as a failure, not an absence.
+    import inspect
+
+    from signalforge.execution.arming import check_arming_preconditions
+
+    source = inspect.getsource(check_arming_preconditions)
+    assert "is_paper_proof is None" in source
+    assert "observed_account_id != request.broker_account_id_expected" in source
+
 
 # ---------------------------------------------------------------------------
 # T7 — no credential literal anywhere in src/signalforge.

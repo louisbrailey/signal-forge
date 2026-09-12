@@ -1,14 +1,18 @@
-"""The OMS state machine, persisted (D6 ADR §6, §8).
+"""The OMS state machine and the kill-switch branch, persisted (D6 §6, §8).
 
 What is here: the durable state transitions, the ``SUBMITTING``-with-no-outcome
-promotion to ``UNKNOWN``, the two-part ``UNKNOWN`` resolution, and the query
-``may_open``'s I2 check reads.
+promotion to ``UNKNOWN``, the two-part ``UNKNOWN`` resolution, the query
+``may_open``'s I2 check reads, and — added in I-E4 — the §8 apparatus: the
+execution-local kill state (K2), the submission lock, the bounded drain, and
+``execution_guarded``, the cycle wrapper that **branches instead of returning**
+so that engaging the kill switch cannot stop the protective path.
 
-What is deliberately NOT here, in this phase:
+What is deliberately NOT here, and not anywhere in this package yet:
 
-* no adapter call of any kind — no ``place``, no ``cancel``, no network;
-* no arming ceremony (I-E4) and no scheduler registration (§2);
-* no cycle loop, no dead man, no reconciliation.
+* no adapter call of any kind — no ``place``, no ``cancel``, no network. The
+  first adapter (``brokers/paper_reference.py``, local and deterministic) is
+  I-E3 and is built on its own branch; nothing in I-E4 depends on it, and the
+  cycle runs its whole local half with no adapter at all.
 
 The SQLite discipline this module exists to make possible (§2, §8): the
 ``SUBMITTING`` record is written and **committed** BEFORE the network call, with
@@ -20,7 +24,11 @@ the live probation worker uses.
 from __future__ import annotations
 
 import contextlib
-from datetime import datetime
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from signalforge.execution.events import ExecutionEventType, record_execution_event
@@ -39,14 +47,27 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from signalforge.db.models import ExecutionEvent
 
 __all__ = [
+    "CycleBranch",
+    "CyclePosture",
+    "DrainResult",
+    "ExecutionKillState",
+    "SubmissionLock",
+    "SubmissionsClosed",
     "assert_terminal",
     "current_state",
+    "drain",
+    "execution_guarded",
+    "execution_kill_state_path",
     "has_outstanding_unknown",
+    "in_flight_client_order_ids",
     "promote_stale_submitting",
+    "read_cycle_posture",
+    "read_execution_kill_state",
     "record_submitting",
     "refuse",
     "resolve_unknown",
     "transition",
+    "write_execution_kill_state",
 ]
 
 Intent = OrderIntent | ComboOrderIntent
@@ -317,3 +338,392 @@ def refuse(
 def assert_terminal(state: OrderState) -> None:
     if not is_terminal(state):
         raise IllegalTransition(state, state, "expected a terminal state")
+
+
+# ---------------------------------------------------------------------------
+# §8 — the execution-local kill state (K2), the submission lock, the drain
+# ---------------------------------------------------------------------------
+#
+# FACT: ``killswitch.py`` is deliberately fail-OPEN — its own docstring says a
+# missing state file means *not engaged*, and an unreadable or corrupt file is
+# ALSO treated as not engaged but logged at ERROR, "because silently freezing a
+# research tool on a parse glitch is worse than the operator re-engaging
+# explicitly". That is right for a research tool and wrong for order submission.
+#
+# It is not changed. There are 39 ``ensure_not_engaged()`` call sites and
+# flipping fail-open to fail-closed would silently alter all of them. Instead a
+# SEPARATE, execution-only kill state is added whose unreadable/corrupt case
+# BLOCKS. Nothing else reads it. Missing evidence of safety is not evidence of
+# safety — but a MISSING file is not an unreadable one: a fresh install has
+# simply never engaged it, which is what ``killswitch.py`` means by a missing
+# file too, and §8 names the unreadable/corrupt case specifically.
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionKillState:
+    """K2. ``engaged`` is what the gate reads; ``readable`` is why.
+
+    An unreadable state reports ``engaged=True`` AND ``readable=False``, so the
+    audit line can distinguish "the operator engaged it" from "we could not tell
+    and therefore refused to open". Both block opening. Neither blocks closing.
+    """
+
+    engaged: bool
+    readable: bool
+    reason: str = ""
+    actor: str = ""
+    changed_at: datetime | None = None
+    path: str = ""
+
+
+def execution_kill_state_path() -> Path:
+    from signalforge.config import paths
+
+    return paths.data_dir() / "execution_kill_state.json"
+
+
+def read_execution_kill_state(path: Path | None = None) -> ExecutionKillState:
+    """Read K2, fail-CLOSED on anything that is not a clean parse."""
+    import json
+
+    target = path or execution_kill_state_path()
+    try:
+        raw = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ExecutionKillState(
+            engaged=False,
+            readable=True,
+            reason="no execution kill state has ever been written",
+            path=str(target),
+        )
+    except OSError as exc:
+        return ExecutionKillState(
+            engaged=True,
+            readable=False,
+            reason=f"the execution kill state could not be read ({exc}) — opening blocked",
+            path=str(target),
+        )
+    try:
+        data = json.loads(raw)
+        return ExecutionKillState(
+            engaged=bool(data["engaged"]),
+            readable=True,
+            reason=str(data.get("reason", "")),
+            actor=str(data.get("actor", "")),
+            changed_at=(
+                datetime.fromisoformat(data["changed_at"]) if data.get("changed_at") else None
+            ),
+            path=str(target),
+        )
+    except (ValueError, KeyError, TypeError) as exc:
+        return ExecutionKillState(
+            engaged=True,
+            readable=False,
+            reason=f"the execution kill state is corrupt ({exc}) — opening blocked",
+            path=str(target),
+        )
+
+
+def write_execution_kill_state(
+    *, engaged: bool, reason: str, actor: str, now: datetime, path: Path | None = None
+) -> ExecutionKillState:
+    """Engage or release K2. Atomic replace, in the shape ``killswitch.py`` uses."""
+    import json
+    import os
+    import tempfile
+
+    target = path or execution_kill_state_path()
+    payload = {
+        "engaged": engaged,
+        "reason": reason,
+        "actor": actor,
+        "changed_at": now.isoformat(),
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=".exk-", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, indent=2) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        tmp.replace(target)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return ExecutionKillState(
+        engaged=engaged, readable=True, reason=reason, actor=actor, changed_at=now, path=str(target)
+    )
+
+
+class SubmissionsClosed(RuntimeError):
+    """No new submission may be admitted: a drain is in progress or has run."""
+
+
+class SubmissionLock:
+    """§8's "stop admitting new submissions" half of the drain sequence.
+
+    The race this closes: the limit checks and the network ``place()`` are
+    separate steps with a network call between them, so an order submitted
+    microseconds before an engage will not appear in the broker's order list when
+    ``cancel_all()`` runs. The durable half of the answer is the committed
+    ``SUBMITTING`` record (:func:`record_submitting`); this is the in-process
+    half — once admissions are closed nothing new is started, and what is already
+    in flight is waited for, bounded.
+
+    Process-local by design. The durable in-flight set lives in
+    ``execution_event`` and survives a crash; this object governs only the
+    submissions THIS process is about to start, and one worker per DB is the
+    standing rule.
+    """
+
+    def __init__(self) -> None:
+        self._admitting = True
+        self._reason = ""
+
+    @property
+    def admitting(self) -> bool:
+        return self._admitting
+
+    @property
+    def reason(self) -> str:
+        return self._reason
+
+    def close(self, reason: str) -> None:
+        self._admitting = False
+        self._reason = reason
+
+    def reopen(self, reason: str = "") -> None:
+        """Only a fresh cycle that observed a clean posture reopens admissions."""
+        self._admitting = True
+        self._reason = reason
+
+    def admit(self) -> None:
+        """Raise unless a new submission may be started right now."""
+        if not self._admitting:
+            raise SubmissionsClosed(
+                f"submissions are closed: {self._reason or 'a drain is in progress'}"
+            )
+
+
+def in_flight_client_order_ids(session: Session, *, adapter_name: str | None = None) -> list[str]:
+    """The DURABLE in-flight set: every order whose latest recorded state is
+    ``SUBMITTING``. Not an in-memory set — a process killed between the commit
+    and the broker's response must leave this visible to the next cycle."""
+    from sqlalchemy import select
+
+    from signalforge.db.models import ExecutionEvent
+
+    stmt = select(ExecutionEvent.client_order_id).where(ExecutionEvent.client_order_id != "")
+    if adapter_name is not None:
+        stmt = stmt.where(ExecutionEvent.adapter_name == adapter_name)
+    ids = sorted({cid for cid in session.scalars(stmt) if cid})
+    return [cid for cid in ids if current_state(session, cid) is OrderState.SUBMITTING]
+
+
+@dataclass(frozen=True, slots=True)
+class DrainResult:
+    drained: tuple[str, ...]
+    timed_out: tuple[str, ...]
+    waited_s: float
+    detail: str
+
+
+def drain(
+    session: Session,
+    *,
+    adapter_name: str,
+    timeout_s: float,
+    now: datetime,
+    monotonic: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
+    poll_interval_s: float = 0.5,
+    actor: str = "system",
+) -> DrainResult:
+    """§8 step 3: wait, BOUNDED, for the in-flight set to drain.
+
+    On timeout the undrained entries become ``UNKNOWN`` — never "assumed
+    failed", because the order may well have reached the broker, which is the
+    entire reason that state exists. ``monotonic``/``sleep`` are injected so the
+    bound is testable without spending it.
+
+    The timeout is ``execution_limits.drain_timeout_s`` (grid centre 30s, §7b).
+    Too short manufactures ``UNKNOWN``s; too long delays the kill switch. That is
+    D6 open question Q7, and the answer is a pre-registered number rather than
+    one chosen after seeing which drains were slow.
+    """
+    import time as _time
+
+    clock = monotonic or _time.monotonic
+    nap = sleep if sleep is not None else _time.sleep
+    started = clock()
+    outstanding = in_flight_client_order_ids(session, adapter_name=adapter_name)
+    drained: list[str] = []
+    while outstanding and (clock() - started) < timeout_s:
+        nap(poll_interval_s)
+        still = set(in_flight_client_order_ids(session, adapter_name=adapter_name))
+        drained.extend(cid for cid in outstanding if cid not in still)
+        outstanding = [cid for cid in outstanding if cid in still]
+    waited = clock() - started
+    if outstanding:
+        promote_stale_submitting(session, now=now, adapter_name=adapter_name, actor=actor)
+    return DrainResult(
+        drained=tuple(drained),
+        timed_out=tuple(outstanding),
+        waited_s=waited,
+        detail=(
+            f"{len(drained)} drained, {len(outstanding)} promoted to UNKNOWN after "
+            f"{waited:.1f}s (bound {timeout_s:.0f}s)"
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# §2 / §8 — execution_guarded: the cycle wrapper that BRANCHES, never returns
+# ---------------------------------------------------------------------------
+#
+# FACT (the defect this corrects): ``scheduler.guarded`` calls
+# ``ensure_not_engaged()`` and, on ``KillSwitchEngaged``, logs, records a
+# "skipped" ``JobRun``, and RETURNS — the job body never runs. If the execution
+# cycle were registered through it then, with the kill switch engaged: §8's
+# drain -> cancel_all -> reconcile sequence would never run, §7's may_close
+# protective close could never be submitted by the system, §9's dead-man
+# heartbeat would stop (so the dead man would lapse as a SIDE EFFECT of engaging
+# the kill switch), and reconciliation would age past max_reconciliation_age_s.
+#
+# The kill switch would, in fact, block closing. So this wrapper reads the same
+# state and BRANCHES instead.
+
+
+class CycleBranch(StrEnum):
+    FULL = "full"
+    PROTECTIVE = "protective"
+
+
+@dataclass(frozen=True, slots=True)
+class CyclePosture:
+    """What the cycle body is permitted to do, decided before it starts.
+
+    ``may_open`` is False in the protective branch **by construction, not by a
+    flag the body could ignore**: the protective branch takes a different code
+    path with no opening step in it at all. This object records the decision for
+    the audit line; it is not the enforcement.
+    """
+
+    branch: CycleBranch
+    may_open: bool
+    may_close: bool
+    kill_switch_engaged: bool | None
+    execution_kill: ExecutionKillState
+    detail: str
+
+
+def read_cycle_posture(*, kill_state_path: Path | None = None) -> CyclePosture:
+    """K1 + K2, read at the TOP of every cycle — the only observation point.
+
+    FACT: ``KillSwitch.state()`` is an on-demand JSON file read, engaged from a
+    different process, and there is no watcher, no signal and no callback
+    anywhere in the repo. The OMS cannot be told; it can only look. The poll
+    interval is ``execution_limits.cycle_interval_s`` (grid centre 30s), so the
+    worst case between an engage and ``cancel_all()`` is cycle_interval_s +
+    drain_timeout_s + one reconciliation round trip ~= 60-70s at the grid
+    centres. If the worker is NOT running, nothing happens at the broker at all —
+    which is why that is arming acknowledgement (iv).
+    """
+    from signalforge.killswitch import get_kill_switch
+
+    try:
+        k1_engaged: bool | None = get_kill_switch().state().active
+    except Exception as exc:  # pragma: no cover - state() is total by design
+        k1_engaged = None
+        k1_detail = f"the kill switch could not be read ({type(exc).__name__}: {exc})"
+    else:
+        k1_detail = f"kill switch engaged={k1_engaged}"
+
+    k2 = read_execution_kill_state(kill_state_path)
+    protective = bool(k1_engaged) or k1_engaged is None or k2.engaged
+    return CyclePosture(
+        branch=CycleBranch.PROTECTIVE if protective else CycleBranch.FULL,
+        may_open=not protective,
+        # The one promise this layer makes above all others.
+        may_close=True,
+        kill_switch_engaged=k1_engaged,
+        execution_kill=k2,
+        detail=f"{k1_detail}; K2 {k2.reason or 'not engaged'}",
+    )
+
+
+def execution_guarded(
+    name: str,
+    fn: Callable[[CyclePosture], str],
+    *,
+    kill_state_path: Path | None = None,
+) -> Callable[[], None]:
+    """Wrap the execution cycle. **This is NOT ``scheduler.guarded``.**
+
+    It records a ``JobRun`` row of the same shape so the Operational Status page
+    still sees the job, reads K1 and K2 itself, and **branches** rather than
+    returning:
+
+    * not engaged -> the full cycle (heartbeat, reconcile, calendar, limits,
+      open, close);
+    * engaged, or K2 unreadable -> a protective-only cycle: heartbeat ->
+      reconcile -> bounded drain -> ``cancel_all()`` -> reconcile again ->
+      ``may_close`` only. No ``may_open`` path is reachable in that branch, by
+      construction, not by a flag.
+
+    The branch is never swallowed: the ``JobRun`` note records which one ran, and
+    a ``CYCLE_PROTECTIVE`` ``execution_event`` is written whenever the protective
+    branch runs.
+
+    No job-level ``retry_on_lock``: the cycle persists per-unit records (events,
+    disarms, reconciliations) and re-running the whole body would duplicate the
+    ones already written — the same reason ``scheduler.NO_JOB_LEVEL_LOCK_RETRY``
+    exists. Lock contention is retried per write, inside.
+    """
+    from signalforge.observability import get_logger
+
+    log = get_logger("execution.cycle")
+
+    def _run() -> None:
+        started = datetime.now(UTC)
+        posture = read_cycle_posture(kill_state_path=kill_state_path)
+        log.info("execution_cycle.start", job=name, branch=posture.branch.value)
+        try:
+            note = fn(posture)
+        except Exception as exc:
+            log.exception("execution_cycle.failed", job=name, branch=posture.branch.value)
+            _record_cycle_job_run(name, started, "failed", f"[{posture.branch.value}] {exc!r}")
+            raise
+        _record_cycle_job_run(name, started, "ok", f"[{posture.branch.value}] {note}")
+        log.info("execution_cycle.done", job=name, branch=posture.branch.value)
+
+    return _run
+
+
+def _record_cycle_job_run(name: str, started: datetime, status: str, detail: str) -> None:
+    """One ``JobRun`` row, the same shape as the scheduler's. Best-effort: a DB
+    problem here must never mask the cycle's own outcome."""
+    from signalforge.observability import get_logger
+
+    try:
+        from signalforge.db.models import JobRun
+        from signalforge.db.retry import retry_on_lock
+        from signalforge.db.session import session_scope
+
+        def _write() -> None:
+            with session_scope(write=True) as session:
+                session.add(
+                    JobRun(
+                        name=name,
+                        started_at=started,
+                        finished_at=datetime.now(UTC),
+                        status=status,
+                        detail=detail[:300],
+                    )
+                )
+
+        retry_on_lock(_write, attempts=4, backoff_s=(0.2, 0.5, 1.0), label="execution_job_run")
+    except Exception as exc:  # pragma: no cover - never masks the cycle outcome
+        get_logger("execution.cycle").warning(
+            "execution_cycle.job_run_record_failed", job=name, error=repr(exc)[:160]
+        )

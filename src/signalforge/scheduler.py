@@ -58,6 +58,17 @@ class JobSpec:
     cron_hour: int | None = None
     cron_minute: int = 0
     cron_tz: str = "America/New_York"
+    # The job supplies its OWN kill-switch-aware wrapper and must NOT be wrapped
+    # in :func:`guarded`. Exactly one job sets this, and it is injected from the
+    # CLI rather than listed in ``default_job_specs()``: the order-execution
+    # cycle. ``guarded()`` RETURNS without running the body when the kill switch
+    # is engaged, which for that job would mean no protective close, no drain, no
+    # cancel_all and a dead-man lapse caused BY engaging the switch — i.e. a kill
+    # switch that blocks closing. That job's own wrapper reads the same state and
+    # branches to a protective-only cycle instead. No other spec may set this:
+    # every job in ``default_job_specs()`` leaves it False and is guarded exactly
+    # as it was before this field existed.
+    self_guarded: bool = False
 
 
 def _record_job_failure(name: str, error: str) -> None:
@@ -897,7 +908,11 @@ def build_scheduler(specs: list[JobSpec] | None = None) -> BackgroundScheduler:
         else:
             trigger_kwargs = {"trigger": "interval", "minutes": spec.interval_minutes}
         scheduler.add_job(
-            guarded(spec.name, spec.fn),
+            # A self-guarded spec brings its own kill-switch handling and must
+            # not be double-wrapped: guarded() would return before that
+            # wrapper's protective branch could run. Default False, so every
+            # job in default_job_specs() is registered exactly as before.
+            spec.fn if spec.self_guarded else guarded(spec.name, spec.fn),
             id=spec.name,
             name=spec.description,
             replace_existing=True,

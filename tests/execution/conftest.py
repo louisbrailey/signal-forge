@@ -12,23 +12,29 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from signalforge.db.models import (
     ArmedStrategy,
     Candidate,
+    DataSnapshot,
     ExecutionLimits,
     Instrument,
     PaperAccount,
+    PaperPosition,
     PaperTrade,
     ScanRun,
     Strategy,
+    StrategyPromotionEvaluation,
+    StrategySealedTest,
     StrategyVersion,
 )
 from signalforge.domain import (
     Direction,
     Horizon,
     PaperDecision,
+    PositionSide,
     QualityGate,
     StrategyStatus,
 )
@@ -205,8 +211,16 @@ def clean_limit_set() -> LimitSet:
 
 @pytest.fixture
 def limits_row(session: Session) -> ExecutionLimits:
-    """The grid centres of §7b / decision 4, as a valid active row."""
-    row = ExecutionLimits(created_at=NOW, created_by="local-user", **LIMIT_GRID_CENTRES)
+    """The grid centres of §7b / decision 4, as a valid active row.
+
+    Created 30 days before ``NOW`` because §7b rule 3 counts decision-10 evidence
+    only from the active row's creation: a limits row created after the evidence
+    would (correctly) reset the counter to zero, and that reset has its own test
+    rather than being the accidental default of every other one.
+    """
+    row = ExecutionLimits(
+        created_at=NOW - timedelta(days=30), created_by="local-user", **LIMIT_GRID_CENTRES
+    )
     session.add(row)
     session.flush()
     return row
@@ -285,3 +299,190 @@ def clean_open_context(**overrides: object) -> OpenGateContext:
     }
     base.update(overrides)
     return OpenGateContext(**base)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# I-E4 — the arming ceremony's own fixtures.
+#
+# Assembled by hand, like everything above: each precondition test removes
+# exactly one fact and watches the ceremony refuse. The evidence fixture builds
+# REAL closed PaperPositions rather than stubbing the health monitor, because
+# decision 10's precondition is "under the health monitor" and a stub would let
+# the two definitions of a closed trade drift apart unnoticed.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def live_hashes(session: Session, strategy_version: StrategyVersion) -> tuple[str, str]:
+    """The config/spec hashes the arming ceremony will recompute for itself.
+
+    Read from the same two functions the ceremony reads, never hard-coded: a
+    hard-coded hash is a test that keeps passing after the thing it guards has
+    moved, which is precisely the 2026-09-11 config-hash incident's shape.
+    """
+    from signalforge.research.approval_scope import current_spec_json_hash
+    from signalforge.settings_store import effective_research_config
+
+    return (
+        effective_research_config(session).config_hash,
+        current_spec_json_hash(session, strategy_version.id) or "",
+    )
+
+
+@pytest.fixture
+def sealed_test(session: Session, strategy_version: StrategyVersion) -> StrategySealedTest:
+    """A PASSING sealed final test — §12 step 1's first requirement."""
+    from datetime import date
+
+    snapshot = DataSnapshot(key="universe_test_snapshot", symbols_json=["SPY"])
+    session.add(snapshot)
+    session.flush()
+    row = StrategySealedTest(
+        strategy_version_id=strategy_version.id,
+        dataset_snapshot_id=snapshot.id,
+        window_start=date(2024, 1, 2),
+        window_end=date(2025, 1, 2),
+        universe_json=["SPY"],
+        passed=True,
+        evaluated_at=NOW - timedelta(days=30),
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+@pytest.fixture
+def approved_evaluation(
+    session: Session,
+    strategy_version: StrategyVersion,
+    sealed_test: StrategySealedTest,
+    live_hashes: tuple[str, str],
+) -> StrategyPromotionEvaluation:
+    """A PASSING evaluation whose scope hashes equal the LIVE ones.
+
+    This is what makes the approval apply to what the code would run now. A test
+    that drifts one of these two hashes is testing the auto-disarm trigger the
+    config-hash incident produced.
+    """
+    from datetime import date
+
+    config_hash, spec_hash = live_hashes
+    row = StrategyPromotionEvaluation(
+        strategy_version_id=strategy_version.id,
+        dataset_snapshot_id=sealed_test.dataset_snapshot_id,
+        evaluated_at=NOW - timedelta(days=29),
+        config_hash=config_hash,
+        spec_json_hash=spec_hash,
+        universe_json=["SPY"],
+        window_start=date(2024, 1, 2),
+        window_end=date(2025, 1, 2),
+        data_provenance_json={"sources": ["massive"]},
+        passed=True,
+        verdict="PAPER_APPROVED",
+        sealed_test_id=sealed_test.id,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def add_closed_paper_positions(
+    session: Session,
+    *,
+    account: PaperAccount,
+    strategy_version: StrategyVersion,
+    n: int,
+    pnl_per_trade: float,
+    closed_at: datetime | None = None,
+) -> None:
+    """``n`` closed positions with a fixed R, for decision 10's counter.
+
+    Entry 100, stop 99 => $1 of per-share risk on 1 share, so ``pnl_per_trade``
+    IS the R-multiple the health monitor computes. Keeping that arithmetic
+    trivial is deliberate: a test of the >=20/non-negative rule should fail on
+    the rule, never on its own fixture's R arithmetic.
+    """
+    inst = session.scalar(select(Instrument).where(Instrument.symbol == "SPY"))
+    if inst is None:
+        inst = Instrument(symbol="SPY", name="SPDR", instrument_type="etf", sector="Broad")
+        session.add(inst)
+        session.flush()
+    when = closed_at or (NOW - timedelta(days=1))
+    for i in range(n):
+        session.add(
+            PaperPosition(
+                account_id=account.id,
+                instrument_id=inst.id,
+                strategy_version_id=strategy_version.id,
+                horizon=Horizon.SHORT_SWING,
+                side=PositionSide.LONG,
+                qty=1,
+                avg_price=Decimal("100"),
+                stop_level=99.0,
+                opened_at=when - timedelta(days=2),
+                closed_at=when + timedelta(seconds=i),
+                realized_pnl=Decimal(str(pnl_per_trade)),
+            )
+        )
+    session.flush()
+
+
+@pytest.fixture
+def evidence_ok(session: Session, account: PaperAccount, strategy_version: StrategyVersion) -> None:
+    """Exactly the 20 closed trades decision 10 requires, at +0.5R each."""
+    add_closed_paper_positions(
+        session,
+        account=account,
+        strategy_version=strategy_version,
+        n=20,
+        pnl_per_trade=0.5,
+    )
+
+
+@pytest.fixture
+def armable(
+    session: Session,
+    strategy_version: StrategyVersion,
+    approved_evaluation: StrategyPromotionEvaluation,
+    evidence_ok: None,
+    limits_row: ExecutionLimits,
+) -> StrategyVersion:
+    """Everything §12 steps 1-2 need, and nothing §12 step 3 needs.
+
+    Step 3's facts — the typed account id, the acknowledgements, the is_paper
+    proof, the flat account — are supplied per test, because each of them is a
+    separate refusal worth exercising on its own.
+    """
+    return strategy_version
+
+
+def arming_request(**overrides: object):
+    """A complete, passing :class:`ArmingRequest`, for tests that break one field."""
+    from signalforge.execution.arming import ArmingRequest
+
+    base: dict[str, object] = {
+        "strategy_version_id": 1,
+        "adapter_name": ADAPTER,
+        "broker_account_id_expected": "PAPER-ACCOUNT-1",
+        "preregistration_doc_id": "PREREGISTRATION_2026-09-11_snapshot11",
+        "max_notional_usd": 1_000.0,
+        "max_orders_per_day": 10,
+        "structure_type": "equity",
+        "acknowledged": True,
+    }
+    base.update(overrides)
+    return ArmingRequest(**base)  # type: ignore[arg-type]
+
+
+def paper_proof(account_id: str = "PAPER-ACCOUNT-1", *, proven: bool = True):
+    """An :class:`IsPaperProof` in the shape an adapter would return."""
+    from signalforge.execution.protocol import IsPaperProof
+
+    return IsPaperProof(
+        proven=proven,
+        observed_account_id=account_id,
+        observed_host="paper.example.invalid",
+        expected_account_id=account_id if proven else "",
+        checked_at=NOW,
+        failure_reason="" if proven else "stubbed mismatch",
+    )

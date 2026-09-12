@@ -10,6 +10,7 @@ import typer
 
 if TYPE_CHECKING:
     from signalforge.data.options_backfill import OptionsCoverageSummary
+    from signalforge.execution.protocol import BrokerAdapter
     from signalforge.research.portfolio_metrics import PortfolioMetrics
 
 from signalforge import __version__
@@ -2849,8 +2850,15 @@ def run_scheduler() -> None:
 
     Jobs: one post-close daily EOD update (ingest + rescan, cron 17:30 ET),
     paper mark-to-market, feed-staleness probe, daily briefing, alert cycle
-    (policy-gated, OFF by default), strategy-health monitor. Every job is a
-    no-op while the kill switch is engaged.
+    (policy-gated, OFF by default), strategy-health monitor. Every one of them is
+    a no-op while the kill switch is engaged.
+
+    The one exception, and it is deliberate: with the `execution.enabled` setting
+    True this worker also carries `execution_cycle`, which brings its own
+    kill-switch handling and BRANCHES to a protective-only cycle instead of
+    skipping — because a cycle that does not run while the switch is engaged is a
+    kill switch that blocks closing. Nothing is armed by default, so the cycle
+    submits nothing either way; see `signalforge execution status`.
     """
     import time
 
@@ -2858,9 +2866,11 @@ def run_scheduler() -> None:
     from signalforge.scheduler import build_scheduler, run_catch_up
 
     # Start even while the kill switch is engaged: every job is individually
-    # guarded (a logged no-op until release), so refusing to start here would
-    # only make a launchd KeepAlive / Docker restart policy crash-loop the
-    # worker for the duration of an incident.
+    # guarded (a logged no-op until release, or — for the execution cycle — a
+    # protective-only branch), so refusing to start here would only make a
+    # launchd KeepAlive / Docker restart policy crash-loop the worker for the
+    # duration of an incident. It would also be the worst possible moment to
+    # have no execution heartbeat, reconciliation or drain (D6 §8).
     try:
         ensure_not_engaged()
     except KillSwitchEngaged as exc:
@@ -2889,7 +2899,25 @@ def run_scheduler() -> None:
     started = _dt.now(_UTC)
     record_heartbeat(None, started_at=started, detail="starting: catch-up check")
     run_catch_up()
-    scheduler = build_scheduler()
+    # D6 ADR §2: the execution job spec is resolved HERE and nowhere else.
+    # signalforge.scheduler must not import signalforge.execution (signalforge.app
+    # imports the scheduler, and S15b reports indirect chains), and
+    # signalforge/app/** must not resolve it either — so the CLI worker is the one
+    # sanctioned inbound edge. It returns [] unless execution.enabled is True, so
+    # with the default configuration the job list below is byte-identical to
+    # default_job_specs().
+    from signalforge.execution.cycle import execution_job_specs
+    from signalforge.scheduler import default_job_specs
+
+    extra = execution_job_specs(adapter=_execution_adapter())
+    if extra:
+        typer.secho(
+            f"execution.enabled is True — registering {len(extra)} execution job(s). "
+            "Nothing is armed by default; see `signalforge execution status`.",
+            fg=typer.colors.YELLOW,
+            bold=True,
+        )
+    scheduler = build_scheduler(specs=[*default_job_specs(), *extra])
     scheduler.start()
     record_heartbeat(scheduler, started_at=started)
     typer.secho("scheduler running — Ctrl-C to stop", fg=typer.colors.CYAN)
@@ -2914,13 +2942,27 @@ def run_job(
         typer.Argument(
             help="daily_eod_update | paper_mtm | feed_probe | health_check | news_poll | "
             "daily_briefing | alerts | strategy_health | approved_scope_scan | agents_daily | "
-            "universe_update | grid_daily"
+            "universe_update | grid_daily | execution_cycle"
         ),
     ],
 ) -> None:
-    """Run one scheduled job once (kill-switch guarded)."""
+    """Run one scheduled job once (kill-switch guarded).
+
+    ``execution_cycle`` is the one exception to "kill-switch guarded" and it is
+    the deliberate one: ``guarded()`` returns WITHOUT running the body while the
+    switch is engaged, which for that job would mean no protective close, no
+    drain and no ``cancel_all`` — a kill switch that blocks closing. It carries
+    its own wrapper, which reads the same state and branches to a protective-only
+    cycle instead.
+    """
+    from signalforge.execution.cycle import manual_job_entries
     from signalforge.scheduler import MANUAL_JOBS, default_job_specs, guarded
 
+    execution_jobs = manual_job_entries(adapter=_execution_adapter())
+    if name in execution_jobs:
+        execution_jobs[name]()
+        typer.secho(f"job {name} finished (self-guarded)", fg=typer.colors.GREEN)
+        return
     spec = next((s for s in default_job_specs() if s.name == name), None)
     fn = spec.fn if spec is not None else MANUAL_JOBS.get(name)
     if fn is None:
@@ -2970,6 +3012,453 @@ def restore(
     )
     dest = restore_backup(Path(path), gpg_passphrase=passphrase)
     typer.secho(f"restored into {dest}", fg=typer.colors.GREEN)
+
+
+# ---------------------------------------------------------------------------
+# The execution command group (D6 ADR §12) — the one sanctioned inbound edge.
+#
+# `signalforge.cli` is deliberately the ONLY module in the tree that names
+# `signalforge.execution` (S15b note 2, safety test T12). The arming ceremony is
+# a human-typed entry point with no LLM anywhere on it, and the job spec for the
+# execution cycle is injected into `build_scheduler` from here rather than from
+# `signalforge.scheduler`, which must gain no import edge because
+# `signalforge.app` imports the scheduler and S15b reports indirect chains.
+# ---------------------------------------------------------------------------
+execution_app = typer.Typer(
+    help=(
+        "Order execution against a broker's PAPER endpoint. The package is DISABLED by "
+        "default and nothing is armed by default; arming is a separate, audited, expiring "
+        "operator ceremony per strategy version. The kill switch blocks opening and never "
+        "blocks closing."
+    )
+)
+app.add_typer(execution_app, name="execution")
+
+
+def _execution_adapter() -> BrokerAdapter | None:
+    """Resolve the configured broker adapter, or ``None``.
+
+    There is no adapter in this tree: ``execution/brokers/paper_reference.py`` is
+    I-E3 (local, deterministic, network-free) and the vendor paper adapter is
+    I-E5. Resolved dynamically so that this branch depends on neither.
+
+    ``None`` is not a degraded mode. Every adapter-dependent check then reports
+    "could not be evaluated", which BLOCKS opening, and the arming ceremony
+    refuses outright because it cannot take an ``is_paper`` proof — a proof is
+    read out of the broker's OWN response body, and there is no broker to ask.
+    """
+    import importlib
+
+    try:
+        brokers = importlib.import_module("signalforge.execution.brokers")
+        resolve = brokers.resolve_adapter
+    except (ImportError, AttributeError):
+        return None
+    try:
+        from signalforge.db.session import session_scope
+        from signalforge.settings_store import effective_research_config
+
+        with session_scope() as session:
+            name = effective_research_config(session).execution.adapter_name
+        adapter: BrokerAdapter = resolve(name)
+        return adapter
+    except Exception:
+        return None
+
+
+@execution_app.command("status")
+def execution_status() -> None:
+    """Show the posture: enabled flag, kill states, dead man, limits, armings.
+
+    Read-only. It never arms, never disarms, and never contacts a broker.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    from signalforge.db.models import Strategy, StrategyVersion
+    from signalforge.db.session import session_scope
+    from signalforge.execution import EXECUTION_DISABLED_BY_DEFAULT
+    from signalforge.execution import arming as arming_mod
+    from signalforge.execution import deadman as deadman_mod
+    from signalforge.execution.limits import load_active_limits
+    from signalforge.execution.oms import read_cycle_posture
+    from signalforge.settings_store import effective_research_config
+
+    now = _dt.now(_UTC)
+    posture = read_cycle_posture()
+    typer.secho(
+        f"EXECUTION_DISABLED_BY_DEFAULT = {EXECUTION_DISABLED_BY_DEFAULT}",
+        fg=typer.colors.CYAN,
+    )
+    with session_scope() as session:
+        cfg = effective_research_config(session)
+        typer.secho(
+            f"execution.enabled = {cfg.execution.enabled}  (adapter: {cfg.execution.adapter_name})",
+            fg=typer.colors.GREEN if cfg.execution.enabled else typer.colors.YELLOW,
+            bold=True,
+        )
+        typer.echo(f"cycle branch if it ran now: {posture.branch.value} — {posture.detail}")
+        typer.secho(
+            f"  may_open={posture.may_open}  may_close={posture.may_close}"
+            "   (closing is never blocked)",
+            fg=typer.colors.GREEN if posture.may_open else typer.colors.YELLOW,
+        )
+
+        limits = load_active_limits(session)
+        if limits is None:
+            typer.secho(
+                "execution_limits: NO active, parseable row — opening is blocked. "
+                "'No limits row' is not 'no limits'.",
+                fg=typer.colors.RED,
+            )
+        else:
+            typer.echo(
+                f"execution_limits id={limits.id}  cycle={limits.cycle_interval_s}s  "
+                f"stale_after={limits.execution_stale_after_s}s  "
+                f"drain_timeout={limits.drain_timeout_s}s  "
+                f"recon_max_age={limits.max_reconciliation_age_s}s  "
+                f"pre-registration={limits.preregistration_doc_id}"
+            )
+        state = deadman_mod.assess(
+            session,
+            now=now,
+            stale_after_s=limits.execution_stale_after_s if limits else 0,
+        )
+        typer.secho(
+            f"dead man: {'ALIVE' if state.alive else 'LAPSED'} — {state.detail}",
+            fg=typer.colors.GREEN if state.alive else typer.colors.RED,
+        )
+
+        live = arming_mod.live_armings(session)
+        if not live:
+            typer.secho(
+                "armed strategies: NONE. Nothing is armed by default, and that is the "
+                "correct state.",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+        for row in live:
+            ver = session.get(StrategyVersion, row.strategy_version_id)
+            strat = session.get(Strategy, ver.strategy_id) if ver is not None else None
+            expired = row.expires_at <= now
+            typer.secho(
+                f"ARMED  {strat.name if strat else '?'}@{ver.version if ver else '?'} "
+                f"(strategy_version_id={row.strategy_version_id}) on {row.adapter_name} "
+                f"account {row.broker_account_id_expected} — expires {row.expires_at.isoformat()}"
+                + ("  [EXPIRED; the next cycle disarms it]" if expired else ""),
+                fg=typer.colors.RED if expired else typer.colors.YELLOW,
+                bold=True,
+            )
+            typer.echo(
+                f"       evidence n={row.evidence_paper_trade_count} "
+                f"expectancy={row.evidence_expectancy_r} "
+                f"override={row.evidence_override_reason or 'none'}  "
+                f"k_prior={row.sealed_look_prior_at_arm}  "
+                f"pre-registration={row.preregistration_doc_id}"
+            )
+    typer.echo(
+        "\nArming is necessary and not sufficient: every §5 precondition and every §7 "
+        "may_open limit must also pass in the same cycle."
+    )
+
+
+@execution_app.command("arm")
+def execution_arm(
+    strategy_version_id: Annotated[int, typer.Argument(help="The StrategyVersion.id to arm.")],
+    account_id: Annotated[
+        str,
+        typer.Option(
+            "--account-id",
+            help="The broker account identifier, typed OUT OF BAND. is_paper() must "
+            "prove the broker's own response names exactly this.",
+        ),
+    ] = "",
+    preregistration: Annotated[
+        str,
+        typer.Option(
+            "--preregistration",
+            help="The pre-registration document id (a docs/ filename stem). No arming "
+            "without one.",
+        ),
+    ] = "",
+    adapter: Annotated[str, typer.Option("--adapter", help="Adapter name.")] = "",
+    structure_type: Annotated[str, typer.Option("--structure-type")] = "equity",
+    approval_level: Annotated[
+        int,
+        typer.Option(
+            "--approval-level",
+            help="The options approval level the OPERATOR asserts (0 = equities only).",
+        ),
+    ] = 0,
+    max_notional: Annotated[float, typer.Option("--max-notional")] = 1000.0,
+    max_orders_per_day: Annotated[int, typer.Option("--max-orders-per-day")] = 10,
+    expires_days: Annotated[
+        int,
+        typer.Option(
+            "--expires-days",
+            help="At most 7 (decision 4). There is no indefinite arming.",
+        ),
+    ] = 7,
+    override_evidence: Annotated[
+        str,
+        typer.Option(
+            "--override-evidence",
+            help="Override decision 10's >=20-closed-trades precondition, with a typed "
+            "reason. Audited, and the observed n and expectancy are recorded beside it.",
+        ),
+    ] = "",
+    confirm: Annotated[
+        str,
+        typer.Option(
+            "--confirm",
+            help="The typed confirmation phrase (see the printed preconditions table).",
+        ),
+    ] = "",
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Acknowledge the four §12 step 3 facts printed above."),
+    ] = False,
+) -> None:
+    """Arm ONE strategy version against ONE adapter, for at most 7 days.
+
+    Refuses unless every step 1-3 precondition re-verifies LIVE against the
+    database and is_paper() proves out against the typed account id. Prints the
+    full preconditions table, then requires a TYPED confirmation — not a y/N.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    from signalforge.db.session import session_scope
+    from signalforge.execution import arming as arming_mod
+    from signalforge.execution.cycle import active_limits_created_at
+    from signalforge.execution.limits import load_active_limits
+
+    now = _dt.now(_UTC)
+    broker = _execution_adapter()
+    adapter_name = adapter or _configured_adapter_name()
+    request = arming_mod.ArmingRequest(
+        strategy_version_id=strategy_version_id,
+        adapter_name=adapter_name,
+        broker_account_id_expected=account_id,
+        preregistration_doc_id=preregistration,
+        max_notional_usd=max_notional,
+        max_orders_per_day=max_orders_per_day,
+        structure_type=structure_type,
+        options_approval_level=approval_level or None,
+        expires_at=now + _td(days=expires_days),
+        override_evidence_reason=override_evidence,
+        acknowledged=yes,
+    )
+    proof = None
+    flat: bool | None = None
+    if broker is not None:
+        try:
+            proof = broker.is_paper()
+        except Exception as exc:
+            typer.secho(f"is_paper() raised: {exc!r}", fg=typer.colors.RED)
+        flat = arming_mod.read_adapter_account_is_flat(broker)
+
+    with session_scope(write=True) as session:
+        limits = load_active_limits(session)
+        created_at = active_limits_created_at(session)
+        decision = arming_mod.check_arming_preconditions(
+            session,
+            request,
+            now=now,
+            is_paper_proof=proof,
+            account_is_flat=flat,
+            limits_id=limits.id if limits else None,
+            limits_created_at=created_at,
+        )
+        typer.secho("\nARMING PRECONDITIONS", bold=True)
+        for check in decision.checks:
+            typer.secho(
+                f"  [{'PASS' if check.passed else 'FAIL'}] {check.name}: {check.detail}",
+                fg=typer.colors.GREEN if check.passed else typer.colors.RED,
+            )
+        typer.secho("\nYOU ARE ACKNOWLEDGING:", bold=True)
+        for line in arming_mod.acknowledgements():
+            typer.echo(f"  {line}")
+
+        if not decision.allowed:
+            typer.secho(
+                f"\nREFUSED — {decision.first_failure}",
+                fg=typer.colors.RED,
+                bold=True,
+            )
+            raise typer.Exit(code=1)
+
+        phrase = arming_mod.confirmation_phrase(strategy_version_id, adapter_name)
+        typed = confirm or typer.prompt(f"\nType exactly: {phrase}")
+        if typed.strip() != phrase:
+            typer.secho(
+                "confirmation phrase did not match — nothing was armed", fg=typer.colors.RED
+            )
+            raise typer.Exit(code=1)
+
+        try:
+            row = arming_mod.arm(
+                session,
+                request,
+                now=now,
+                is_paper_proof=proof,
+                account_is_flat=flat,
+                actor="cli",
+                limits_id=limits.id if limits else None,
+                limits_created_at=created_at,
+            )
+        except arming_mod.ArmingRefused as exc:
+            typer.secho(f"REFUSED — {exc}", fg=typer.colors.RED, bold=True)
+            raise typer.Exit(code=1) from None
+        record(
+            "execution.arm",
+            actor="cli",
+            entity=str(strategy_version_id),
+            armed_strategy_id=row.id,
+            adapter=adapter_name,
+            expires_at=row.expires_at.isoformat(),
+            override_evidence=bool(override_evidence),
+        )
+        typer.secho(
+            f"\nARMED strategy_version_id={strategy_version_id} on {adapter_name} until "
+            f"{row.expires_at.isoformat()}. It expires automatically; re-arming is the full "
+            "ceremony again.",
+            fg=typer.colors.YELLOW,
+            bold=True,
+        )
+
+
+@execution_app.command("disarm")
+def execution_disarm(
+    strategy_version_id: Annotated[int, typer.Argument(help="The StrategyVersion.id to disarm.")],
+    reason: Annotated[str, typer.Option("--reason")] = "operator request",
+) -> None:
+    """End the authority to open for one strategy version.
+
+    Disarming never blocks a protective close: build_close_intent requires no
+    armed row, and the row itself is kept (not deleted) so reconciliation and the
+    is_paper proof can still read which account this adapter was pointed at.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    from signalforge.db.session import session_scope
+    from signalforge.execution import arming as arming_mod
+
+    now = _dt.now(_UTC)
+    with session_scope(write=True) as session:
+        rows = arming_mod.live_armings(session, strategy_version_id=strategy_version_id)
+        if not rows:
+            typer.secho(
+                f"no live arming for strategy_version_id={strategy_version_id}",
+                fg=typer.colors.YELLOW,
+            )
+            raise typer.Exit(code=1)
+        for row in rows:
+            arming_mod.disarm(
+                session,
+                row,
+                trigger=arming_mod.DisarmTrigger.OPERATOR,
+                detail=reason,
+                now=now,
+                actor="cli",
+            )
+            record(
+                "execution.disarm",
+                actor="cli",
+                entity=str(strategy_version_id),
+                armed_strategy_id=row.id,
+                reason=reason,
+            )
+            typer.secho(
+                f"DISARMED armed_strategy id={row.id} (strategy_version_id="
+                f"{strategy_version_id}) — {reason}",
+                fg=typer.colors.GREEN,
+            )
+        typer.echo(
+            "Any open position is unaffected and is NOT auto-liquidated: close it by hand, "
+            "at the broker, or through the protective close lane."
+        )
+
+
+@execution_app.command("feed-dead-man")
+def execution_feed_dead_man(
+    detail: Annotated[str, typer.Option("--detail")] = "manual feed",
+) -> None:
+    """Write the execution dead-man heartbeat by hand.
+
+    The cycle feeds it at the top of every run in both branches; this exists so
+    an operator can prove the row moves, and so a supervised manual session can
+    hold it alive. It grants no authority: a fed dead man with nothing armed
+    still opens nothing.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    from signalforge.db.session import session_scope
+    from signalforge.execution import deadman as deadman_mod
+
+    now = _dt.now(_UTC)
+    with session_scope(write=True) as session:
+        deadman_mod.feed(session, now=now, detail=detail)
+    record("execution.dead_man_fed", actor="cli", entity="execution", detail=detail)
+    typer.secho(f"execution dead man fed at {now.isoformat()}", fg=typer.colors.GREEN)
+
+
+@execution_app.command("kill")
+def execution_kill(
+    engage: Annotated[
+        bool, typer.Option("--engage/--release", help="Engage or release the execution kill state.")
+    ] = True,
+    reason: Annotated[str, typer.Option("--reason")] = "manual",
+) -> None:
+    """Engage or release the EXECUTION-LOCAL kill state (K2).
+
+    Separate from `signalforge killswitch`, which is left exactly as it is: that
+    one is fail-OPEN by design across 39 call sites, and this one is fail-CLOSED
+    because an unreadable state is not evidence that opening is safe. Both block
+    opening. Neither blocks closing.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    from signalforge.execution.oms import write_execution_kill_state
+
+    state = write_execution_kill_state(
+        engaged=engage, reason=reason, actor="cli", now=_dt.now(_UTC)
+    )
+    record("execution.kill_state", actor="cli", entity="execution", engaged=engage, reason=reason)
+    typer.secho(
+        f"execution kill state {'ENGAGED' if engage else 'released'} — {state.reason}",
+        fg=typer.colors.RED if engage else typer.colors.GREEN,
+        bold=True,
+    )
+
+
+@execution_app.command("cycle")
+def execution_cycle_cmd() -> None:
+    """Run ONE execution cycle by hand (the manual-job entry).
+
+    Runnable while the layer is disabled, which is the point: it is then a cycle
+    that finds nothing armed and says so, so the operator can prove what it would
+    do without enabling anything.
+    """
+    from signalforge.execution.cycle import EXECUTION_CYCLE_JOB, manual_job_entries
+
+    manual_job_entries(adapter=_execution_adapter())[EXECUTION_CYCLE_JOB]()
+    typer.secho(f"{EXECUTION_CYCLE_JOB} finished", fg=typer.colors.GREEN)
+
+
+def _configured_adapter_name() -> str:
+    from signalforge.db.session import session_scope
+    from signalforge.settings_store import effective_research_config
+
+    try:
+        with session_scope() as session:
+            return effective_research_config(session).execution.adapter_name
+    except Exception:
+        return "paper_reference"
 
 
 def main() -> None:

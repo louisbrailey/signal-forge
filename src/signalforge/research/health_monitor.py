@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -54,19 +55,37 @@ class HealthAssessment:
     to_status: str
 
 
-def _paper_returns_r(session: Session, strategy_version_id: int) -> list[float]:
+def closed_paper_r_multiples(
+    session: Session,
+    strategy_version_id: int,
+    *,
+    closed_since: datetime | None = None,
+) -> list[float]:
     """R-multiples of every closed paper position for this strategy version.
 
     R = realized P&L / initial dollar risk (entry-to-stop distance * shares).
     ``realized_pnl`` is already signed for the position's side, so a winning
     long and a winning short both yield a positive R.
+
+    Public because the D6 arming ceremony's decision-10 evidence precondition
+    ("at least 20 closed paper trades with non-negative expectancy **under the
+    health monitor**") must be measured with THIS definition of a closed trade
+    and THIS definition of R — not a second, separately-drifting copy inside
+    the execution layer. D6 open question Q10 asked which health-monitor field
+    the arming CLI reads; this function is the answer.
+
+    ``closed_since`` narrows the window to positions closed at or after a given
+    instant. D6 §7b rule 3 uses it: superseding an ``execution_limits`` row
+    resets the live-evidence counter, because evidence accumulated under a
+    different set of execution parameters is evidence about a different system.
     """
-    positions = session.scalars(
-        select(PaperPosition).where(
-            PaperPosition.strategy_version_id == strategy_version_id,
-            PaperPosition.closed_at.is_not(None),
-        )
+    stmt = select(PaperPosition).where(
+        PaperPosition.strategy_version_id == strategy_version_id,
+        PaperPosition.closed_at.is_not(None),
     )
+    if closed_since is not None:
+        stmt = stmt.where(PaperPosition.closed_at >= closed_since)
+    positions = session.scalars(stmt)
     out: list[float] = []
     for p in positions:
         if p.stop_level is None:
@@ -77,6 +96,10 @@ def _paper_returns_r(session: Session, strategy_version_id: int) -> list[float]:
             continue
         out.append(float(p.realized_pnl) / risk_dollars)
     return out
+
+
+#: The monitor's own internal name, kept so this module reads as it did.
+_paper_returns_r = closed_paper_r_multiples
 
 
 def _latest_oos_expectancy(session: Session, strategy_version_id: int) -> float | None:
