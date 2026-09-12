@@ -3841,35 +3841,504 @@ execution_app = typer.Typer(
 app.add_typer(execution_app, name="execution")
 
 
-def _execution_adapter() -> BrokerAdapter | None:
-    """Resolve the configured broker adapter, or ``None``.
+#: The simulated reference equity the ``paper_reference`` account is stood up
+#: with: decision 13's "$25,000 SIMULATED" options paper account, which
+#: ``docs/PREREGISTRATION_execution_limits_v1.md`` §1 also uses as the reference
+#: equity for every percent figure. It is a simulator artifact and is never
+#: evidence for any gate; percent limits are evaluated against the broker's own
+#: live equity each cycle, never against this number.
+PAPER_REFERENCE_SIMULATED_EQUITY = 25_000.0
 
-    There is no adapter in this tree: ``execution/brokers/paper_reference.py`` is
-    I-E3 (local, deterministic, network-free) and the vendor paper adapter is
-    I-E5. Resolved dynamically so that this branch depends on neither.
+
+def _execution_adapter(
+    session: Session | None = None, *, expected_account_id: str = ""
+) -> BrokerAdapter | None:
+    """Build the configured broker adapter, or ``None``.
+
+    The registry's one sanctioned constructor is
+    ``execution.brokers.build_adapter``, which refuses twice before it builds
+    anything — ``execution.enabled`` must be True, and ``adapter_name`` must name
+    a registered adapter, with no default to fall back to — and then passes its
+    keyword arguments through to the adapter, none of which has a default:
+
+    ``audit``
+        the ``execution_event`` sink, which needs the caller's session, so the
+        adapter is bound to the transaction that will record its calls;
+    ``expected_account_id``
+        the operator-typed account id from the arming request. §13's proof is a
+        comparison against a value typed OUT OF BAND; a proof with nothing to
+        match is not a proof, and the adapter refuses to be constructed without
+        one.
+    ``information``
+        the pre-submission information set. The ceremony submits nothing, so it
+        is handed an EMPTY set deliberately: an accidental submission through a
+        ceremony-built adapter then raises rather than inventing a price.
+    ``clock``
+        the simulated session, taken from the local options calendar so the
+        simulator and the calendar cannot disagree by construction.
+
+    ``None`` is returned only when the registry refuses (the layer is disabled,
+    or the configured name is unknown) or when no session was supplied — every
+    other failure propagates. The old implementation looked up a
+    ``resolve_adapter`` attribute that has never existed and swallowed the
+    resulting ``AttributeError``, so no adapter was ever built and
+    ``execution arm`` failed check S8 ("no is_paper() proof was taken this
+    ceremony") on every run.
 
     ``None`` is not a degraded mode. Every adapter-dependent check then reports
     "could not be evaluated", which BLOCKS opening, and the arming ceremony
-    refuses outright because it cannot take an ``is_paper`` proof — a proof is
-    read out of the broker's OWN response body, and there is no broker to ask.
+    refuses outright because it cannot take an ``is_paper`` proof.
     """
-    import importlib
-
-    try:
-        brokers = importlib.import_module("signalforge.execution.brokers")
-        resolve = brokers.resolve_adapter
-    except (ImportError, AttributeError):
+    if session is None:
+        # The cycle paths (`run-scheduler`, `run-job`, `execution cycle`) build
+        # their session inside the job body, so there is none to bind an audit
+        # sink to here. The cycle runs its whole local half with adapter=None
+        # and reports "R1: no adapter is configured, so nothing is reconciled",
+        # which blocks opening — the fail-closed answer, not a degraded one.
         return None
+
+    from signalforge.execution import brokers as brokers_mod
+    from signalforge.execution.brokers.paper_reference import (
+        ExecutionEventAudit,
+        PreSubmissionInformation,
+        SimulatedAccount,
+    )
+    from signalforge.execution.calendarcheck import evaluate as calendar_evaluate
+    from signalforge.execution.intents import MarketClock
+    from signalforge.settings_store import effective_research_config
+
+    cfg = effective_research_config(session)
+    now = _dt_now_utc()
     try:
-        from signalforge.db.session import session_scope
+        name = brokers_mod.selected_adapter_name(cfg)
+    except brokers_mod.AdapterNotSelectable as exc:
+        typer.secho(f"no adapter: {exc}", fg=typer.colors.YELLOW)
+        return None
+
+    if name != "paper_reference":  # pragma: no cover - only one adapter exists
+        raise RuntimeError(
+            f"execution.adapter_name={name!r} is registered but this CLI knows how to "
+            "assemble the constructor arguments for 'paper_reference' only"
+        )
+    try:
+        account = SimulatedAccount(
+            account_id=expected_account_id,
+            initial_cash=PAPER_REFERENCE_SIMULATED_EQUITY,
+        )
+    except ValueError as exc:
+        # A mistyped or real-looking account id. Refused here rather than
+        # papered over: the whole point of §13 is that the account the adapter
+        # answers for is the one the operator typed.
+        typer.secho(f"no adapter: {exc}", fg=typer.colors.RED)
+        return None
+
+    adapter: BrokerAdapter = brokers_mod.build_adapter(
+        cfg,
+        audit=ExecutionEventAudit(session),
+        account=account,
+        expected_account_id=expected_account_id,
+        information=PreSubmissionInformation.of([]),
+        clock=MarketClock(
+            is_open=bool(calendar_evaluate(now, None).market_open_calendar),
+            as_of=now,
+        ),
+    )
+    return adapter
+
+
+def _dt_now_utc() -> datetime:
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    return _dt.now(_UTC)
+
+
+#: Every audited operator action on this group runs as this actor. Not "cli" and
+#: not "system": §12's ceremony is a human-typed one, and the audit row has to
+#: say a human typed it.
+EXECUTION_OPERATOR_ACTOR = "local-user"
+
+
+def _audit_row(
+    session: Session,
+    action: str,
+    *,
+    entity: str = "execution",
+    before: object = None,
+    after: object = None,
+) -> None:
+    """Write one ``audit_log`` row, beside the JSONL ``record(...)`` line.
+
+    Both, never one: the JSONL file is what the operator greps during an
+    incident and the table is what the Operational Status page reads, and an
+    action visible in only one of them is an action that looks like it never
+    happened from wherever the reviewer is standing.
+    """
+    from signalforge.db.models import AuditLog
+    from signalforge.db.types import utcnow
+
+    session.add(
+        AuditLog(
+            ts=utcnow(),
+            actor=EXECUTION_OPERATOR_ACTOR,
+            action=action,
+            entity=entity,
+            before_json=before,
+            after_json=after,
+        )
+    )
+
+
+def _set_execution_enabled(session: Session, *, enabled: bool) -> None:
+    """Write ``research_overrides.execution.enabled`` — the SAME mechanism every
+    other research override uses (``settings_store``), deep-merged so nothing
+    else in the override dict is disturbed."""
+    from signalforge.settings_store import (
+        RESEARCH_OVERRIDES_KEY,
+        get_setting,
+        set_setting,
+    )
+
+    overrides = dict(get_setting(session, RESEARCH_OVERRIDES_KEY, {}) or {})
+    execution = dict(overrides.get("execution") or {})
+    execution["enabled"] = enabled
+    overrides["execution"] = execution
+    set_setting(session, RESEARCH_OVERRIDES_KEY, overrides, actor=EXECUTION_OPERATOR_ACTOR)
+
+
+def _print_live_execution_posture(session: Session) -> None:
+    from signalforge.settings_store import effective_research_config
+
+    cfg = effective_research_config(session)
+    typer.secho(
+        f"live: execution.enabled = {cfg.execution.enabled}  "
+        f"(adapter: {cfg.execution.adapter_name})",
+        fg=typer.colors.GREEN if cfg.execution.enabled else typer.colors.YELLOW,
+        bold=True,
+    )
+
+
+@execution_app.command("enable")
+def execution_enable(
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Required. Without it this command changes nothing."),
+    ] = False,
+) -> None:
+    """Set ``research.execution.enabled`` True — audited, and NOT sufficient.
+
+    The one supported way to turn the layer on. Deliberately here and not on the
+    web `/settings` form: D6 §12 keeps enabling and arming on the human-typed
+    CLI, with no LLM and no app route anywhere on the path (S15b).
+
+    Enabling registers the execution cycle with the scheduler and lets an adapter
+    be built. It arms nothing. With no unexpired `armed_strategy` row — and
+    nothing is armed by default — zero orders can be submitted whatever this
+    flag says. Two independent gates, neither sufficient alone.
+    """
+    from signalforge.db.session import session_scope
+
+    if not yes:
+        typer.secho(
+            "REFUSED: --yes is required. Enabling the execution layer is an operator "
+            "decision, not a default.",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=2)
+
+    with session_scope(write=True) as session:
+        from signalforge.execution import arming as arming_mod
         from signalforge.settings_store import effective_research_config
 
-        with session_scope() as session:
-            name = effective_research_config(session).execution.adapter_name
-        adapter: BrokerAdapter = resolve(name)
-        return adapter
-    except Exception:
-        return None
+        before = effective_research_config(session).execution.enabled
+        _set_execution_enabled(session, enabled=True)
+        _audit_row(
+            session,
+            "execution.enabled",
+            before={"enabled": before},
+            after={"enabled": True},
+        )
+        live = arming_mod.live_armings(session)
+        _print_live_execution_posture(session)
+        typer.secho(
+            f"armed strategies: {len(live)}. Enabling arms nothing; `signalforge execution arm` "
+            "is a separate, expiring, audited ceremony per strategy version.",
+            fg=typer.colors.YELLOW if live else typer.colors.GREEN,
+        )
+    record(
+        "execution.enabled",
+        actor=EXECUTION_OPERATOR_ACTOR,
+        entity="execution",
+        enabled=True,
+    )
+    typer.echo("Next: `signalforge execution status`, then `execution limits set`, then `arm`.")
+
+
+@execution_app.command("disable")
+def execution_disable(
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Required. Without it this command changes nothing."),
+    ] = False,
+    reason: Annotated[str, typer.Option("--reason")] = "operator disabled execution",
+) -> None:
+    """Set ``research.execution.enabled`` False and DISARM everything live.
+
+    Disabling has to disarm, and this is why: the flag stops the cycle being
+    registered, so with the layer off nothing runs the per-cycle auto-disarm
+    sweep — a live `armed_strategy` row would sit there unexpiring-in-practice
+    and come back the moment the flag went on again. Ending the authority to
+    open is the whole point of disabling, so it is ended here rather than
+    depending on a worker that is no longer scheduled.
+
+    It does NOT close a position, cancel anything at the broker, or liquidate
+    anything. Disarming ends the authority to OPEN; `build_close_intent`
+    requires no armed row and the protective close lane stays constructible.
+    """
+    from signalforge.db.session import session_scope
+    from signalforge.execution import arming as arming_mod
+
+    if not yes:
+        typer.secho(
+            "REFUSED: --yes is required.",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=2)
+
+    now = _dt_now_utc()
+    disarmed: list[int] = []
+    with session_scope(write=True) as session:
+        from signalforge.settings_store import effective_research_config
+
+        before = effective_research_config(session).execution.enabled
+        _set_execution_enabled(session, enabled=False)
+
+        # The §12 step 7 sweep first, so anything with its own trigger is
+        # recorded under that trigger rather than under this one — the reason a
+        # row was disarmed is part of the record, and "operator disabled the
+        # layer" must not overwrite "the config hash drifted".
+        for swept in arming_mod.auto_disarm_sweep(session, now=now, actor=EXECUTION_OPERATOR_ACTOR):
+            disarmed.append(swept.armed_strategy_id)
+            typer.secho(
+                f"DISARMED armed_strategy id={swept.armed_strategy_id} "
+                f"({swept.trigger.value}) — {swept.detail}",
+                fg=typer.colors.YELLOW,
+            )
+        for row in arming_mod.live_armings(session):
+            arming_mod.disarm(
+                session,
+                row,
+                trigger=arming_mod.DisarmTrigger.OPERATOR,
+                detail=reason,
+                now=now,
+                actor=EXECUTION_OPERATOR_ACTOR,
+            )
+            disarmed.append(row.id)
+            typer.secho(
+                f"DISARMED armed_strategy id={row.id} (operator) — {reason}",
+                fg=typer.colors.YELLOW,
+            )
+        _audit_row(
+            session,
+            "execution.disabled",
+            before={"enabled": before},
+            after={"enabled": False, "disarmed_armed_strategy_ids": disarmed},
+        )
+        _print_live_execution_posture(session)
+    record(
+        "execution.disabled",
+        actor=EXECUTION_OPERATOR_ACTOR,
+        entity="execution",
+        enabled=False,
+        disarmed=disarmed,
+        reason=reason,
+    )
+    typer.secho(
+        f"{len(disarmed)} arming(s) ended. Any open position is unaffected and is NOT "
+        "auto-liquidated: close it by hand, at the broker, or through the protective close lane.",
+        fg=typer.colors.GREEN,
+    )
+
+
+# ---------------------------------------------------------------------------
+# `signalforge execution limits` — the ONLY constructor for an execution_limits
+# row (D6 §7b rule 1). Values come from a pre-registration document and from
+# nowhere else: there is no --max-orders-per-day option, and there never will be
+# one, because a number typed at the command line is a number nobody
+# pre-registered.
+# ---------------------------------------------------------------------------
+limits_app = typer.Typer(
+    help=(
+        "The active execution_limits row. Created ONLY from a pre-registration document; "
+        "rows are versioned by supersession and never edited. No active, parseable row "
+        "BLOCKS opening — 'no limits row' is not 'no limits'."
+    )
+)
+execution_app.add_typer(limits_app, name="limits")
+
+
+@limits_app.command("show")
+def execution_limits_show() -> None:
+    """Print the active ``execution_limits`` row. Read-only."""
+    from signalforge.db.session import session_scope
+    from signalforge.execution.limits import load_active_limits
+    from signalforge.execution.preregistration import active_limits_rows
+
+    with session_scope() as session:
+        rows = active_limits_rows(session)
+        parsed = load_active_limits(session)
+        if not rows:
+            typer.secho(
+                "execution_limits: NO active row. Opening is BLOCKED — 'no limits row' is not "
+                "'no limits'. Create one with:\n"
+                "  signalforge execution limits set "
+                "--from-preregistration PREREGISTRATION_execution_limits_v1 --yes",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=1)
+        if len(rows) > 1:
+            typer.secho(
+                f"WARNING: {len(rows)} rows have superseded_at IS NULL; load_active_limits takes "
+                f"the newest (id={rows[0].id}) and the others silently shadow nothing.",
+                fg=typer.colors.RED,
+            )
+        row = rows[0]
+        typer.secho(
+            f"execution_limits id={row.id}  created_at={row.created_at.isoformat()}  "
+            f"created_by={row.created_by}",
+            bold=True,
+        )
+        typer.echo(f"  pre-registration: {row.preregistration_doc_id}")
+        for column in sorted(_limits_columns()):
+            typer.echo(f"  {column} = {getattr(row, column)}")
+        if parsed is None:
+            typer.secho(
+                "…but the row does NOT parse as a LimitSet, so load_active_limits reads it as "
+                "None and opening is BLOCKED.",
+                fg=typer.colors.RED,
+                bold=True,
+            )
+            raise typer.Exit(code=1)
+
+
+def _limits_columns() -> tuple[str, ...]:
+    from signalforge.execution.preregistration import (
+        PREREGISTERED_LIMIT_ROWS,
+        PREREGISTRATION_EXECUTION_LIMITS_V1,
+    )
+
+    return tuple(PREREGISTERED_LIMIT_ROWS[PREREGISTRATION_EXECUTION_LIMITS_V1])
+
+
+@limits_app.command("set")
+def execution_limits_set(
+    from_preregistration: Annotated[
+        str,
+        typer.Option(
+            "--from-preregistration",
+            help="The pre-registration document id (a docs/ filename stem). The row's values "
+            "come from there and from nowhere else.",
+        ),
+    ] = "",
+    supersede: Annotated[
+        bool,
+        typer.Option(
+            "--supersede",
+            help="Deactivate the existing active row and insert a new one. Required whenever "
+            "one exists: rows are never edited.",
+        ),
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Required. Without it this command changes nothing.")
+    ] = False,
+) -> None:
+    """Create the active ``execution_limits`` row from a pre-registration document.
+
+    Refuses, rather than defaulting, when: no document with that id exists under
+    `docs/`; no row is registered in `execution.preregistration` for it; the
+    document does not state every column; any stated value differs from the one
+    the code would write; or an active row already exists and `--supersede` was
+    not asked for.
+
+    Creating the row is necessary for opening and nowhere near sufficient. It
+    arms nothing.
+    """
+    from signalforge.db.session import session_scope
+    from signalforge.execution.preregistration import (
+        PreregistrationRefused,
+        resolve_preregistered_limits,
+        set_limits_from_preregistration,
+        supersede_note,
+    )
+
+    if not from_preregistration:
+        typer.secho(
+            "REFUSED: --from-preregistration is required. There is no way to type the numbers "
+            "in directly, by design (§7b rule 1).",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=2)
+    if not yes:
+        typer.secho("REFUSED: --yes is required.", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(code=2)
+
+    try:
+        values, path = resolve_preregistered_limits(from_preregistration)
+    except PreregistrationRefused as exc:
+        typer.secho(f"REFUSED — {exc}", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(code=1) from None
+    typer.secho(f"pre-registration: {path}", fg=typer.colors.CYAN)
+
+    now = _dt_now_utc()
+    superseded_ids: list[int] = []
+    with session_scope(write=True) as session:
+        try:
+            row, superseded = set_limits_from_preregistration(
+                session,
+                doc_id=from_preregistration,
+                now=now,
+                actor=EXECUTION_OPERATOR_ACTOR,
+                supersede=supersede,
+            )
+        except PreregistrationRefused as exc:
+            typer.secho(f"REFUSED — {exc}", fg=typer.colors.RED, bold=True)
+            raise typer.Exit(code=1) from None
+
+        superseded_ids = [old.id for old in superseded]
+        for old in superseded:
+            typer.secho(
+                f"superseded execution_limits id={old.id} (created {old.created_at.isoformat()})",
+                fg=typer.colors.YELLOW,
+            )
+        _audit_row(
+            session,
+            "execution.limits_set",
+            entity=from_preregistration,
+            before={"superseded_execution_limits_ids": superseded_ids},
+            after={"execution_limits_id": row.id, "values": dict(values)},
+        )
+        typer.secho(
+            f"execution_limits id={row.id} is active, from {from_preregistration}.",
+            fg=typer.colors.GREEN,
+            bold=True,
+        )
+        for column in sorted(values):
+            typer.echo(f"  {column} = {values[column]}")
+        if superseded_ids:
+            typer.secho(f"\n{supersede_note()}", fg=typer.colors.RED, bold=True)
+    record(
+        "execution.limits_set",
+        actor=EXECUTION_OPERATOR_ACTOR,
+        entity=from_preregistration,
+        superseded=superseded_ids,
+    )
+    typer.echo(
+        "A limits row authorises nothing on its own: every §5 precondition and every §7 "
+        "may_open limit must also pass in the same cycle, and nothing is armed."
+    )
 
 
 @execution_app.command("status")
@@ -4041,7 +4510,6 @@ def execution_arm(
     from signalforge.execution.limits import load_active_limits
 
     now = _dt.now(_UTC)
-    broker = _execution_adapter()
     adapter_name = adapter or _configured_adapter_name()
     request = arming_mod.ArmingRequest(
         strategy_version_id=strategy_version_id,
@@ -4056,16 +4524,20 @@ def execution_arm(
         override_evidence_reason=override_evidence,
         acknowledged=yes,
     )
-    proof = None
-    flat: bool | None = None
-    if broker is not None:
-        try:
-            proof = broker.is_paper()
-        except Exception as exc:
-            typer.secho(f"is_paper() raised: {exc!r}", fg=typer.colors.RED)
-        flat = arming_mod.read_adapter_account_is_flat(broker)
-
     with session_scope(write=True) as session:
+        # Built INSIDE the session: the adapter's audit sink writes
+        # ``execution_event`` rows through it, so §13's proof and §10's
+        # flat-account read are themselves on the record.
+        broker = _execution_adapter(session, expected_account_id=account_id)
+        proof = None
+        flat: bool | None = None
+        if broker is not None:
+            try:
+                proof = broker.is_paper()
+            except Exception as exc:
+                typer.secho(f"is_paper() raised: {exc!r}", fg=typer.colors.RED)
+            flat = arming_mod.read_adapter_account_is_flat(broker)
+
         limits = load_active_limits(session)
         created_at = active_limits_created_at(session)
         decision = arming_mod.check_arming_preconditions(

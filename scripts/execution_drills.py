@@ -29,17 +29,21 @@ their own world inside it; the scratch-database plumbing lives only in
 :func:`main`, so the pytest path reuses the suite's own isolated session fixture
 and the two paths execute identical assertions.
 
-**One harness object, named rather than hidden.** ``paper_reference.positions()``
-returns the account's NET book and deliberately carries no
+**No harness object any more, and that is the finding.** ``paper_reference``
+``positions()`` returns the account's NET book and deliberately carries no
 ``originating_client_order_id`` — its docstring says per-structure attribution
 "is not a broker fact and is not invented here: it is the OMS's, reconstructed
 from ``execution_event``". ``reconcile.py`` reads exactly that attribute and
-treats its absence as a ``FOREIGN_POSITION`` divergence. Nothing in the tree
-performs the reconstruction, so **``paper_reference`` can never reconcile CLEAN
-while it holds a position**. :class:`OmsAttributedBook` is the drill harness that
-does the reconstruction the ADR assigns to the OMS; it delegates every other call
-straight through. Drill V3 turns it off, which is how the divergence path is
-exercised. The gap itself is reported by drill V0 rather than papered over.
+treats its absence as a ``FOREIGN_POSITION`` divergence. The 2026-09-12 run of
+these drills found that **nothing in the tree performed the reconstruction**, so
+``paper_reference`` could never reconcile CLEAN while it held a position, and the
+drills ran against a local wrapper (``OmsAttributedBook``) that was not
+production code. That gap is now CLOSED in ``src/``:
+:func:`signalforge.execution.oms.attribute_positions` does the reconstruction the
+ADR assigns to the OMS, ``reconcile()`` calls it, and the drills use the bare
+adapter. Drill V0 asserts the closure — and asserts that a position with no local
+pre-submission record is still foreign, which is the property the wrapper could
+only be *configured* to have.
 
 Usage::
 
@@ -169,109 +173,6 @@ class DrillResult:
     @property
     def passed(self) -> bool:
         return not self.error and self.outcome.passed
-
-
-# ---------------------------------------------------------------------------
-# The harness: OMS-side origin attribution (see the module docstring)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class _AttributedPosition:
-    """A ``PositionSnapshot`` plus the ``client_order_id`` the OMS attributes it
-    to. Not an adapter type: the broker never owes us this field."""
-
-    snapshot: Any
-    originating_client_order_id: str
-
-    @property
-    def legs(self) -> tuple[Any, ...]:
-        return tuple(self.snapshot.legs)
-
-    @property
-    def adapter_name(self) -> str:
-        return str(self.snapshot.adapter_name)
-
-
-class OmsAttributedBook:
-    """Wrap a ``PaperReferenceBroker`` and add the origin attribution §10 reads.
-
-    Delegates every call unchanged. The only method with behaviour of its own is
-    :meth:`positions`, and all it does is look up which locally-recorded
-    ``client_order_id`` this OMS believes produced the broker's current book —
-    the reconstruction ``paper_reference.positions()`` explicitly leaves to the
-    OMS. With ``attribute=False`` it is a pass-through, which is what makes a
-    broker position with no local record look exactly like a foreign one.
-    """
-
-    def __init__(self, broker: Any, session: Any, *, attribute: bool = True) -> None:
-        self._broker = broker
-        self._session = session
-        self._attribute = attribute
-
-    @property
-    def name(self) -> str:
-        return str(self._broker.name)
-
-    @property
-    def broker(self) -> Any:
-        return self._broker
-
-    def _origin(self) -> str:
-        from sqlalchemy import select
-
-        from signalforge.db.models import ExecutionEvent
-        from signalforge.execution.states import OrderState
-
-        known = {
-            cid
-            for cid in self._session.scalars(
-                select(ExecutionEvent.client_order_id).where(
-                    ExecutionEvent.adapter_name == self.name,
-                    ExecutionEvent.client_order_id != "",
-                )
-            )
-            if cid
-        }
-        for cid, order in sorted(self._broker.book().items()):
-            if cid in known and order.state in (OrderState.FILLED, OrderState.PARTIAL):
-                return str(cid)
-        return ""
-
-    def positions(self) -> Sequence[Any]:
-        snapshots = list(self._broker.positions())
-        if not self._attribute:
-            return snapshots
-        origin = self._origin()
-        return [_AttributedPosition(s, origin) for s in snapshots]
-
-    # -- straight delegation ------------------------------------------------
-    def is_paper(self) -> Any:
-        return self._broker.is_paper()
-
-    def account(self) -> Any:
-        return self._broker.account()
-
-    def open_orders(self) -> Sequence[Any]:
-        return self._broker.open_orders()
-
-    def order_status(self, client_order_id: str) -> Any:
-        return self._broker.order_status(client_order_id)
-
-    def place(self, intent: Any) -> Any:
-        return self._broker.place(intent)
-
-    def place_combo(self, intent: Any) -> Any:
-        return self._broker.place_combo(intent)
-
-    def cancel(self, client_order_id: str) -> Any:
-        return self._broker.cancel(client_order_id)
-
-    def cancel_all(self) -> Sequence[Any]:
-        return self._broker.cancel_all()
-
-    def clock(self) -> Any:
-        return self._broker.clock()
 
 
 # ---------------------------------------------------------------------------
@@ -617,8 +518,14 @@ def make_adapter(
     is_open: bool = True,
     clock_at: datetime | None = None,
     information: Any = None,
-    attribute: bool = True,
-) -> OmsAttributedBook:
+) -> Any:
+    """The bare ``paper_reference`` adapter — no wrapper, no harness.
+
+    Position-origin attribution is the OMS's
+    (:func:`signalforge.execution.oms.attribute_positions`, called by
+    ``reconcile``), so every drill below drives exactly the object an armed
+    session would.
+    """
     from signalforge.execution.brokers.paper_reference import (
         ExecutionEventAudit,
         MarketClock,
@@ -634,8 +541,8 @@ def make_adapter(
         clock=MarketClock(is_open=is_open, as_of=clock_at or world.now),
     )
     world.broker = broker
-    world.adapter = OmsAttributedBook(broker, session, attribute=attribute)
-    return world.adapter
+    world.adapter = broker
+    return broker
 
 
 def equity_intent(
@@ -877,38 +784,74 @@ def fake_clock() -> tuple[Callable[[], float], Callable[[float], None]]:
 
 
 def drill_v0(session: Any, now: datetime) -> DrillOutcome:
-    """V0 — the harness's own premise, asserted rather than assumed."""
+    """V0 — OMS-side position-origin attribution, in ``src/`` (the closed gap)."""
+    from signalforge.execution.oms import attribute_positions
+    from signalforge.execution.reconcile import reconcile
+
     out = DrillOutcome()
     world = seed_research_state(session, now)
     world.limits_row = seed_limits(session, now)
     world.armed = seed_armed(session, world)
-    adapter = make_adapter(session, world, attribute=False)
+    adapter = make_adapter(session, world)
 
     intent = equity_intent(world)
     submit_through_oms(session, adapter, intent)
 
-    from signalforge.execution.reconcile import reconcile
-
-    raw = reconcile(session, adapter, now=now, limits=limit_set(world), actor="drill")
+    # 1. The broker still owes us nothing. That has not changed and must not.
+    raw_snapshots = list(world.broker.positions())
     out.check(
-        "paper_reference.positions() carries no originating_client_order_id",
-        raw.diverged and any(d.kind == "FOREIGN_POSITION" for d in raw.divergences),
-        raw.detail[:200],
+        "paper_reference.positions() still carries no originating_client_order_id",
+        bool(raw_snapshots)
+        and all(not getattr(s, "originating_client_order_id", "") for s in raw_snapshots),
+        f"{len(raw_snapshots)} snapshot(s)",
     )
 
-    attributed = OmsAttributedBook(world.broker, session, attribute=True)
-    with_origin = reconcile(session, attributed, now=now, limits=limit_set(world), actor="drill")
+    # 2. The OMS reconstructs it, from its own pre-submission records.
+    attributed = attribute_positions(
+        session, adapter_name="paper_reference", positions=raw_snapshots
+    )
     out.check(
-        "with the OMS-side attribution the same book reconciles CLEAN",
-        with_origin.clean,
-        with_origin.detail[:200],
+        "the OMS attributes the position to the order that opened it",
+        bool(attributed) and attributed[0].originating_client_order_id == intent.client_order_id,
+        str([p.originating_client_order_id for p in attributed]),
+    )
+
+    # 3. So the BARE adapter — no wrapper, no harness — reconciles CLEAN while
+    #    holding a position. This is the check the gap made impossible.
+    clean = reconcile(session, adapter, now=now, limits=limit_set(world), actor="drill")
+    out.check(
+        "paper_reference reconciles CLEAN while holding a position",
+        clean.clean,
+        clean.detail[:200],
+    )
+
+    # 4. And it explains only what it can explain. One more share appears in the
+    #    same instrument, placed STRAIGHT at the broker with no OMS
+    #    pre-submission record: the leg no longer matches what local records
+    #    account for, and "mostly ours" is not a category.
+    adapter.place(
+        equity_intent(world, client_order_id="v0-never-authorised", qty=2, limit_price=476.0)
+    )
+    partial = attribute_positions(
+        session, adapter_name="paper_reference", positions=list(adapter.positions())
+    )
+    out.check(
+        "a leg the local record only partly explains is NOT attributed",
+        bool(partial) and not partial[0].originating_client_order_id,
+        str([p.unexplained for p in partial]),
+    )
+    after = reconcile(session, adapter, now=now, limits=limit_set(world), actor="drill")
+    out.check(
+        "and reconciliation says FOREIGN_POSITION, unrepaired",
+        after.diverged and any(d.kind == "FOREIGN_POSITION" for d in after.divergences),
+        after.first_divergence[:200],
     )
     out.notes.append(
-        "GAP (not a drill failure — a finding): §10 requires the OMS to reconstruct position "
-        "origin from execution_event, and nothing in src/ does it. Until it exists, any adapter "
-        "whose positions() omits originating_client_order_id diverges the moment it holds a "
-        "position. Every drill below that needs a CLEAN book uses OmsAttributedBook, which is "
-        "drill-local and is NOT production code."
+        "GAP CLOSED: §10's position-origin reconstruction now lives in src/ "
+        "(signalforge.execution.oms.attribute_positions, called by reconcile). The drill-local "
+        "OmsAttributedBook wrapper is gone and every drill below drives the bare adapter. "
+        "Attribution explains a position from the OMS's OWN SUBMITTING records and never "
+        "repairs one: anything it cannot explain exactly stays FOREIGN_POSITION."
     )
     out.events = observed_events(session)
     return out
@@ -1113,10 +1056,12 @@ def drill_v3(session: Any, now: datetime) -> DrillOutcome:
     world = seed_research_state(session, now)
     world.limits_row = seed_limits(session, now)
     world.armed = seed_armed(session, world)
-    adapter = make_adapter(session, world, attribute=False)
+    adapter = make_adapter(session, world)
 
     # A position with no matching client_order_id: placed straight at the
-    # adapter, with no OMS record of it at all.
+    # adapter, with no OMS pre-submission record of it at all. The adapter
+    # writes its own FILL events for it — which is exactly why attribution
+    # reads the OMS's SUBMITTING records and not "any event naming this id".
     world.broker.place(equity_intent(world, client_order_id="foreign-order"))
     before = max_event_id(session)
     result = reconcile(session, adapter, now=now, limits=limit_set(world), actor="drill")
@@ -2327,9 +2272,10 @@ def drill_v22(session: Any, now: datetime) -> DrillOutcome:
 DRILLS: tuple[Drill, ...] = (
     Drill(
         "V0",
-        "Harness premise — position origin attribution",
-        "paper_reference alone cannot reconcile CLEAN while holding a position; the OMS-side "
-        "attribution the ADR assigns to the OMS makes it clean. Recorded as a GAP.",
+        "OMS-side position-origin attribution (§10)",
+        "the bare paper_reference adapter reconciles CLEAN while holding a position, because "
+        "the OMS reconstructs position origin from its own SUBMITTING records; a position it "
+        "cannot explain exactly is still FOREIGN_POSITION. Recorded as GAP CLOSED.",
         drill_v0,
         in_adr=False,
     ),

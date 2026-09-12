@@ -7,6 +7,13 @@ execution-local kill state (K2), the submission lock, the bounded drain, and
 ``execution_guarded``, the cycle wrapper that **branches instead of returning**
 so that engaging the kill switch cannot stop the protective path.
 
+Also here, because §10 assigns it to the OMS and nowhere else:
+:func:`attribute_positions`, which reconstructs *which local order produced this
+broker position* from this OMS's own records. A broker reports a NET book and
+owes us no per-structure attribution, so without this an adapter reconciles CLEAN
+only while flat — which is an adapter that cannot be armed. It explains a
+position or it does not; it never repairs one.
+
 What is deliberately NOT here, and not anywhere in this package yet:
 
 * no adapter call of any kind — no ``place``, no ``cancel``, no network. The
@@ -24,12 +31,12 @@ the live probation worker uses.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from signalforge.execution.events import ExecutionEventType, record_execution_event
 from signalforge.execution.intents import ComboOrderIntent, IntentKind, OrderIntent
@@ -45,17 +52,23 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from sqlalchemy.orm import Session
 
     from signalforge.db.models import ExecutionEvent
+    from signalforge.execution.intents import PositionSnapshot
 
 __all__ = [
+    "AttributedPosition",
     "CycleBranch",
     "CyclePosture",
     "DrainResult",
     "ExecutionKillState",
+    "SUBMITTED_LEGS_KEY",
+    "SUBMITTED_UNITS_KEY",
     "SubmissionLock",
     "SubmissionsClosed",
     "assert_terminal",
+    "attribute_positions",
     "current_state",
     "drain",
+    "local_net_book",
     "execution_guarded",
     "execution_kill_state_path",
     "has_outstanding_unknown",
@@ -117,6 +130,7 @@ def transition(
     error_verbatim: str = "",
     realized_fill_price: float | None = None,
     leg_index: int | None = None,
+    payload: dict[str, Any] | None = None,
     actor: str = "system",
 ) -> Intent:
     """Move an intent to ``target``, writing the event, or raise.
@@ -146,9 +160,51 @@ def transition(
         modelled_spread_bps=intent.cost_model.modelled_spread_bps,
         realized_fill_price=realized_fill_price,
         leg_index=leg_index,
+        payload=payload,
         actor=actor,
     )
     return intent.with_state(resolved)
+
+
+#: Payload keys on the ``SUBMITTING`` event under which the OMS records the leg
+#: composition it authorised. §10 assigns position-origin reconstruction to the
+#: OMS, and a reconstruction needs the OMS's own statement of what it sent —
+#: not the adapter's account of what it did afterwards.
+SUBMITTED_LEGS_KEY = "submitted_legs"
+SUBMITTED_UNITS_KEY = "submitted_units"
+
+
+def submitted_legs_payload(intent: Intent) -> dict[str, Any]:
+    """The leg composition of ``intent``, in the shape :func:`local_net_book`
+    reads back.
+
+    ``sign`` is ``OrderSide.sign`` — +1 if the leg increases signed quantity —
+    and ``ratio``/``units`` are kept separate because a combo's filled size is a
+    single scalar applied to every leg (§14), so a partial fill scales ``units``
+    and never the ratios.
+    """
+    if isinstance(intent, ComboOrderIntent):
+        legs = [
+            {
+                "instrument_key": leg.instrument_key,
+                "sign": leg.side.sign,
+                "ratio": leg.ratio,
+                "shares_per_contract": leg.shares_per_contract,
+            }
+            for leg in intent.legs
+        ]
+        units = intent.contracts
+    else:
+        legs = [
+            {
+                "instrument_key": intent.option_ticker or intent.symbol or "",
+                "sign": intent.side.sign,
+                "ratio": 1,
+                "shares_per_contract": intent.shares_per_contract,
+            }
+        ]
+        units = intent.qty
+    return {SUBMITTED_LEGS_KEY: legs, SUBMITTED_UNITS_KEY: units}
 
 
 def record_submitting(session: Session, intent: Intent, *, actor: str = "system") -> Intent:
@@ -159,11 +215,23 @@ def record_submitting(session: Session, intent: Intent, *, actor: str = "system"
     the next cycle promotes to ``UNKNOWN`` rather than silently losing an order
     that may have reached the broker. The write intent is released afterwards so
     no SQLite write lock is held across the round trip.
+
+    The record also carries the **leg composition** this OMS authorised, which is
+    what makes §10's position-origin reconstruction possible at all
+    (:func:`attribute_positions`). It is written here, before submission, rather
+    than derived afterwards from whatever the adapter reported: an order that
+    reaches a broker without a local pre-submission record is foreign however
+    many events the adapter emits about it later.
     """
     from signalforge.db.session import set_write_intent
 
     moved = transition(
-        session, intent, OrderState.SUBMITTING, reason="durable pre-submit record", actor=actor
+        session,
+        intent,
+        OrderState.SUBMITTING,
+        reason="durable pre-submit record",
+        payload=submitted_legs_payload(intent),
+        actor=actor,
     )
     session.commit()
     # Releasing write intent is best-effort: the durable record is already
@@ -256,6 +324,241 @@ def has_outstanding_unknown(session: Session, strategy_version_id: int) -> bool:
         }
     )
     return any(current_state(session, cid) is OrderState.UNKNOWN for cid in ids)
+
+
+# ---------------------------------------------------------------------------
+# §10 — position-origin attribution, which is the OMS's job and nobody else's
+#
+# ``PositionSnapshot`` carries no ``originating_client_order_id``: a broker
+# reports a NET book and does not owe us per-structure attribution. §10 assigns
+# the reconstruction to the OMS, and until this existed nothing in the tree
+# performed it — so ``reconcile()`` raised FOREIGN_POSITION after any fill, and
+# an adapter that reconciles CLEAN only while flat is an adapter that cannot be
+# armed. Closed here, in src/, rather than in a drill-local wrapper.
+#
+# Three rules, and the third is the one that keeps this honest:
+#
+# 1. Attribution reads the OMS's OWN pre-submission records — the ``SUBMITTING``
+#    event's leg composition — not the adapter's account of what happened. An
+#    order the OMS never authorised is foreign however many events the adapter
+#    wrote about it.
+# 2. Quantities must reconcile EXACTLY, leg by leg. A broker leg larger than
+#    local records explain is not "mostly ours".
+# 3. Anything unattributable stays unattributed, and reconcile() raises
+#    FOREIGN_POSITION. Nothing here repairs, adjusts or closes anything: an
+#    automatic reconciliation fix is an unreviewed order.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _LocalFill:
+    client_order_id: str
+    instrument_key: str
+    signed_qty: float
+
+
+@dataclass(frozen=True, slots=True)
+class AttributedPosition:
+    """A broker position plus the OMS's reconstruction of which local order(s)
+    produced it.
+
+    Duck-types what :mod:`signalforge.execution.reconcile` reads off a position
+    — ``legs``, ``adapter_name``, ``originating_client_order_id`` — so an
+    adapter's own snapshot type is never mutated or subclassed.
+    ``originating_client_order_id`` is empty when the position could not be
+    explained, and empty is a divergence, not a pass.
+    """
+
+    snapshot: PositionSnapshot
+    originating_client_order_id: str = ""
+    contributing_client_order_ids: tuple[str, ...] = ()
+    unexplained: tuple[str, ...] = ()
+
+    @property
+    def legs(self) -> tuple[Any, ...]:
+        return tuple(self.snapshot.legs)
+
+    @property
+    def adapter_name(self) -> str:
+        return str(getattr(self.snapshot, "adapter_name", ""))
+
+    @property
+    def market_value(self) -> float:
+        return float(getattr(self.snapshot, "market_value", 0.0))
+
+    @property
+    def as_of(self) -> datetime | None:
+        return getattr(self.snapshot, "as_of", None)
+
+    @property
+    def attributed(self) -> bool:
+        return bool(self.originating_client_order_id)
+
+
+def _filled_units(session: Session, client_order_id: str, requested_units: int) -> float | None:
+    """How many units of ``client_order_id`` actually filled, or ``None``.
+
+    ``None`` means "this OMS cannot say", which makes every position the order
+    touches unattributable. The rules, fail-closed in both directions:
+
+    * a ``FILL`` event carrying ``filled_units`` is authoritative (the adapter
+      reported a size, and the largest reported size is the cumulative one);
+    * a terminal ``FILLED`` with no reported size filled what was asked for;
+    * a ``PARTIAL`` with no reported size is ``None`` — "partially, by an amount
+      nobody recorded" is not a quantity;
+    * every other state contributes ``0.0``: a resting, rejected, cancelled,
+      refused or ``UNKNOWN`` order is not a position.
+    """
+    from sqlalchemy import select
+
+    from signalforge.db.models import ExecutionEvent
+
+    reported: list[float] = []
+    for payload in session.scalars(
+        select(ExecutionEvent.payload_json).where(
+            ExecutionEvent.client_order_id == client_order_id,
+            ExecutionEvent.event_type == ExecutionEventType.FILL.value,
+        )
+    ):
+        if not isinstance(payload, dict):
+            continue
+        value = payload.get("filled_units")
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            reported.append(float(value))
+    state = current_state(session, client_order_id)
+    if reported:
+        return max(reported)
+    if state is OrderState.FILLED:
+        return float(requested_units)
+    if state is OrderState.PARTIAL:
+        return None
+    return 0.0
+
+
+def local_net_book(session: Session, *, adapter_name: str) -> dict[str, list[_LocalFill]]:
+    """The book this OMS believes it holds, per instrument, from its own records.
+
+    Built from ``SUBMITTING`` events (what was authorised) crossed with fill
+    sizes (what came back), in submission order — so the *earliest* contributing
+    order is the one that opened the position, which is the id a position is
+    attributed to.
+    """
+    from sqlalchemy import select
+
+    from signalforge.db.models import ExecutionEvent
+
+    rows = session.scalars(
+        select(ExecutionEvent)
+        .where(
+            ExecutionEvent.adapter_name == adapter_name,
+            ExecutionEvent.event_type == ExecutionEventType.SUBMITTING.value,
+            ExecutionEvent.client_order_id != "",
+        )
+        .order_by(ExecutionEvent.ts.asc(), ExecutionEvent.id.asc())
+    )
+
+    book: dict[str, list[_LocalFill]] = {}
+    seen: set[str] = set()
+    for row in rows:
+        cid = row.client_order_id
+        if cid in seen:
+            continue
+        seen.add(cid)
+        payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+        legs = payload.get(SUBMITTED_LEGS_KEY)
+        if not isinstance(legs, list) or not legs:
+            # A SUBMITTING record written before this OMS recorded leg
+            # composition, or by something that is not this OMS. It cannot
+            # explain a position, and "cannot explain" is not "explains".
+            continue
+        requested = payload.get(SUBMITTED_UNITS_KEY)
+        units = _filled_units(session, cid, int(requested) if isinstance(requested, int) else 0)
+        if units is None or units == 0:
+            continue
+        for leg in legs:
+            if not isinstance(leg, dict):
+                continue
+            key = str(leg.get("instrument_key") or "")
+            sign = leg.get("sign")
+            ratio = leg.get("ratio")
+            if not key or not isinstance(sign, int) or not isinstance(ratio, int):
+                continue
+            book.setdefault(key, []).append(
+                _LocalFill(client_order_id=cid, instrument_key=key, signed_qty=sign * ratio * units)
+            )
+    return book
+
+
+#: Quantity comparisons are exact to within this, matching the epsilon
+#: ``paper_reference._net_positions`` uses to decide a leg has closed out.
+_QTY_EPSILON = 1e-6
+
+
+def attribute_positions(
+    session: Session, *, adapter_name: str, positions: Sequence[Any]
+) -> tuple[AttributedPosition, ...]:
+    """Attribute each broker position to the local order(s) that produced it.
+
+    A position is attributed only when **every** leg's signed quantity is
+    explained exactly by this OMS's own records for that instrument. A leg the
+    local book does not have, a quantity that does not match, or a side that
+    does not match all leave the position unattributed — which
+    :func:`~signalforge.execution.reconcile.reconcile` reports as
+    ``FOREIGN_POSITION`` and never repairs.
+
+    A position whose adapter already supplied an originating id keeps it: some
+    brokers do report one, and this reconstruction exists for the ones that do
+    not.
+    """
+    book = local_net_book(session, adapter_name=adapter_name)
+    out: list[AttributedPosition] = []
+    for position in positions:
+        supplied = getattr(position, "originating_client_order_id", "")
+        if isinstance(supplied, str) and supplied:
+            out.append(
+                AttributedPosition(
+                    snapshot=position,
+                    originating_client_order_id=supplied,
+                    contributing_client_order_ids=(supplied,),
+                )
+            )
+            continue
+
+        contributing: list[str] = []
+        unexplained: list[str] = []
+        for leg in getattr(position, "legs", ()) or ():
+            key = str(getattr(leg, "instrument_key", "") or "")
+            broker_qty = float(getattr(leg, "signed_qty", 0.0) or 0.0)
+            fills = book.get(key, [])
+            local_qty = sum(f.signed_qty for f in fills)
+            if not fills or abs(local_qty - broker_qty) > _QTY_EPSILON:
+                unexplained.append(
+                    f"{key or '<no instrument>'}: broker {broker_qty:+g}, "
+                    f"locally explained {local_qty:+g}"
+                )
+                continue
+            contributing.extend(f.client_order_id for f in fills)
+
+        if unexplained or not contributing:
+            out.append(
+                AttributedPosition(
+                    snapshot=position,
+                    contributing_client_order_ids=tuple(dict.fromkeys(contributing)),
+                    unexplained=tuple(unexplained),
+                )
+            )
+            continue
+        ordered = tuple(dict.fromkeys(contributing))
+        out.append(
+            AttributedPosition(
+                snapshot=position,
+                # The earliest contributing order is the one that opened this
+                # position; later ones added to it.
+                originating_client_order_id=ordered[0],
+                contributing_client_order_ids=ordered,
+            )
+        )
+    return tuple(out)
 
 
 def resolve_unknown(

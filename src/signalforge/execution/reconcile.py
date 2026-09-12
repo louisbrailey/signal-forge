@@ -16,7 +16,12 @@ Four rules beyond "compare once a cycle", each closing a specific hole:
   the OMS did not originate — no matching ``client_order_id`` in
   ``execution_event`` — is a divergence and halts. An acknowledgement is not
   enough, because the operator would have acknowledged a sentence rather than
-  been stopped by a check.
+  been stopped by a check. A broker reports a NET book and owes us no
+  per-structure attribution, so the origin of a position that arrives without one
+  is reconstructed by the OMS from its own pre-submission records
+  (:func:`signalforge.execution.oms.attribute_positions`) before this check runs.
+  The reconstruction can only ever *explain* a position; it never repairs one,
+  and a position it cannot explain exactly stays a ``FOREIGN_POSITION``.
 * **Buying power is reconciled, never modelled authoritatively.** The local
   collateral model is a model; the broker's own figure is authoritative, and
   divergence beyond the pre-registered tolerance halts. The binding tolerance is
@@ -45,6 +50,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from signalforge.execution.events import ExecutionEventType, record_execution_event
+from signalforge.execution.oms import attribute_positions
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sqlalchemy.orm import Session
@@ -200,14 +206,25 @@ def _known_client_order_ids(session: Session, adapter_name: str) -> set[str]:
 
 
 def _position_origin(position: object) -> str:
-    """The ``client_order_id`` an adapter attached to a position, or ``""``.
+    """The ``client_order_id`` attributed to a position, or ``""``.
 
     Read defensively: a ``PositionSnapshot`` has no origin field (the broker does
     not owe us one), so an adapter that can supply it does, and one that cannot
-    yields the empty string — which is a divergence, not a pass.
+    is attributed by the OMS from its own records before this is read
+    (:func:`signalforge.execution.oms.attribute_positions`). An empty string
+    means *neither* could explain the position — which is a divergence, not a
+    pass.
     """
     origin = getattr(position, "originating_client_order_id", "")
     return origin if isinstance(origin, str) else ""
+
+
+def _unexplained_detail(position: object) -> str:
+    """Why the OMS could not explain this position, if it said."""
+    reasons = getattr(position, "unexplained", ()) or ()
+    if not reasons:
+        return ""
+    return " (" + "; ".join(str(r) for r in reasons) + ")"
 
 
 def _position_label(position: object) -> str:
@@ -247,7 +264,7 @@ def reconcile(
     collector = _Collector()
 
     try:
-        positions = list(adapter.positions())
+        raw_positions = list(adapter.positions())
         open_orders = list(adapter.open_orders())
         account = adapter.account()
     except Exception as exc:
@@ -262,6 +279,13 @@ def reconcile(
 
     known = _known_client_order_ids(session, adapter_name)
 
+    # §10 assigns position-origin reconstruction to the OMS, because the broker
+    # reports a NET book and owes us no per-structure attribution. Positions an
+    # adapter already attributed keep their id; the rest are attributed from this
+    # OMS's own pre-submission records, and anything that cannot be explained
+    # exactly stays unattributed and diverges below.
+    positions = attribute_positions(session, adapter_name=adapter_name, positions=raw_positions)
+
     for position in positions:
         origin = _position_origin(position)
         if not origin or origin not in known:
@@ -275,7 +299,8 @@ def reconcile(
                 + (
                     f"originating client_order_id {origin!r}, which this OMS never wrote"
                     if origin
-                    else "no originating client_order_id"
+                    else "no originating client_order_id and no local record explaining it"
+                    + _unexplained_detail(position)
                 )
                 + " — not auto-corrected; opening halts and the arming is disarmed",
             )
