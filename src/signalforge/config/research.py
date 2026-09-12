@@ -294,9 +294,20 @@ class OptionsConfig(BaseModel):
     BACKFILL_MAX_TOTAL_BARS_PRIOR: ClassVar[int] = 200_000  # what decision 6 raised it FROM
 
     # --- per-cycle (monthly) backfill: the shape D1 fixes ---------------------
-    # OFF by default and additive: with ``cycle_backfill_enabled=False`` nothing
-    # schedules it and the legacy nearest-N-expiries path is untouched.
-    cycle_backfill_enabled: bool = False
+    # Additive: the legacy nearest-N-expiries path is untouched and nothing
+    # schedules this one — it is CLI-only.
+    #
+    # ``cycle_backfill_enabled`` used to gate the CLI outright. It existed for
+    # one reason: the run held a single ``BEGIN IMMEDIATE`` across every network
+    # call, so starting it against the live probation database meant a multi-day
+    # SQLite write lock, and a kill switch mid-run discarded every bar AND the
+    # ``IngestionRun`` row a resume needs (blockers D9, D16). Both are fixed —
+    # one short write transaction per (underlying, cycle), the run row committed
+    # before the first request, the kill switch caught at the loop boundary — so
+    # the flag was removed rather than left behind gating nothing. What replaces
+    # it is not a config value anyone can forget: ``--dry-run`` prints the exact
+    # request plan, the command confirms before it fetches unless ``--yes`` is
+    # passed, and ``--max-cycles`` / ``--max-minutes`` bound a pass.
     cycle_rule: str = "monthly_third_friday"
     dte_entry_min: PositiveInt = 21  # map §1.1 verbatim
     dte_entry_max: PositiveInt = 60

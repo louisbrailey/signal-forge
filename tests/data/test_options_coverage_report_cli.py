@@ -18,6 +18,7 @@ import re
 from datetime import UTC, date, datetime, timedelta
 
 import httpx
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
@@ -187,9 +188,42 @@ def test_the_report_writes_nothing(db_url: str, session: Session) -> None:
     assert after == before
 
 
-def test_the_cycle_backfill_refuses_to_start_unless_deliberately_enabled(db_url: str) -> None:
-    """A multi-day job that must never start by accident, and must never run
-    against a database file another worker is writing."""
-    result = CliRunner().invoke(app, ["options", "cycle-backfill", "--underlyings", "SPY"])
+def _refuse_network(*_a: object, **_k: object) -> None:
+    raise AssertionError("this command must not issue a provider request")
+
+
+def test_a_dry_run_prints_the_exact_request_plan_and_fetches_nothing(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The multi-day run is planned before it is started. The plan is
+    arithmetic over pre-registered parameters, so it costs a provider nothing
+    and can be re-read at any time."""
+    monkeypatch.setattr(httpx, "get", _refuse_network)
+    result = CliRunner().invoke(
+        app,
+        ["options", "cycle-backfill", "--underlyings", "SPY,QQQ", "--dry-run"],
+    )
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "plan:" in out and "DRY RUN" in out
+    assert "LADDER_17" in out and "34 contracts/cycle" in out
+    assert "requests:" in out and "listing" in out and "aggregate" in out
+    assert "pacing" in out and "no-retry lower bound" in out
+    assert "of the 2,000,000 ceiling" in out
+    assert "destination: the configured database" in out
+
+
+def test_the_cycle_backfill_confirms_before_it_starts_a_multi_day_fetch(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The config flag that used to refuse this command outright is gone — the
+    run is now safe beside the worker (one short write transaction per cycle).
+    What replaces it is a plan the operator sees and a prompt they answer; a
+    scheduled window passes --yes deliberately."""
+    monkeypatch.setattr(httpx, "get", _refuse_network)
+    result = CliRunner().invoke(
+        app, ["options", "cycle-backfill", "--underlyings", "SPY"], input="n\n"
+    )
     assert result.exit_code == 1
-    assert "nothing was fetched" in result.output
+    assert "plan:" in result.output
+    assert "Start fetching now?" in result.output

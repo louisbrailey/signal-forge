@@ -9,7 +9,12 @@ from typing import TYPE_CHECKING, Annotated, Any
 import typer
 
 if TYPE_CHECKING:
-    from signalforge.data.options_backfill import OptionsCoverageSummary
+    from signalforge.data.options_backfill import (
+        BackfillRequestPlan,
+        OptionsCoverageSummary,
+        RunBounds,
+    )
+    from signalforge.data.options_merge import MergeResult
     from signalforge.execution.protocol import BrokerAdapter
     from signalforge.research.portfolio_metrics import PortfolioMetrics
 
@@ -465,7 +470,35 @@ def options_cycle_backfill_cmd(
     until: Annotated[str, typer.Option(help="YYYY-MM-DD window end (required).")] = "",
     lookback_days: Annotated[int, typer.Option(help="Window depth when --since is not given.")] = 0,
     max_total_bars: Annotated[int, typer.Option(help="Override the total-bar ceiling.")] = 0,
+    max_cycles: Annotated[
+        int, typer.Option(help="Stop this PASS after N (underlying, cycle) units. 0 = no bound.")
+    ] = 0,
+    max_minutes: Annotated[
+        float,
+        typer.Option(
+            help=(
+                "Stop this PASS after N minutes, at a cycle boundary (so it may overrun "
+                "by up to one cycle). 0 = no bound."
+            )
+        ),
+    ] = 0.0,
+    to_database: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "Write to this SQLite file instead of the configured database. It must "
+                "already exist: take a file-level copy of the live DB with the worker "
+                "stopped, run against the copy, then `options merge --from` it back."
+            )
+        ),
+    ] = "",
     resume: Annotated[int, typer.Option(help="Resume an existing ingestion_run id.")] = 0,
+    dry_run: Annotated[
+        bool, typer.Option(help="Print the exact request plan and fetch nothing.")
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option(help="Skip the confirmation prompt (use in scheduled windows).")
+    ] = False,
 ) -> None:
     """Per-(underlying, monthly cycle) historical options backfill.
 
@@ -474,9 +507,20 @@ def options_cycle_backfill_cmd(
     vendor strike set. Anything the run cannot serve is excluded and counted by
     reason — never silently shortened.
 
-    OFF unless ``research.options.cycle_backfill_enabled`` is set: this is a
-    multi-day job that must not start by accident, and it must never run
-    concurrently with the paper-probation worker against the same database file.
+    This is a multi-day job (~29,000 requests, ~99 hours at 12.1 s pacing for the
+    full 24-underlying window), so it is built to be run in pieces:
+
+    * ``--dry-run`` prints the exact request plan and touches no network;
+    * ``--max-cycles`` / ``--max-minutes`` bound ONE PASS, ending it at a
+      committed cycle boundary so a nightly window never overlaps the live
+      17:30-19:00 ET EOD / universe / grid jobs;
+    * ``--resume <run id>`` re-enters the run and skips what is already covered;
+    * ``--to-database`` runs the whole thing against a copy of the database, to
+      be merged back with ``options merge`` in one short pass.
+
+    Each (underlying, cycle) is committed on its own with the write lock held
+    only for the store, so the run is safe beside the probation worker and a
+    kill switch costs at most the cycle in flight.
     """
     ensure_not_engaged()
     from datetime import date as _d
@@ -486,21 +530,18 @@ def options_cycle_backfill_cmd(
     from signalforge.data.adapters.massive_options import MassiveOptionsAdapter
     from signalforge.data.options_backfill import (
         CycleBackfillCaps,
+        RunBounds,
         backfill_option_cycles,
+        completed_cycle_units,
         coverage_summary,
+        plan_cycle_backfill,
     )
-    from signalforge.db.session import session_scope
+    from signalforge.db.models import IngestionRun
+    from signalforge.db.session import external_session_scope, session_scope
+    from signalforge.worker_lock import worker_lock_holder
 
     s = get_settings()
     opt = s.research.options
-    if not opt.cycle_backfill_enabled:
-        typer.secho(
-            "options.cycle_backfill_enabled is False — nothing was fetched. This is a "
-            "multi-day run: enable it deliberately, and only against a database file no "
-            "other worker is writing.",
-            fg=typer.colors.YELLOW,
-        )
-        raise typer.Exit(code=1)
     us = [x.strip().upper() for x in underlyings.split(",") if x.strip()] or list(opt.underlyings)
     end = _d.fromisoformat(until) if until else _d.today()
     start = (
@@ -511,22 +552,114 @@ def options_cycle_backfill_cmd(
     caps = CycleBackfillCaps.from_config(opt, window_start=start, window_end=end)
     if max_total_bars:
         caps = replace(caps, max_total_bars=max_total_bars)
+    bounds = RunBounds(max_cycles=max_cycles or None, max_minutes=max_minutes or None)
 
     adapter = MassiveOptionsAdapter()
-    with session_scope(write=True) as session:
-        run = backfill_option_cycles(
-            session,
-            adapter,
-            us,
-            caps=caps,
-            options_config_hash=OptionsEvaluationConfig().options_config_hash,
-            resume_run_id=resume or None,
-        )
-        _print_options_coverage(coverage_summary(run))
+    scope = (
+        external_session_scope(to_database, write=True)
+        if to_database
+        else session_scope(write=True)
+    )
+    try:
+        with scope as session:
+            units_done = 0
+            if resume:
+                prior = session.get(IngestionRun, resume)
+                if prior is None:
+                    typer.secho(f"ingestion_run {resume} not found", fg=typer.colors.RED)
+                    raise typer.Exit(code=1)
+                units_done = completed_cycle_units(prior)
+            plan = plan_cycle_backfill(
+                us,
+                caps=caps,
+                pacing_s=adapter.min_request_spacing_s,
+                units_done=units_done,
+            )
+            _print_backfill_plan(plan, bounds=bounds, to_database=to_database)
+            if dry_run:
+                typer.echo("DRY RUN — no request was issued and nothing was written.")
+                return
+            if not to_database:
+                holder = worker_lock_holder()
+                if holder:
+                    typer.secho(
+                        f"the scheduler worker is running ({holder}) against this database. "
+                        "Each cycle commits in its own short write transaction, so this is "
+                        "survivable — but the designed route for a multi-day run is "
+                        "--to-database against a copy, merged back afterwards.",
+                        fg=typer.colors.YELLOW,
+                    )
+            if not yes:
+                typer.confirm("Start fetching now?", abort=True)
+            run = backfill_option_cycles(
+                session,
+                adapter,
+                us,
+                caps=caps,
+                options_config_hash=OptionsEvaluationConfig().options_config_hash,
+                resume_run_id=resume or None,
+                bounds=bounds,
+            )
+            _print_options_coverage(coverage_summary(run))
+    except FileNotFoundError as exc:
+        # --to-database names a file that is not there. SQLite would create an
+        # empty one and the run would spend days excluding every cycle.
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1) from None
     typer.echo(
         "HISTORICAL settled bars only — never live. Education/simulation only. "
         "Research signal only — no order was placed."
     )
+
+
+def _print_backfill_plan(plan: BackfillRequestPlan, *, bounds: RunBounds, to_database: str) -> None:
+    """The exact request plan: underlyings, cycles, ladder, requests, hours.
+
+    Counts and identities only, and an explicit upper bound rather than an
+    estimate — the ladder de-duplicates downward, an excluded cycle costs no
+    aggregate calls, and the adapter may retry a request up to five times.
+    """
+    typer.secho(
+        f"plan: {len(plan.underlyings)} underlyings x {len(plan.cycles)} cycles "
+        f"= {plan.units_total} units ({plan.units_done} already settled, "
+        f"{plan.units_remaining} to go)",
+        fg=typer.colors.CYAN,
+    )
+    typer.echo(
+        f"  window {plan.window_start}..{plan.window_end} {plan.cycle_rule}; "
+        f"basis={plan.strike_listing_basis}"
+    )
+    typer.echo(f"  underlyings: {', '.join(plan.underlyings)}")
+    if plan.cycles:
+        typer.echo(
+            f"  cycles: {plan.cycles[0]} .. {plan.cycles[-1]} "
+            f"({len(plan.cycles)} third-Friday expiries)"
+        )
+    typer.echo(
+        f"  ladder: {plan.ladder_id}, {plan.ladder_rungs} rungs x {len(plan.rights)} rights "
+        f"= <={plan.contracts_per_cycle_max} contracts/cycle"
+    )
+    typer.echo(
+        f"  requests: {plan.listing_requests:,} listing "
+        f"({plan.listing_pages_assumed} page(s)/cycle, ASSUMED) + "
+        f"{plan.aggregate_requests:,} aggregate = {plan.requests_total:,} total"
+    )
+    typer.echo(
+        f"  pacing {plan.pacing_s}s => {plan.hours_at_pacing:.1f} h "
+        f"({plan.hours_at_pacing / 24:.2f} days) serial, no-retry lower bound"
+    )
+    typer.echo(
+        f"  sessions/cycle {plan.sessions_per_cycle_min}-{plan.sessions_per_cycle_max} "
+        f"(mean {plan.sessions_per_cycle_mean:.2f}) => <={plan.bars_max:,} bars, "
+        f"{plan.bars_fraction_of_ceiling:.1%} of the {plan.max_total_bars:,} ceiling"
+    )
+    if bounds.max_cycles is not None or bounds.max_minutes is not None:
+        typer.echo(
+            f"  this PASS is bounded: max_cycles={bounds.max_cycles}, "
+            f"max_minutes={bounds.max_minutes} (checked between cycles, so it may "
+            "overrun by one)"
+        )
+    typer.echo(f"  destination: {to_database or 'the configured database'}")
 
 
 @options_app.command("coverage-report")
@@ -585,8 +718,81 @@ def _print_options_coverage(cov: OptionsCoverageSummary) -> None:
         f"decision 6); pacing {cov.pacing_s}s; earliest available "
         f"{cov.earliest_available_date}"
     )
+    if cov.stopped_reason:
+        typer.secho(
+            f"  pass ended early [{cov.status}]: {cov.stopped_reason} — "
+            f"resume with --resume {cov.run_id}",
+            fg=typer.colors.YELLOW,
+        )
     if cov.underlyings_failed:
         typer.secho(f"  retryable: {', '.join(cov.underlyings_failed)}", fg=typer.colors.YELLOW)
+
+
+@options_app.command("merge")
+def options_merge_cmd(
+    from_database: Annotated[
+        str, typer.Option("--from", help="SQLite file a bulk options backfill wrote to.")
+    ],
+    dry_run: Annotated[
+        bool, typer.Option(help="Do the identical work and roll it back; report the counts.")
+    ] = False,
+    allow_worker_running: Annotated[
+        bool, typer.Option(help="Merge even while the scheduler worker holds its lock.")
+    ] = False,
+) -> None:
+    """Merge a bulk options database file into the configured one, idempotently.
+
+    ``INSERT OR IGNORE`` on each table's natural key, so re-running inserts
+    nothing and reports it; ``ingestion_run`` rows are re-keyed with their
+    original id, source file and merge time recorded, so the bulk run's
+    provenance survives the merge and stays traceable to the file it was built
+    in. Equity tables are never copied back — the bulk file is a copy of this
+    one, so its instrument and bar rows came from here.
+
+    Run it with the worker stopped: this holds the SQLite write lock for the
+    whole pass, which is far longer than the 5 s any worker job will wait.
+    """
+    ensure_not_engaged()
+    from signalforge.data.options_merge import MergeError, merge_options_from_file
+    from signalforge.db.session import get_engine
+    from signalforge.worker_lock import worker_lock_holder
+
+    holder = worker_lock_holder()
+    if holder and not allow_worker_running and not dry_run:
+        typer.secho(
+            f"the scheduler worker is running ({holder}). A bulk merge holds the SQLite "
+            "write lock for the whole pass — far longer than the 5 s busy timeout its jobs "
+            "wait — so stop the worker first, or pass --allow-worker-running deliberately.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+    try:
+        result = merge_options_from_file(get_engine(), from_database, dry_run=dry_run)
+    except (MergeError, FileNotFoundError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1) from None
+    _print_merge_result(result)
+    typer.echo("Counts and identities only. Research signal only — no order was placed.")
+
+
+def _print_merge_result(result: MergeResult) -> None:
+    typer.secho(
+        f"{'DRY RUN — rolled back' if result.dry_run else 'merged'}: {result.source_path} "
+        f"-> {result.destination_url}",
+        fg=typer.colors.YELLOW if result.dry_run else typer.colors.GREEN,
+    )
+    for t in result.tables:
+        typer.echo(
+            f"  {t.table}: {t.inserted:,} inserted, {t.already_present:,} already present "
+            f"of {t.source_rows:,} (key {'+'.join(t.natural_key)})"
+        )
+    for src_id, new_id in result.runs_merged:
+        typer.echo(f"  ingestion_run #{src_id} (bulk) -> #{new_id} (here)")
+    if result.runs_already_merged:
+        ids = ", ".join(f"#{i}" for i in result.runs_already_merged)
+        typer.echo(f"  ingestion_run already merged, left alone: {ids}")
+    for table, why in result.not_merged:
+        typer.echo(f"  not merged — {table}: {why}")
 
 
 @options_app.command("corp-actions")
