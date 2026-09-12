@@ -289,6 +289,10 @@ forbidden_modules = [
     "signalforge.alerts",
     "signalforge.execution",
     "signalforge.paper.ledger",
+    "signalforge.paper.auto_simulate",
+    "signalforge.paper.options_ledger",
+    "signalforge.paper.options_marks",
+    "signalforge.paper.options_auto_simulate",
 ]
 
 [[tool.importlinter.contracts]]
