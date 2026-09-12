@@ -1464,3 +1464,30 @@ sharper by §6.3c); and §9.2's collateral reconciliation. **No frozen threshold
 in this document, in either revision.** Every change in rev 2 either corrects an arithmetic
 error, closes a selection channel, adds a condition, or converts a post-hoc judgement into a
 pre-registered rule.
+
+---
+
+## Appendix P — Pointer: amended in part by D5a (2026-09-12, append-only)
+
+**This block is a pointer. It moves no threshold, asserts nothing new, and changes no sentence
+above it — §14.3's claim holds verbatim for every section of this document.**
+
+Four arithmetic defects in the sections above were found during wave-2 implementation, recorded
+in `docs/research/DECISIONS_2026-09-12_wave2_findings.md`, and resolved at **k = 0** in
+
+> **`docs/research/options_designs/D5a_amendment_1_reachable_credit_floor_and_fixed_R.md`**
+> — D5 Amendment 1, applying to `options_short_vertical.medium_swing` **v0.1.1**.
+
+Do not act on the following numbers from this document without reading D5a first:
+
+| Superseded here | See |
+|---|---|
+| §4.1 / §4.2 `min_credit_to_width` = 0.25, axis (0.25, 0.30); §4.4's OAT 0.20 — **unreachable** | D5a §2 |
+| §4.1 `width_pct = 0.010` as a fraction of `U`; §4.2's `width_pct` axis — **fails gate 0.5** | D5a §3, §6.2 |
+| §9.2's `R ≈ 0.75 × U` table vs decision 4's $250 per-structure cap | D5a §3.3 |
+| §4.2 / §4.4's exclusion of `stop_multiple` from the grid | D5a §6.2 |
+| §3.3(3)'s 50 % width tolerance | D5a §3.4 |
+| §6.1 / §6.2 / §6.3's cost and required-`n` forecasts | D5a §4, §6.5 (OQ-9) |
+| **OQ-1** (MEDIUM_SWING vs POSITION) — **ratified MEDIUM_SWING**, OQ-1 closed | D5a §5 |
+
+Everything not listed above is unchanged and still binding.

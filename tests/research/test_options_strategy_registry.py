@@ -135,8 +135,8 @@ def test_the_options_spec_is_distinguishable_without_hashing_it_at_all() -> None
 def test_the_options_spec_is_complete_and_experimental() -> None:
     spec = OptionsShortVertical().spec()
     assert spec.missing_fields() == []
-    assert spec.version == VERSION == "0.1.0"
-    assert spec.horizon is Horizon.MEDIUM_SWING
+    assert spec.version == VERSION == "0.1.1"
+    assert spec.horizon is Horizon.MEDIUM_SWING  # OQ-1 ratified, D5a §5
     assert spec.status.value == "experimental"
     assert "authorises NO order" in spec.notes
 
@@ -144,31 +144,59 @@ def test_the_options_spec_is_complete_and_experimental() -> None:
 # --------------------------------------------------------------------------- #
 # the pre-registered params and grid
 # --------------------------------------------------------------------------- #
-def test_the_params_are_exactly_the_d5_pre_registration() -> None:
+def test_the_params_are_exactly_the_d5a_pre_registration() -> None:
+    """D5 §4.1 as amended by D5a §6.1 — the v0.1.1 baseline, asserted as literals.
+
+    Three of these moved in the amendment and each moved for a derived reason:
+    ``min_credit_to_width`` 0.25 -> 0.10 (0.25 was above the attainable maximum of
+    0.155, so v0.1.0 entered nothing), ``width_pct`` 0.010 of ``U`` ->
+    ``width_usd`` $2.00 per contract (one R scale, so gate 0.5 passes and the $250
+    cap clears), and ``width_tolerance_pct`` 0.50 -> 0.0 (a 50% tolerance is itself
+    three R scales).
+    """
     p = ShortVerticalParams()
     assert (
         p.short_delta_target,
         p.max_short_delta,
-        p.width_pct,
+        p.stop_multiple,
         p.dte_target,
         p.profit_target_pct,
         p.min_credit_to_width,
-    ) == (0.20, 0.35, 0.010, 35, 0.50, 0.25)
-    assert (p.stop_multiple, p.time_stop_dte) == (2.0, 7)
+    ) == (0.20, 0.35, 2.0, 35, 0.50, 0.10)
+    assert (p.width_usd, p.time_stop_dte) == (2.00, 7)
     assert (p.dte_window_lo, p.dte_window_hi) == (28, 45)
-    assert (p.delta_tolerance, p.width_tolerance_pct) == (0.05, 0.50)
+    assert (p.delta_tolerance, p.width_tolerance_pct) == (0.05, 0.0)
     assert (p.min_leg_volume, p.min_leg_transactions) == (10, 5)
+    assert not hasattr(p, "width_pct")  # superseded by D5a §3
 
 
 def test_the_declared_grid_is_six_axes_and_ninety_six_points() -> None:
     """Seven free axes are ARITHMETICALLY impossible, not merely undesirable:
-    ``2**7 = 128 > MAX_GRID_POINTS``."""
+    ``2**7 = 128 > MAX_GRID_POINTS``.
+
+    D5a §6.2 swaps *which* parameter the cap forces out — ``width`` leaves because
+    gate 0.5 forbids two R scales in one gate-5 statistic, and ``stop_multiple``
+    takes the freed slot — but the shape is unchanged.
+    """
     strat = OptionsShortVertical()
     axes = strat.sensitivity_axes()
     assert len(axes) == 6
     assert strat.grid_points() == 96 <= MAX_GRID_POINTS
     assert MAX_GRID_POINTS < 2**7
     assert math.prod(len(v) for v in axes.values()) == 96
+    assert set(axes) == {
+        "short_delta_target",
+        "max_short_delta",
+        "stop_multiple",
+        "dte_target",
+        "profit_target_pct",
+        "min_credit_to_width",
+    }
+    # the width is a declared CONSTANT of the version, never an axis
+    assert "width_usd" not in axes
+    assert OAT_PARAMETERS["width_usd"] == (1.00, 2.00)
+    assert axes["min_credit_to_width"] == [0.10, 0.13]
+    assert axes["stop_multiple"] == [2.0, 3.0]
 
 
 def test_every_declared_axis_is_a_params_field_carrying_its_baseline_value() -> None:

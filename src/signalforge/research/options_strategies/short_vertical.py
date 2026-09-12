@@ -1,10 +1,45 @@
-"""O3 — short vertical (credit) spread, regime-filtered.  D5's pre-registration.
+"""O3 — short vertical (credit) spread, regime-filtered.  D5's pre-registration,
+as amended by D5a.
 
 **Every parameter, threshold, axis and rule in this file was fixed in
-``docs/research/options_designs/D5_first_strategy_preregistration.md`` before any
+``docs/research/options_designs/D5_first_strategy_preregistration.md`` and its
+amendment ``D5a_amendment_1_reachable_credit_floor_and_fixed_R.md`` before any
 option price, IV, greek, credit, return or P&L was inspected (R1).**  Nothing
-here may be re-tuned in response to a result; a behavioural change ships as
-``0.2.0`` and costs a fresh sealed look (R3).
+here may be re-tuned in response to a result; a behavioural change ships as a new
+version and costs a fresh sealed look (R3).
+
+**v0.1.1 supersedes v0.1.0 at k = 0.**  ``count_sealed_looks`` keys on
+``Strategy.name`` and no row in ``strategy`` begins ``options``, so no sealed look
+has been spent on this family and v0.1.0 was never evaluated.  D5a repairs three
+arithmetic defects that made v0.1.0 unevaluable and ratifies the horizon:
+
+* ``min_credit_to_width`` 0.25 was **unreachable**.  On an arbitrage-free chain
+  ``dP/dK = e^{-rT} N(-d2)`` falls toward the wing, so credit/width is bounded
+  above by roughly ``|delta_short|``; the adverse spread charge then takes a
+  further 4-48 points out of it.  Over the declared design space the attainable
+  adverse ratio tops out at **0.155**.  The amended band is derived from the
+  quantiles of that distribution: baseline **0.10**, axis ``(0.10, 0.13)``.
+* ``width_pct`` as a fraction of the underlying gave R a different scale on every
+  underlying, which fails gate 0.5's ``single_scale``.  Width is now **$2.00 of
+  strike distance per contract**, fixed for the version: one R scale, $200.00,
+  everywhere.
+* At $2.00 the hard max loss is **$201.60** against decision 4's $250 cap — a
+  19.4% margin no parameter setting inside this version can breach.  $3.00 would
+  need a floor of 0.172 to clear the cap and 0.155 is the attainable maximum;
+  $2.50 is not a multiple of the declared $1.00 strike increment.
+* **OQ-1 ratified: MEDIUM_SWING.**  ``Horizon`` describes the HOLDING period and
+  this structure's is bounded by its own time stop at ``35 - 7 = 28`` calendar
+  days.  POSITION's lower bound is ~60.9 days — 2.17x that, and 1.79x even the
+  deferral-extended force-close bound — so POSITION is arithmetically impossible
+  for every cell of the grid, not merely a worse fit.
+
+**F14, pre-registered before the first look (D5a §4).**  At the $250 cap and this
+frozen cost model, *no* width is simultaneously cap-compliant and cost-viable: the
+target-win outcome ``0.5C - F`` is negative in every Stage A cell at $2.00, and the
+minimum cost-viable widths imply max losses of $254 (IWM) to $842 (SPY).  The
+expected disposition is D5 §10's **null option**, and only the operator raising
+``options_per_structure_max_loss`` (decision 4's reserved right, OP-1) can change
+that — never a post-result adjustment, which D4 §2.8a forbids by name.
 
 The claim, stated so it can be killed: index and large-cap equity options are
 sold, on average and across most regimes, at an implied volatility above the
@@ -33,17 +68,21 @@ Four design points that are structural here rather than conventional:
   strike and a credit that look real and are not.
 * **A structure is refused, never fudged.**  ``shares_per_contract != 100``,
   a naked short, two expirations, a zero width — all raise ``StructureRefused``
-  from :class:`OptionStructure`'s own constructor and land in a counter.
+  from :class:`OptionStructure`'s own constructor and land in a counter.  A
+  ``width_usd`` whose hard max loss breaches the pre-registered per-structure cap
+  is refused in ``__init__``, before a backtest can be run on it.
+* **The wing lands on the declared width exactly, or the cycle is a non-entry.**
+  D5 §3.3(3)'s +/-50% width tolerance *is* a gate-0.5 failure once the width is a
+  declared dollar constant: a run whose widths vary by 50% carries three R scales.
+  Exactness is strictly more searching — it can only remove entries.
 
-**Known conflict between D4 §3 clause (d) and D5 §4.1, recorded rather than
-resolved here.** D4 §3 requires ``width``, ``M`` and the collateral basis to be
-declared constants so the version has one fixed R scale; D5 §4.1 declares
-``width_pct`` as a *fraction of the underlying close*, so R scales with the
-underlying's price (D5 §9.2: ~$75 at U=$100, ~$525 at U=$700).  Gate 0.5 is left
-**strict** — a multi-underlying evaluation of v0.1.0 as pre-registered will FAIL
-it, and that is the gate doing its job rather than a bug to code around.
-Resolving it is an orchestrator decision and belongs in a D5 amendment, not in
-this file.
+**A consequence D5a §2.5 records rather than smooths over.**  With a dollar width
+the credit floor is no longer the volatility filter D5 §1 argued it was.  The
+print ratio still rises with IV, but the 3%-of-print charge rises faster, so the
+*adverse* ratio FALLS with IV: the floor now excludes rich cycles and admits quiet
+ones.  No compensating filter is added — that would be a new lever chosen without
+evidence — and the floor stays on the adverse credit, because moving it to the
+print credit would be a loosening (R4).
 """
 
 from __future__ import annotations
@@ -74,8 +113,11 @@ from signalforge.research.regime import RegimeState, Trend, regime_from_proxy
 from signalforge.research.registry import StrategySpec, StrategyStatus
 from signalforge.research.strategies.base import lagged_regime
 
-#: R3: any behavioural change ships as 0.2.0 and costs a fresh sealed look.
-VERSION = "0.1.0"
+#: R3: any behavioural change ships as a new version and costs a fresh sealed
+#: look.  0.1.1 is D5a's amendment of the never-evaluated 0.1.0; because
+#: ``count_sealed_looks`` reports k = 0 for this family, the amendment costs no
+#: look and D5 §10's variant budget (1, hard cap 2) is untouched.
+VERSION = "0.1.1"
 
 #: D5 §2.1.  ``count_sealed_looks`` keys on this, so the options family starts at
 #: k = 0 by construction and can never be conflated with an equity family.
@@ -91,6 +133,20 @@ R_SOURCE = "config_constant:OptionsEvaluationConfig.risk_free_rate=0.04"
 #: D5 §5.4.  "Whichever is narrower" means the band never widens just because an
 #: underlying happens to have a coarse strike ladder.
 PIN_BAND_PCT = 0.005
+
+#: Decision 4's per-structure max-loss cap, verbatim, and the arithmetic gate 0.i
+#: applies to it (D5a §3.3).  ``R_hard = width_usd * M + entry_costs`` is the bound
+#: no credit can breach, because the strategy refuses ``net_credit <= 0`` outright.
+#: At the declared width that is ``2.00 * 100 + 1.60 = $201.60``, a 19.4% margin.
+#: **The cap is the OPERATOR's (decision 4) and may be raised only BEFORE a gate
+#: result** — D4 §2.8a names raising it afterwards as the forbidden move.
+OPTIONS_PER_STRUCTURE_MAX_LOSS = 250.0
+
+#: D5a §3.3, asserted as market structure exactly as ``tick_grid`` is: SPY, QQQ and
+#: IWM monthly third-Friday chains list $1.00 strike increments through the traded
+#: region.  A COARSER realised ladder is the conservative direction — it produces
+#: non-entries, never a silently rewritten width.
+DECLARED_STRIKE_INCREMENT = 1.00
 
 #: Pre-registered here (D5 leaves it to D2's signal contract): a short leg whose
 #: intrinsic value exceeds 1% of the underlying's close is flagged
@@ -119,7 +175,7 @@ QLookup = Callable[[str, date], float | None]
 
 @dataclass(frozen=True, slots=True)
 class ShortVerticalParams:
-    """D5 §4.1's frozen ``v0.1.0`` spec, field for field.
+    """D5 §4.1 as amended by D5a §6.1 — the frozen ``v0.1.1`` spec, field for field.
 
     These live in a params dataclass interpolated into the spec's TEXT fields,
     exactly as ``TrendParams`` does, and must **never** become ``StrategySpec``
@@ -134,58 +190,118 @@ class ShortVerticalParams:
 
     short_delta_target: float = 0.20  # AXIS 1
     max_short_delta: float = 0.35  # AXIS 2
-    width_pct: float = 0.010  # AXIS 3 — fraction of the underlying close
+    stop_multiple: float = 2.0  # AXIS 3 — D5a §6.2: promoted from FIXED
     dte_target: int = 35  # AXIS 4
     profit_target_pct: float = 0.50  # AXIS 5
-    min_credit_to_width: float = 0.25  # AXIS 6
-    stop_multiple: float = 2.0  # FIXED — OAT only (D5 §4.2, §4.4)
+    min_credit_to_width: float = 0.10  # AXIS 6 — D5a §2.4 (was 0.25, unreachable)
+    #: D5a §3: dollars of STRIKE DISTANCE per contract, fixed for the version, so
+    #: ``R_scale = width_usd * 100 = $200.00`` is identical on every underlying and
+    #: gate 0.5's ``single_scale``/``scale_matches`` pass by construction.  It is
+    #: deliberately NOT a grid axis: a width axis would put two R scales into one
+    #: gate-5 statistic, which is the pooling gate 0.5's own evidence forbids.
+    width_usd: float = 2.00  # FIXED per version (was width_pct = 0.010 of U)
     time_stop_dte: int = 7  # FIXED
     dte_window_lo: int = 28  # FIXED — derived guard around dte_target
     dte_window_hi: int = 45  # FIXED
     delta_tolerance: float = 0.05  # FIXED
-    width_tolerance_pct: float = 0.50  # FIXED
+    #: D5a §3.4: 0.0 means the wing must land on EXACTLY ``K_short -/+ width_usd``.
+    #: D5 §3.3(3)'s 0.50 tolerance is itself a gate-0.5 failure under a declared
+    #: dollar width — a run whose widths vary by 50% carries three R scales.
+    width_tolerance_pct: float = 0.0  # FIXED — exact placement or non-entry
     min_leg_volume: int = 10  # FIXED — print eligibility, D5 §2.4
     min_leg_transactions: int = 5  # FIXED — print eligibility, D5 §2.4
 
+    @property
+    def r_scale_usd(self) -> float:
+        """``width_usd x shares_per_contract`` — the gross width in dollars, and
+        the single R scale this version may produce (D5a §3.2)."""
+        return self.width_usd * 100.0
 
-#: D5 §4.2's complete, exhaustive grid: **6 axes, 96 points**.
+    @property
+    def r_hard_max_usd(self) -> float:
+        """The max loss no credit can breach: the strategy refuses ``net_credit <=
+        0``, so ``R <= width_usd * M + entry_costs`` whatever the floor is set to.
+
+        This — not ``R`` at the baseline floor — is what gate 0.i's per-structure
+        leg is checked against in :meth:`OptionsShortVertical.__init__`, because a
+        margin that only holds at one parameter setting is not a margin.
+        """
+        return (
+            self.r_scale_usd
+            + PREREGISTERED_COST_MODEL.commission(2)
+            + PREREGISTERED_COST_MODEL.fees(2)
+        )
+
+
+#: D5 §4.2 as amended by D5a §6.2 — still **6 axes, 96 points**.
 #:
 #: Seven free axes are ARITHMETICALLY IMPOSSIBLE, not merely undesirable:
 #: ``sensitivity.MAX_GRID_POINTS = 120`` and the grid is the full Cartesian
 #: product, so the smallest full factorial over seven axes is ``2**7 = 128 > 120``.
 #: Six is the maximum, and only if at most one axis carries three values
-#: (``3 x 2**5 = 96``; ``3 x 3 x 2**4 = 144`` does not fit).  ``stop_multiple`` is
-#: the seventh parameter the cap forces out, and it goes to the OAT table below
-#: — it is the axis whose high value is near-degenerate (``3.0 x 0.30 = 0.90`` of
-#: width) and whose behaviour gate 8 measures directly anyway.
+#: (``3 x 2**5 = 96``; ``3 x 3 x 2**4 = 144`` does not fit).
+#:
+#: D5a swaps which parameter the cap forces out, for a reason that is dispositive
+#: rather than a preference: **gate 0.5 forbids a width axis.**  Its own evidence
+#: carries the rule — "this R stream may not be pooled, averaged, bootstrapped
+#: together, or compared with any other structure's R stream" — and a width axis
+#: puts two R scales into one gate-5 ``positive_fraction``.  ``width_pct`` was a
+#: legal axis in D5 only because that document had not yet noticed R varied across
+#: its own baseline cell.  The freed slot goes to ``stop_multiple``, which D5 §4.2
+#: itself named as the seventh parameter that deserved an axis; its stated reason
+#: for exclusion (``3.0 x 0.30 = 0.90`` of width, near-degenerate) no longer holds
+#: at the amended floor, where ``3.0 x 0.155 = 0.465 < 1`` everywhere.
+#:
+#: Each axis's second value is the HARDER side, per D5 §4.2's rule: 3.0 leaves more
+#: tail per trade than 1.5, and 0.13 thins the population more than 0.05.
 SENSITIVITY_GRID: Mapping[str, tuple[float | int, ...]] = {
     "short_delta_target": (0.12, 0.20, 0.30),
     "max_short_delta": (0.28, 0.35),
-    "width_pct": (0.010, 0.020),
+    "stop_multiple": (2.0, 3.0),
     "dte_target": (21, 35),
     "profit_target_pct": (0.50, 0.75),
-    "min_credit_to_width": (0.25, 0.30),
+    "min_credit_to_width": (0.10, 0.13),
 }
+
+#: D5a §2.3/§2.4, recorded so the derivation is checkable and the amendment cannot
+#: be silently reverted: the attainable adverse credit-to-width ratio over the
+#: declared design space (Stage A price levels x IV 0.12-0.60, 35 DTE, baseline
+#: delta and width) runs -0.2250 to +0.1550.  **The reachable region is (0, 0.155].**
+#: D5's floor (0.25) misses it by at least 61%, its harder grid value (0.30) by 94%,
+#: its OAT loosening value (0.20) by 29% — which is why v0.1.0 entered nothing.
+#: The three amended values are the p25 / median / p75 of the POSITIVE attainable
+#: ratios, each rounded DOWN to 0.01 (rounding up moves toward the unreachable side,
+#: which is the whole defect being repaired).
+ATTAINABLE_ADVERSE_RATIO_MAX = 0.155
+CREDIT_TO_WIDTH_QUANTILES: Mapping[str, float] = {"p25": 0.05, "median": 0.10, "p75": 0.13}
 
 #: D5 §4.4.  Every parameter that is NOT a grid axis is enumerated here, so that
 #: under R5 "abandoned variant" stays definable as "a pre-registered cell that was
 #: not reported".  A parameter in neither list would be invisible to both
 #: mechanisms, which is exactly what R5 exists to prevent.
 OAT_PARAMETERS: Mapping[str, tuple[float | int, ...]] = {
-    "stop_multiple": (1.5, 2.0, 3.0),
+    # D5a §6.3.  The cap-compliant width alternative.  Reported, NEVER offered as a
+    # selectable grid cell: a "best cell" reading could otherwise select it, and the
+    # §2.3 table predicts in advance that $1.00 is cost-destroyed on SPY/QQQ (adverse
+    # ratio -0.05 at U = 660, sigma 0.15) and marginal even on IWM.
+    "width_usd": (1.00, 2.00),
+    "stop_multiple": (1.5,),  # the TIGHTER direction; the grid carries 3.0
     "time_stop_dte": (5, 7, 14),
     "dte_window_lo": (24, 28, 31),
     "dte_window_hi": (50, 45, 42),
     "delta_tolerance": (0.03, 0.05, 0.08),
-    "width_tolerance_pct": (0.35, 0.50),
+    # Degenerate by design after D5a §3.4 — exact wing placement is structural now.
+    # It stays listed so R5's "a parameter in neither list is invisible" holds.
+    "width_tolerance_pct": (0.0,),
     "min_leg_volume": (5, 10, 25),
     "min_leg_transactions": (3, 5, 10),
     # Reported one-at-a-time rather than offered as a selectable grid cell:
     # 0.25 is the EASIER direction on the profit target (less tail per trade) and
-    # 0.20 is map §3.2's named failure mode on the credit floor (loosening it to
-    # reach for credit).  The grid carries the harder side of each.
+    # 0.05 is map §3.2's named failure mode on the credit floor (loosening it to
+    # reach for credit).  The grid carries the harder side of each.  0.05 is the
+    # derived p25 of the attainable region; D5 §4.4's 0.20 is outside it entirely.
     "profit_target_pct": (0.25,),
-    "min_credit_to_width": (0.20,),
+    "min_credit_to_width": (0.05,),
 }
 
 #: D5 §4.2: 45 DTE is excluded **by derivation, not preference**.  Third-Friday
@@ -193,6 +309,12 @@ OAT_PARAMETERS: Mapping[str, tuple[float | int, ...]] = {
 #: the prior cycle's time stop; under ``options_max_structures_per_underlying = 1``
 #: the prior structure is still open and every cycle is skipped.
 EXCLUDED_DTE_TARGET = 45
+
+#: Float slack on the exact-width comparison (D5a §3.4).  Strikes arrive as floats
+#: parsed from an option ticker's integer thousandths, so ``232.0 - 230.0`` is not
+#: reliably ``2.0``.  A tenth of a cent is far below the finest listed increment
+#: and cannot admit a genuinely different width.
+_WIDTH_EPS = 1e-3
 
 
 def _print_eligible(pr: ContractPrint, params: ShortVerticalParams) -> bool:
@@ -257,6 +379,16 @@ class OptionsShortVertical:
                 "prior cycle's time stop, so every cycle is skipped and the cell produces "
                 "approximately zero trades"
             )
+        if p.width_usd <= 0.0:
+            raise ValueError("width_usd is dollars of strike distance per contract and must be > 0")
+        if p.r_hard_max_usd > OPTIONS_PER_STRUCTURE_MAX_LOSS:
+            raise ValueError(
+                f"width_usd = {p.width_usd} gives a hard max loss of ${p.r_hard_max_usd:,.2f}, "
+                f"which breaches the pre-registered per-structure cap of "
+                f"${OPTIONS_PER_STRUCTURE_MAX_LOSS:,.2f} (decision 4). Gate 0.i would refuse the "
+                "evaluated population, and D4 §2.8a forbids raising the cap after a gate result "
+                "— the width is re-specified before any outcome is observed, or not at all."
+            )
         self.params = p
         self.key = STRATEGY_KEY
         self.horizon = Horizon.MEDIUM_SWING
@@ -288,13 +420,16 @@ class OptionsShortVertical:
     def grid_points(self) -> int:
         return math.prod(len(v) for v in SENSITIVITY_GRID.values())
 
-    def structure_identity(self, *, width_declared: float) -> StructureIdentity:
-        """Gate 0.5's declared half.
+    def structure_identity(self) -> StructureIdentity:
+        """Gate 0.5's declared half — now a **constant of the version** (D5a §3).
 
-        ``width_declared`` is in **strikes** (dollars of strike distance), which
-        the caller derives from ``width_pct x U`` for the evaluated underlying —
-        see this module's docstring for the D4 §3 clause (d) conflict that makes
-        it an argument rather than a constant.
+        It takes no argument any more, and that is the repair: D4 §3 clause (d)
+        requires ``width`` and ``M`` to be declared constants so the version has
+        one fixed R scale, and gate 0.5 fails ``single_scale`` the moment two
+        widths appear in one trade list.  ``width_pct x U`` produced one width per
+        underlying; ``width_usd`` produces ``$200.00`` on every underlying, so
+        ``single_scale`` and ``scale_matches`` pass by construction rather than by
+        luck of which symbols happened to be evaluated.
         """
         return StructureIdentity(
             structure_type=StructureType.VERTICAL_CREDIT,
@@ -304,7 +439,7 @@ class OptionsShortVertical:
             ),
             legs_per_structure=2,
             leg_sign_pattern=(-1, +1),
-            width_declared=width_declared,
+            width_declared=self.params.width_usd,
             m_declared=100,
             width_selected_adaptively=False,
         )
@@ -336,7 +471,7 @@ class OptionsShortVertical:
             "structure_type": StructureType.VERTICAL_CREDIT.value,
             "short_delta_target": p.short_delta_target,
             "max_short_delta": p.max_short_delta,
-            "width_pct": p.width_pct,
+            "width_usd": p.width_usd,
             "dte_target": p.dte_target,
             "profit_target_pct": p.profit_target_pct,
             "stop_multiple": p.stop_multiple,
@@ -361,10 +496,11 @@ class OptionsShortVertical:
                 "monthly third-Friday cycle). Sell the PUT side below the market when the "
                 "lagged broad-market proxy trend is not bear; sell the CALL-side mirror above "
                 f"the market when it is bear. Short strike targets |delta| "
-                f"{p.short_delta_target} (cap {p.max_short_delta}); the long wing sits "
-                f"{p.width_pct:.3%} of the underlying further out. Entry only if the net credit "
-                f"at the ADVERSE modelled fill is >= {p.min_credit_to_width} of the width. "
-                "Regime label is lagged one completed session."
+                f"{p.short_delta_target} (cap {p.max_short_delta}); the long wing sits EXACTLY "
+                f"${p.width_usd:.2f} of strike distance further out — a constant of the version, "
+                f"so max loss is at most ${p.r_hard_max_usd:,.2f} on EVERY underlying. Entry only "
+                f"if the net credit at the ADVERSE modelled fill is >= {p.min_credit_to_width} of "
+                "the width. Regime label is lagged one completed session."
             ),
             required_data_sources=(
                 "BAR_DAILY",
@@ -380,22 +516,23 @@ class OptionsShortVertical:
                 f"q per underlying per session)",
                 f"delta_K=blackscholes.greeks(...).delta, |delta| <= {p.max_short_delta}, "
                 f"target {p.short_delta_target} +/- {p.delta_tolerance}",
-                f"width=nearest listed strike to {p.width_pct} x underlying close, within "
-                f"{p.width_tolerance_pct:.0%}",
+                f"width=the listed strike at EXACTLY ${p.width_usd:.2f} of strike distance from "
+                f"the short strike (tolerance {p.width_tolerance_pct:.0%}); no such strike is a "
+                "non-entry, never a rewritten width",
                 f"print_eligible=volume >= {p.min_leg_volume} and (transactions is null or "
                 f">= {p.min_leg_transactions})",
                 f"net_credit_to_width >= {p.min_credit_to_width} at the adverse modelled fill",
             ),
             entry_conditions=(
                 "cycle eligible + lagged regime selects the side + a strike within the delta "
-                "band + a placeable wing within the width tolerance + the credit floor clears "
+                "band + a wing listed at exactly the declared width + the credit floor clears "
                 "at the adverse modelled fill + both legs print-eligible + both legs deliver "
                 "100 shares. Any failure is a NON-ENTRY, counted by reason — never a fudged fill."
             ),
             invalidation_conditions=(
-                "no bracketing chain, no delta match, width out of tolerance, credit floor not "
-                "met, print-ineligible leg, no sourced q, shares_per_contract != 100, or a "
-                "structure already open on that underlying"
+                "no bracketing chain, no delta match, the declared width is not placeable on the "
+                "listed ladder, credit floor not met, print-ineligible leg, no sourced q, "
+                "shares_per_contract != 100, or a structure already open on that underlying"
             ),
             exit_logic=(
                 f"buy back at <= {1.0 - p.profit_target_pct:.2f} x entry credit (profit target), "
@@ -507,17 +644,20 @@ class OptionsShortVertical:
         if short_ref is None or short_print is None:
             return None
 
-        long_ref, long_print = self._pick_wing(candidates, short_ref, spot, right, p)
+        long_ref, long_print = self._pick_wing(candidates, short_ref, right, p)
         if long_ref is None or long_print is None:
             return None
 
         width = abs(short_ref.strike - long_ref.strike)
         if width <= 0.0:
             return None
-        wanted = p.width_pct * spot
-        if abs(width - wanted) > p.width_tolerance_pct * wanted:
-            # A coarse strike ladder on a low-priced underlying would otherwise
-            # silently rewrite the width parameter.
+        # D5a §3.4: the wing must land on EXACTLY the declared width, or the cycle
+        # is a non-entry.  D5 §3.3(3)'s +/-50% tolerance is itself a gate-0.5
+        # failure once the width is a declared dollar constant — a run whose widths
+        # vary by 50% carries three R scales, and `single_scale` refuses it.  A
+        # coarse ladder therefore produces a non-entry rather than a silently
+        # rewritten width, which is the same hazard handled more strictly.
+        if abs(width - p.width_usd) > p.width_tolerance_pct * p.width_usd + _WIDTH_EPS:
             return None
 
         if not self._credit_floor_clears(
@@ -540,7 +680,7 @@ class OptionsShortVertical:
             time_stop_dte=p.time_stop_dte,
             time_stop_dte_basis=DteBasis.CALENDAR,
             pin_band_pct=PIN_BAND_PCT,
-            strike_increment=increment or (p.width_pct * spot),
+            strike_increment=increment or DECLARED_STRIKE_INCREMENT,
             assignment_itm_threshold_pct=ASSIGNMENT_ITM_THRESHOLD_PCT,
             iv_source=IvSource.LOCAL_BS_INVERTED,
             q_source=self.q_source,
@@ -676,16 +816,20 @@ class OptionsShortVertical:
         self,
         candidates: list[tuple[ContractRef, ContractPrint]],
         short_ref: ContractRef,
-        spot: float,
         right: Right,
         p: ShortVerticalParams,
     ) -> tuple[ContractRef | None, ContractPrint | None]:
-        """The listed strike closest to ``K_short -/+ width_pct x U``, at least one
-        listed increment beyond the short strike."""
+        """The listed strike closest to ``K_short -/+ width_usd``, at least one
+        listed increment beyond the short strike.
+
+        The underlying's close no longer enters the target at all (D5a §3): the
+        width is a
+        declared dollar constant of the version, not a fraction of the underlying,
+        so the same $2.00 distance is sought on a $240 underlying and a $660 one.
+        The caller then refuses anything that is not that distance exactly.
+        """
         target = (
-            short_ref.strike - p.width_pct * spot
-            if right is Right.PUT
-            else short_ref.strike + p.width_pct * spot
+            short_ref.strike - p.width_usd if right is Right.PUT else short_ref.strike + p.width_usd
         )
         further_otm = (
             (lambda k: k < short_ref.strike)

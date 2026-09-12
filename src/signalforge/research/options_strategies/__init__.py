@@ -21,8 +21,12 @@ appears in one and not the other is, by definition, an undisclosed look.
 from __future__ import annotations
 
 from signalforge.research.options_strategies.short_vertical import (
+    ATTAINABLE_ADVERSE_RATIO_MAX,
+    CREDIT_TO_WIDTH_QUANTILES,
+    DECLARED_STRIKE_INCREMENT,
     FAMILY,
     OAT_PARAMETERS,
+    OPTIONS_PER_STRUCTURE_MAX_LOSS,
     PREREGISTERED_COST_MODEL,
     SENSITIVITY_GRID,
     STRATEGY_KEY,
@@ -33,8 +37,12 @@ from signalforge.research.options_strategies.short_vertical import (
 from signalforge.research.registry import StrategyRegistry
 
 __all__ = [
+    "ATTAINABLE_ADVERSE_RATIO_MAX",
+    "CREDIT_TO_WIDTH_QUANTILES",
+    "DECLARED_STRIKE_INCREMENT",
     "FAMILY",
     "OAT_PARAMETERS",
+    "OPTIONS_PER_STRUCTURE_MAX_LOSS",
     "PREREGISTERED_COST_MODEL",
     "SENSITIVITY_GRID",
     "STRATEGY_KEY",
