@@ -62,6 +62,13 @@ def test_every_scope_field_exists_on_the_model() -> None:
         # produces no candidate and can never be approved, so its parameters
         # must not appear in — or be able to change — an approval scope hash.
         "grid",
+        # `execution` decides only whether an already-gated decision may be
+        # SUBMITTED to a broker's paper endpoint — never which signals exist.
+        # The same strategy on the same dataset produces identical candidates
+        # with execution enabled or disabled, and hashing it would have moved
+        # config_hash the moment the section appeared, putting both live
+        # PAPER_APPROVED approvals out of scope for nothing (D6 ADR §2).
+        "execution",
     }
 
 

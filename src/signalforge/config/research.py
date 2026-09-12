@@ -19,6 +19,7 @@ from signalforge.domain import Horizon
 __all__ = [
     "DataQualityConfig",
     "EventFilters",
+    "ExecutionConfig",
     "GridConfig",
     "HealthMonitorConfig",
     "Horizon",
@@ -190,6 +191,31 @@ class AgentsConfig(BaseModel):
 
     enabled: bool = False
     llm_narratives: bool = False  # even when the LLM layer is configured, narratives are opt-in
+
+
+class ExecutionConfig(BaseModel):
+    """Order-execution layer — OFF by default (D6 ADR §2).
+
+    **This shapes no signal.** It decides only whether an already-gated decision
+    may be *submitted* to a broker's paper endpoint, so these fields are
+    deliberately **excluded from** ``ResearchConfig.SCOPE_HASH_FIELDS``: a
+    given strategy on a given dataset produces identical candidates with
+    ``enabled`` on or off, and moving ``config_hash`` here would put every live
+    PAPER_APPROVED approval out of scope the moment this section appeared —
+    exactly the 2026-09-11 incident this list was narrowed to prevent. They
+    still appear in ``full_config_hash`` for the audit trail.
+
+    ``enabled=True`` is necessary and nowhere near sufficient: with no unexpired
+    ``armed_strategy`` row, zero orders can be submitted. Two independent gates,
+    neither sufficient alone. Nothing is armed by default.
+    """
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    enabled: bool = False
+    # The FIRST adapter is local, deterministic and network-free. Its fills are
+    # drill artifacts and are never evidence for any gate (D6 §3.1).
+    adapter_name: str = "paper_reference"
 
 
 class GridConfig(BaseModel):
@@ -390,6 +416,9 @@ class ResearchConfig(BaseModel):
     # SCOPE_HASH_FIELDS below (see GridConfig's docstring).
     grid: GridConfig = Field(default_factory=GridConfig)
     options: OptionsConfig = Field(default_factory=OptionsConfig)
+    # Order execution — OFF by default, deliberately absent from
+    # SCOPE_HASH_FIELDS below (see ExecutionConfig's docstring).
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
     intraday: IntradayOperationsConfig = Field(default_factory=IntradayOperationsConfig)
 
@@ -431,6 +460,14 @@ class ResearchConfig(BaseModel):
     #
     # The mechanical grid (``grid``) is likewise absent: it
     # is not a registered, promotion-gated strategy and produces no candidate.
+    #
+    # `execution` is absent for the same reason as `intraday`, and the argument
+    # is the stronger one: it decides whether an already-gated decision may be
+    # SUBMITTED, never which signals exist. A strategy evaluated on a given
+    # dataset produces identical candidates with execution enabled or disabled.
+    # Including it would move config_hash the moment the section appeared and
+    # put every live PAPER_APPROVED approval out of scope — the 2026-09-11
+    # incident, repeated. Asserted by tests/execution/test_config_scope.py.
     SCOPE_HASH_FIELDS: ClassVar[tuple[str, ...]] = (
         "schema_version",
         "watchlist",
