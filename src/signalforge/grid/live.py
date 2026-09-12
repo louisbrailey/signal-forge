@@ -80,6 +80,7 @@ class GridDailyResult:
     buys: int = 0
     sells: int = 0
     tracking_started: int = 0
+    reanchored: int = 0
     already_done: int = 0
     no_data: int = 0
     stale: int = 0
@@ -102,6 +103,7 @@ class GridDailyResult:
             "sells": self.sells,
             "trades": self.trades,
             "tracking_started": self.tracking_started,
+            "reanchored": self.reanchored,
             "already_done": self.already_done,
             "no_data": self.no_data,
             "stale": self.stale,
@@ -123,6 +125,7 @@ def params_from_config(
         drop_pct=float(cfg.drop_pct),
         rise_pct=float(cfg.rise_pct),
         min_order_usd=float(cfg.min_order_usd),
+        reanchor_on_untradeable_rise=bool(cfg.reanchor_on_untradeable_rise),
         slippage_bps=slippage_bps,
         spread_bps=spread_bps,
         universe_name=cfg.universe_name,
@@ -308,6 +311,13 @@ def run_grid_daily(
         if dec.action == NONE:
             if dec.reason != "no_trigger":
                 result.skipped_triggers[dec.reason] = result.skipped_triggers.get(dec.reason, 0) + 1
+            if dec.reanchor:
+                # No order, but the grid ratchets up with price. Re-applying this
+                # on a re-run is a no-op (the new anchor no longer triggers), so
+                # the job stays idempotent per (symbol, session).
+                pos.anchor_price = _dec(b.decision_close)
+                pos.updated_at = now
+                result.reanchored += 1
             continue
 
         qty_before, cash_before = state.qty, cash

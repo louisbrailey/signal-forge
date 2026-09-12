@@ -115,6 +115,10 @@ class GridDecision:
     usd: float = 0.0
     buy_level: float = 0.0
     sell_level: float = 0.0
+    # "No order, but adopt ``close`` as the new anchor anyway" — only ever set
+    # for a rise past the sell level with nothing to sell, and only when
+    # ``GridParams.reanchor_on_untradeable_rise`` is on.
+    reanchor: bool = False
 
     @property
     def triggered(self) -> bool:
@@ -130,6 +134,7 @@ class GridDecision:
             "usd": round(self.usd, 6),
             "buy_level": round(self.buy_level, 6),
             "sell_level": round(self.sell_level, 6),
+            "reanchor": self.reanchor,
         }
 
 
@@ -234,7 +239,19 @@ def decide(
 
     if close >= sell_level - _EPS:
         if qty <= 0:
-            return GridDecision(NONE, "skip_no_position", anchor, close, 0.0, buy_level, sell_level)
+            # Nothing to sell. Whether the anchor ratchets up to this close is
+            # the one genuine ambiguity in the operator's rule — see
+            # GridParams.reanchor_on_untradeable_rise.
+            return GridDecision(
+                NONE,
+                "skip_no_position",
+                anchor,
+                close,
+                0.0,
+                buy_level,
+                sell_level,
+                reanchor=params.reanchor_on_untradeable_rise,
+            )
         usd = min(params.sell_usd, qty * close)
         if usd + _EPS < params.min_order_usd:
             return GridDecision(
@@ -499,6 +516,8 @@ def run_grid_backtest(
             if dec.action == NONE:
                 if dec.reason != "no_trigger":
                     skip_counts[dec.reason] = skip_counts.get(dec.reason, 0) + 1
+                if dec.reanchor:
+                    st.anchor = close  # the grid ratchets up with price
                 continue
             pending[sym] = _Pending(decision=dec, decision_date=day)
 
@@ -531,8 +550,12 @@ def run_grid_backtest(
         equity_curve[-1][0] if equity_curve else None,
         params,
     )
+    # "At cap" means the cap actually bit: the symbol bought at least once and
+    # reached a cost basis where one more buy would have breached the cap.
     at_cap = sum(
-        1 for st in state.values() if st.max_cost_basis >= params.per_symbol_cap - params.buy_usd
+        1
+        for st in state.values()
+        if st.buys and st.max_cost_basis + params.buy_usd > params.per_symbol_cap + _EPS
     )
     return GridBacktestResult(
         params=params,

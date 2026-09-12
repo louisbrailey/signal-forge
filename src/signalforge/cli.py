@@ -2044,6 +2044,16 @@ def grid_backtest_cmd(
     drop_pct: Annotated[float, typer.Option(help="Buy trigger as a FRACTION (0.05 = 5%).")] = 0.05,
     rise_pct: Annotated[float, typer.Option(help="Sell trigger as a FRACTION (0.05 = 5%).")] = 0.05,
     min_order_usd: Annotated[float, typer.Option(help="Skip orders below this notional.")] = 1.0,
+    reanchor_on_untradeable_rise: Annotated[
+        bool,
+        typer.Option(
+            help=(
+                "Re-anchor when a rise fires with nothing to sell (the grid ratchets up with "
+                "price). Off = the strict literal reading, which strands any symbol that rises "
+                "before it ever dips."
+            )
+        ),
+    ] = True,
     benchmark: Annotated[str, typer.Option(help="Buy-and-hold benchmark symbol.")] = "SPY",
     snapshot_key: Annotated[
         str, typer.Option(help="Take the symbol list from this DataSnapshot key instead.")
@@ -2134,6 +2144,7 @@ def grid_backtest_cmd(
             drop_pct=drop_pct,
             rise_pct=rise_pct,
             min_order_usd=min_order_usd,
+            reanchor_on_untradeable_rise=reanchor_on_untradeable_rise,
             universe_name=uni.name,
             universe_size=len(uni.symbols),
         )

@@ -284,3 +284,44 @@ def test_budget_consistency_flag() -> None:
 
     also = GridParams(starting_cash=50_000.0, per_symbol_cap=50.0, universe_size=1_000)
     assert also.budget_is_consistent
+
+
+def test_a_rise_with_nothing_to_sell_ratchets_the_anchor_by_default() -> None:
+    """The operator's rule is silent here; the default keeps the grid alive."""
+    p = GridParams(starting_cash=1_000.0)
+    d = decide(close=106.0, anchor=100.0, qty=0.0, cost_basis=0.0, cash=1_000.0, params=p)
+    assert d.action == "none" and d.reason == "skip_no_position"
+    assert d.reanchor is True
+
+    strict = p.with_(reanchor_on_untradeable_rise=False)
+    d2 = decide(close=106.0, anchor=100.0, qty=0.0, cost_basis=0.0, cash=1_000.0, params=strict)
+    assert d2.reanchor is False
+
+
+def test_a_symbol_that_rises_before_it_dips_still_trades_under_the_default() -> None:
+    """A steady climber then a 5% pullback: the ratcheting anchor must catch it."""
+    closes = [100.0, 106.0, 112.0, 119.0, 126.0, 133.0, 126.0, 126.0]
+    series = {"UP": _series("UP", closes)}
+
+    ratchet = run_grid_backtest(series, GridParams(starting_cash=1_000.0))
+    assert [t.side for t in ratchet.trades] == [BUY]
+    # It bought off the 133 -> 126 pullback (-5.3%), not off the original 100 anchor.
+    assert ratchet.trades[0].anchor_before == pytest.approx(133.0)
+
+    strict = run_grid_backtest(
+        series, GridParams(starting_cash=1_000.0, reanchor_on_untradeable_rise=False)
+    )
+    assert not strict.trades, "the strict reading strands the symbol at its first anchor"
+    assert strict.skip_counts.get("skip_no_position", 0) >= 5
+
+
+def test_symbols_at_cap_counts_only_symbols_the_cap_actually_bit() -> None:
+    """A symbol that never bought is not "at cap", even when cap == buy_usd."""
+    p = GridParams(starting_cash=1_000.0, per_symbol_cap=5.0, buy_usd=5.0)
+    series = {
+        "DIP": _series("DIP", [100.0, 94.0, 94.0]),  # buys once -> immediately at cap
+        "FLAT": _series("FLAT", [100.0, 100.0, 100.0]),  # never trades
+    }
+    res = run_grid_backtest(series, p, symbols=["DIP", "FLAT"])
+    assert res.symbols_traded == 1
+    assert res.symbols_at_cap == 1

@@ -220,6 +220,9 @@ class GridConfig(BaseModel):
     drop_pct: PositiveFloat = 0.05  # fraction, not percent: 0.05 == 5%
     rise_pct: PositiveFloat = 0.05
     min_order_usd: NonNegativeFloat = 1.0
+    # See GridParams.reanchor_on_untradeable_rise: a rise past the sell level
+    # with nothing to sell still ratchets the anchor up to that close.
+    reanchor_on_untradeable_rise: bool = True
     account_name: str = "grid"
     source: str = "massive_grouped"  # ohlcv_daily.source the live job reads
 

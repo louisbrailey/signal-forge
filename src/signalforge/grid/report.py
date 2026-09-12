@@ -74,6 +74,12 @@ def render_report_md(
             "drop_pct": f"{p.drop_pct:.2%}",
             "rise_pct": f"{p.rise_pct:.2%}",
             "min_order_usd": f"${_fmt(p.min_order_usd)}",
+            "re-anchor on a rise with nothing to sell": (
+                "yes (the grid ratchets up with price)"
+                if p.reanchor_on_untradeable_rise
+                else "no (strict literal reading — a symbol that rises before it ever dips "
+                "is stranded forever)"
+            ),
             "universe_name": p.universe_name,
             "universe_size": p.universe_size,
             "costs": p.costs_label,
@@ -222,8 +228,16 @@ def render_report_md(
         f"3. `close >= anchor x (1 + {p.rise_pct:.2%})` → SELL ${_fmt(p.sell_usd)}, capped at the "
         "position's market value, then anchor = that close.",
         "4. Fills at the **next session's open** with slippage + half-spread against the trade.",
-        "5. The anchor moves only when an order actually fills — a buy skipped for the cap, for "
-        "cash, or for the minimum notional leaves the level armed.",
+        "5. The anchor moves when an order fills. A buy skipped for the cap, for cash, or for "
+        "the minimum notional leaves the level armed."
+        + (
+            " A rise past the sell level with nothing to sell re-anchors anyway, so the grid "
+            "follows price (`reanchor_on_untradeable_rise`)."
+            if p.reanchor_on_untradeable_rise
+            else " A rise past the sell level with nothing to sell does NOT re-anchor "
+            "(`reanchor_on_untradeable_rise` is off), so a symbol that rises before it ever "
+            "dips can never trade again."
+        ),
         "6. No leverage, no shorting: cash never goes negative and a sell never exceeds holdings.",
         "",
         "## Parameters",

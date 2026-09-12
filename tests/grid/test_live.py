@@ -135,6 +135,40 @@ def test_idempotent_per_symbol_and_session(session: Session, write_bars: BarWrit
     assert float(pos.anchor_price) == pytest.approx(anchor_after_first)
 
 
+def test_live_ratchets_the_anchor_on_a_rise_with_nothing_to_sell(
+    session: Session, write_bars: BarWriter
+) -> None:
+    # A steady climber: no position to sell, so the anchor must follow price.
+    write_bars("AAA", [100.0, 106.0, 112.0, 119.0], [100.0, 106.0, 112.0, 119.0])
+    _run(session, 1)  # anchor = 100.0
+    pos = session.scalar(select(GridPosition).where(GridPosition.symbol == "AAA"))
+    assert pos is not None and float(pos.anchor_price) == pytest.approx(100.0)
+
+    r = _run(session, 2)  # d1 close 106.0 >= 105.0, nothing to sell -> re-anchor
+    assert r.reanchored == 1 and r.trades == 0  # type: ignore[attr-defined]
+    session.refresh(pos)
+    assert float(pos.anchor_price) == pytest.approx(106.0)
+    assert not list(session.scalars(select(GridTradeRow)))
+
+    # Re-running the same session is still a no-op (the new anchor no longer fires).
+    again = _run(session, 2)
+    assert again.reanchored == 0 and again.trades == 0  # type: ignore[attr-defined]
+    session.refresh(pos)
+    assert float(pos.anchor_price) == pytest.approx(106.0)
+
+
+def test_live_strict_reading_leaves_the_anchor_stranded(
+    session: Session, write_bars: BarWriter
+) -> None:
+    write_bars("AAA", [100.0, 106.0, 112.0, 119.0], [100.0, 106.0, 112.0, 119.0])
+    _run(session, 1, reanchor_on_untradeable_rise=False)
+    r = _run(session, 2, reanchor_on_untradeable_rise=False)
+    assert r.reanchored == 0  # type: ignore[attr-defined]
+    assert r.skipped_triggers.get("skip_no_position") == 1  # type: ignore[attr-defined]
+    pos = session.scalar(select(GridPosition).where(GridPosition.symbol == "AAA"))
+    assert pos is not None and float(pos.anchor_price) == pytest.approx(100.0)
+
+
 def test_grid_trade_uniqueness_is_enforced_by_the_database(
     session: Session, write_bars: BarWriter
 ) -> None:

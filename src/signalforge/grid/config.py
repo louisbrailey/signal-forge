@@ -38,6 +38,22 @@ class GridParams:
     # Per-order minimum notional: an order smaller than this is skipped rather
     # than sent, because a real fractional-share broker will not route it.
     min_order_usd: float = 1.0
+    # The operator's rule says a rise past ``anchor x (1 + rise_pct)`` sells and
+    # re-anchors, but it is silent on what happens when there is NOTHING to sell.
+    #
+    # True (default): the anchor still ratchets up to that close. The grid
+    #   follows price, which is what makes it a grid.
+    # False (strict literal reading): no sell means no action at all, so the
+    #   anchor stays put. A symbol that rises before it ever dips is then
+    #   stranded forever — its anchor can never be reached again, so it never
+    #   trades. Measured on the 10-year 100-symbol run that silently excluded 35
+    #   of 100 symbols, including NVDA, MSFT and AVGO, so the default is True and
+    #   every report states which reading produced it.
+    #
+    # Buy triggers skipped for the cap, for cash, or for the minimum notional
+    # NEVER re-anchor under either setting: those are capacity limits on an order
+    # the rule genuinely wanted, so the level stays armed.
+    reanchor_on_untradeable_rise: bool = True
     # Project cost model: 3 bps slippage + half of a 5 bps spread, commission 0.
     slippage_bps: float = 3.0
     spread_bps: float = 5.0
@@ -102,6 +118,7 @@ class GridParams:
             "drop_pct": self.drop_pct,
             "rise_pct": self.rise_pct,
             "min_order_usd": self.min_order_usd,
+            "reanchor_on_untradeable_rise": self.reanchor_on_untradeable_rise,
             "slippage_bps": self.slippage_bps,
             "spread_bps": self.spread_bps,
             "commission_per_share": self.commission_per_share,
