@@ -24,7 +24,14 @@ from signalforge.db.models import (
     StrategyPromotionEvaluation,
     StrategyVersion,
 )
-from signalforge.domain import FeedType, Horizon, LatencyCategory, StrategyStatus
+from signalforge.domain import (
+    Direction,
+    FeedType,
+    Horizon,
+    LatencyCategory,
+    QualityGate,
+    StrategyStatus,
+)
 from signalforge.research import approved_scope_scan as mod
 from signalforge.research.approved_scope_scan import (
     AUDIT_BLOCKED,
@@ -769,6 +776,34 @@ def test_each_versions_candidates_match_only_its_own_scope(session: Session) -> 
             universe=frozenset(x.upper() for x in (run.universe_json or ())),
         )
 
+    def _candidate(run: ScanRun, version_id: int) -> Candidate:
+        """A candidate on this run, as persist_scan would write one. The
+        fixture universes legitimately produce no qualified signal over this
+        window, so assert on a candidate we put there ourselves rather than
+        on an empty set — the scope verdict is a property of the candidate's
+        ScanRun, which is exactly what dispatch and the ledger read."""
+        inst = session.scalar(select(Instrument).where(Instrument.symbol == run.universe_json[0]))
+        assert inst is not None
+        cand = Candidate(
+            scan_run_id=run.id,
+            instrument_id=inst.id,
+            strategy_version_id=version_id,
+            horizon=run.horizon,
+            direction=Direction.LONG,
+            entry_zone_low=10.0,
+            entry_zone_high=10.5,
+            invalidation_level=9.0,
+            time_stop_days=10,
+            reward_risk_estimate=2.0,
+            risk_dollars=100.0,
+            risk_pct_of_account=0.005,
+            quality_gate_status=QualityGate.PASSED,
+        )
+        session.add(cand)
+        session.flush()
+        return cand
+
+    checked = 0
     for entry in report.runs:
         run = session.get(ScanRun, int(entry["scan_run_id"]))
         assert run is not None
@@ -776,9 +811,10 @@ def test_each_versions_candidates_match_only_its_own_scope(session: Session) -> 
         other = next(v for k, v in version_ids.items() if v != own)
         assert _matches(run, own) is True, f"run {run.id} is out of scope for its own version"
         assert _matches(run, other) is False, f"run {run.id} wrongly matched the other version"
-        # and every candidate this run produced for one of the two approved
-        # versions inherits exactly that verdict
-        approved_ids = set(version_ids.values())
-        for cand in session.scalars(select(Candidate).where(Candidate.scan_run_id == run.id)):
-            if cand.strategy_version_id in approved_ids:
-                assert _matches(run, cand.strategy_version_id) is (cand.strategy_version_id == own)
+        # a candidate on this run is in scope for the version this universe
+        # was approved for, and out of scope for the other one
+        for cand in (_candidate(run, own), _candidate(run, other)):
+            expected = cand.strategy_version_id == own
+            assert _matches(run, cand.strategy_version_id) is expected
+            checked += 1
+    assert checked == 4
