@@ -965,45 +965,77 @@ def ops_status_context(session: Session) -> dict[str, Any]:
         "will_fire": worker["running"],
     }
 
+    # --- the distinct approved universes (one per approved strategy version's
+    # own dataset snapshot + source) — every data gate below is evaluated
+    # PER UNIVERSE, so a stale 150-symbol universe never masks, or is masked
+    # by, a fresh 24-symbol one.
+    from signalforge.research.approved_scope_scan import (
+        approved_horizons,
+        approved_universes,
+        universe_readiness,
+    )
+
+    universes_error: str | None = None
+    try:
+        universes, skipped_versions = approved_universes(session)
+    except Exception as exc:  # never let the status page itself fail
+        universes, skipped_versions, universes_error = [], [], str(exc)
+
     # --- daily-bar freshness vs the expected (last completed) session ---
     expected_session = last_completed_session(now)
     research_source = _get_settings_provider()
     research_symbols = list(effective_research_config(session).universe)
-    newest_bar = session.scalar(
-        select(func.max(OHLCVDaily.session_date))
-        .join(Instrument, Instrument.id == OHLCVDaily.instrument_id)
-        .where(OHLCVDaily.source == research_source, Instrument.symbol.in_(research_symbols))
-    )
-    behind = 0
-    if newest_bar is not None:
-        d = newest_bar
-        while d < expected_session:
-            d += timedelta(days=1)
-            if d.weekday() < 5:
-                behind += 1
-    freshness = {
+
+    def _sessions_behind(bar: date | None) -> int:
+        n = 0
+        if bar is not None:
+            d = bar
+            while d < expected_session:
+                d += timedelta(days=1)
+                if d.weekday() < 5:
+                    n += 1
+        return n
+
+    def _newest_bar(symbols: list[str], src: str) -> date | None:
+        return session.scalar(
+            select(func.max(OHLCVDaily.session_date))
+            .join(Instrument, Instrument.id == OHLCVDaily.instrument_id)
+            .where(OHLCVDaily.source == src, Instrument.symbol.in_(symbols))
+        )
+
+    per_universe: list[dict[str, Any]] = []
+    for u in universes:
+        u_newest = _newest_bar(list(u.symbols), u.source)
+        per_universe.append(
+            {
+                "dataset_snapshot_id": u.dataset_snapshot_id,
+                "dataset_key": u.dataset_key,
+                "source": u.source,
+                "n_symbols": len(u.symbols),
+                "newest_bar": u_newest.isoformat() if u_newest else None,
+                "sessions_behind": _sessions_behind(u_newest) if u_newest else None,
+                "current": u_newest is not None and u_newest >= expected_session,
+            }
+        )
+    newest_bar = _newest_bar(research_symbols, research_source)
+    freshness: dict[str, Any] = {
         "expected_session": expected_session.isoformat(),
         "newest_bar": newest_bar.isoformat() if newest_bar else None,
-        "sessions_behind": behind if newest_bar else None,
+        "sessions_behind": _sessions_behind(newest_bar) if newest_bar else None,
         "current": newest_bar is not None and newest_bar >= expected_session,
         "source": research_source,
         "note": "exchange holidays are not modelled: a holiday shows as 1 session behind",
+        # One entry per distinct approved universe — the configured research
+        # universe above is NOT necessarily any approved strategy's universe.
+        "per_universe": per_universe,
     }
     pending, pending_reason = catch_up_pending(now)
     catch_up = {"pending": pending, "reason": pending_reason}
 
     # --- approved-scope scan readiness (the same gate the scheduled job uses) ---
     # /ops must never look "ready" while the daily data-freshness gate would
-    # block the approved-scope scan: evaluate it live, and show the exact
-    # reason plus the last SUCCESSFUL daily-bar ingest time.
-    from signalforge.config import get_settings as _get_settings
-    from signalforge.research.approved_scope_scan import (
-        APPROVED_VARIANT,
-        approved_horizons,
-        data_readiness,
-    )
-    from signalforge.research.fb_meta_universe_comparison import resolve_variant
-
+    # block the approved-scope scan: evaluate it live, per approved universe,
+    # and show the exact reason plus the last SUCCESSFUL daily-bar ingest time.
     last_ok_ingest = session.scalar(
         select(IngestionRun)
         .where(IngestionRun.feed_type == FeedType.BAR_DAILY, IngestionRun.status == "ok")
@@ -1020,30 +1052,86 @@ def ops_status_context(session: Session) -> dict[str, Any]:
         ),
         "dataset_key": None,
         "n_symbols": 0,
+        "universes": [],
+        "skipped_versions": skipped_versions,
     }
-    if approved_horizons(session):
-        try:
-            syms, snap = resolve_variant(session, variant=APPROVED_VARIANT)
-            reason = data_readiness(
-                session, syms, source=_get_settings().market_data_provider, now=now
+    if universes_error is not None:
+        readiness.update(ready=False, reason=f"readiness check failed: {universes_error}")
+    elif not universes:
+        if approved_horizons(session):
+            readiness["reason"] = (
+                "PAPER_APPROVED strategies exist but none has a usable approved scope — "
+                "nothing can be scanned in scope"
             )
+    else:
+        try:
+            rows = universe_readiness(session, universes, now=now)
             readiness.update(
-                ready=reason is None,
-                reason=reason or "fresh, complete daily data for the approved universe",
-                dataset_key=snap.key,
-                n_symbols=len(syms),
+                universes=rows,
+                ready=all(r["ready"] for r in rows),
+                reason=(
+                    rows[0]["reason"]
+                    if len(rows) == 1
+                    else "; ".join(
+                        f"snapshot {r['dataset_snapshot_id']} ({r['dataset_key']}): {r['reason']}"
+                        for r in rows
+                    )
+                ),
+                dataset_key=rows[0]["dataset_key"] if len(rows) == 1 else None,
+                n_symbols=(
+                    rows[0]["n_symbols"]
+                    if len(rows) == 1
+                    else len({s.upper() for u in universes for s in u.symbols})
+                ),
             )
         except Exception as exc:  # never let the status page itself fail
             readiness.update(ready=False, reason=f"readiness check failed: {exc}")
 
     # --- readiness checklist --------------------------------------------------
-    checks = [
+    # The two data gates are listed ONCE PER APPROVED UNIVERSE: with two
+    # approved snapshots a single collapsed verdict would either hide a
+    # blocked universe or condemn a healthy one.
+    def _universe_label(row: dict[str, Any]) -> str:
+        return (
+            f"snapshot {row['dataset_snapshot_id']} {row['dataset_key']} "
+            f"({row['n_symbols']} symbols, {row['source']})"
+        )
+
+    readiness_checks: list[tuple[str, bool, str]] = [
+        (
+            f"Approved-scope scan data readiness — {_universe_label(r)}",
+            bool(r["ready"]),
+            f"{r['reason']} (last ok daily-bar ingest: "
+            f"{readiness['last_ok_ingest_at'] or 'never'})",
+        )
+        for r in readiness["universes"]
+    ] or [
         (
             "Approved-scope scan data readiness",
             bool(readiness["ready"]),
             f"{readiness['reason']} (last ok daily-bar ingest: "
             f"{readiness['last_ok_ingest_at'] or 'never'})",
-        ),
+        )
+    ]
+    bars_checks: list[tuple[str, bool, str]] = [
+        (
+            f"Daily bars current for last completed session — {_universe_label(r)}",
+            bool(r["current"]),
+            f"newest {r['newest_bar'] or 'none'} vs expected {freshness['expected_session']}"
+            + (f" ({r['sessions_behind']} behind)" if r["sessions_behind"] else ""),
+        )
+        for r in per_universe
+    ] or [
+        (
+            "Daily bars current for last completed session",
+            bool(freshness["current"]),
+            f"newest {freshness['newest_bar'] or 'none'} vs expected "
+            f"{freshness['expected_session']}"
+            + (f" ({freshness['sessions_behind']} behind)" if freshness["sessions_behind"] else ""),
+        )
+    ]
+    checks = [
+        *readiness_checks,
         (
             "Worker running (heartbeat)",
             bool(worker["running"]),
@@ -1053,13 +1141,7 @@ def ops_status_context(session: Session) -> dict[str, Any]:
                 else "no heartbeat ever recorded — run-scheduler has not been started"
             ),
         ),
-        (
-            "Daily bars current for last completed session",
-            bool(freshness["current"]),
-            f"newest {freshness['newest_bar'] or 'none'} vs expected "
-            f"{freshness['expected_session']}"
-            + (f" ({freshness['sessions_behind']} behind)" if freshness["sessions_behind"] else ""),
-        ),
+        *bars_checks,
         ("No catch-up pending", not catch_up["pending"], catch_up["reason"]),
         ("Database at migration head", bool(db["at_head"]), db.get("current_revision") or "?"),
         ("All data feeds fresh", not any_stale, "stale or unregistered" if any_stale else "ok"),

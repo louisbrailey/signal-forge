@@ -280,12 +280,17 @@ def job_strategy_health() -> None:
 
 
 def job_approved_scope_scan() -> None:
-    """Scan ONLY the PAPER_APPROVED strategies' horizons on EXACTLY their
-    approved ``ex_meta`` dataset, so the candidates can pass the five-way
-    approval-scope match at alert time. Hard-gated on fresh, complete data
+    """Scan, per PAPER_APPROVED strategy version, EXACTLY the dataset that
+    version's own approval was granted on (its newest passing evaluation's
+    dataset snapshot and source), so the candidates can pass the five-part
+    approval-scope match at alert time. Versions sharing a (snapshot,
+    horizon, source) are scanned together, once; two versions approved on
+    two different snapshots produce two scans. Hard-gated, PER APPROVED
+    UNIVERSE, on fresh, complete data
     (``research.approved_scope_scan.data_readiness``) — a stale feed, a
-    non-ok ingestion, or missing bars for the latest session blocks it and
-    records why. Never intraday, never options, never an alert.
+    non-ok ingestion, or missing bars for the latest session blocks that
+    universe (and only that universe) and records why. Never intraday,
+    never options, never an alert.
 
     When the operator setting ``auto_simulate_qualified_signals`` is ON, the
     scan's own gate-PASSED candidates are then offered to
@@ -298,6 +303,8 @@ def job_approved_scope_scan() -> None:
     with session_scope(write=True) as session:
         report = run_approved_scope_scan(session)
         if report.ran and report.runs:
+            # every group's scan run, so a version approved on a second
+            # snapshot is auto-simulated from its OWN scan, not skipped
             sim = auto_simulate_scan_runs(session, [int(r["scan_run_id"]) for r in report.runs])
             _log.info(
                 "auto_simulate.done",
@@ -310,6 +317,19 @@ def job_approved_scope_scan() -> None:
             )
     if not report.ran:
         _log.warning("approved_scope_scan.not_run", reason=report.blocked_reason)
+    for blocked in report.blocked_universes:
+        _log.warning(
+            "approved_scope_scan.universe_blocked",
+            dataset_snapshot_id=blocked["dataset_snapshot_id"],
+            dataset_key=blocked["dataset_key"],
+            reason=blocked["reason"],
+        )
+    for skipped in report.skipped_versions:
+        _log.warning(
+            "approved_scope_scan.version_skipped",
+            strategy_version_id=skipped["strategy_version_id"],
+            reason=skipped["reason"],
+        )
 
 
 # daily_eod_update (cron) and catch_up (interval) are different APScheduler

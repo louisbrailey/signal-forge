@@ -16,10 +16,18 @@
 
 <div class="mt-3 rounded-lg border p-3 text-sm {{ 'border-emerald-300 bg-emerald-50 text-emerald-900' if overall_ready else 'border-red-300 bg-red-50 text-red-900' }}">
   <span class="rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-white {{ 'bg-emerald-600' if overall_ready else 'bg-red-600' }}">{{ 'READY' if overall_ready else 'NOT READY' }}</span>
-  {% if readiness.ready %}
-  <strong>Approved-scope scan can run:</strong> {{ readiness.reason }} — {{ readiness.n_symbols }} symbols, snapshot <span class="font-mono">{{ readiness.dataset_key }}</span>.
+  {% if readiness.universes %}
+  <strong>Approved-scope scan — {{ readiness.universes | length }} approved universe(s):</strong>
+  <ul class="mt-1 space-y-0.5 text-xs">
+    {% for u in readiness.universes %}
+    <li>{{ pill(u.ready, 'can run', 'blocked') }} snapshot <span class="font-mono">{{ u.dataset_key }}</span> (#{{ u.dataset_snapshot_id }}, {{ u.n_symbols }} symbols, {{ u.source }}, {{ u.horizons | join(', ') }}) — {{ u.reason }}</li>
+    {% endfor %}
+  </ul>
   {% else %}
   <strong>Approved-scope scan is blocked:</strong> {{ readiness.reason }}.
+  {% endif %}
+  {% if readiness.skipped_versions %}
+  <span class="block text-xs">Not scanned: {% for s in readiness.skipped_versions %}{{ s.strategy }} v{{ s.version }} ({{ s.reason }}){% if not loop.last %}; {% endif %}{% endfor %}.</span>
   {% endif %}
   <span class="block text-xs">Last successful daily-bar ingest: {{ readiness.last_ok_ingest_at or 'never' }}{% if not overall_ready and readiness.ready %} — another checklist item below is failing{% endif %}.</span>
 </div>
@@ -41,7 +49,11 @@
     <dt class="text-slate-400">Next scheduled EOD update</dt>
     <dd>{% if next_scheduled.eod_update_from_worker %}{{ next_scheduled.eod_update_from_worker[:16] }} UTC (from worker){% else %}intended {{ next_scheduled.eod_update_intended_et[:16] }} ET — <span class="text-red-700">will not fire: no worker</span>{% endif %}</dd>
     <dt class="text-slate-400">Daily-bar freshness</dt>
-    <dd>{{ pill(freshness.current, 'current', (freshness.sessions_behind ~ ' session(s) behind') if freshness.sessions_behind else 'no bars') }} newest {{ freshness.newest_bar or '—' }} vs expected session {{ freshness.expected_session }} <span class="text-slate-400">({{ freshness.source }}; {{ freshness.note }})</span></dd>
+    <dd>{{ pill(freshness.current, 'current', (freshness.sessions_behind ~ ' session(s) behind') if freshness.sessions_behind else 'no bars') }} newest {{ freshness.newest_bar or '—' }} vs expected session {{ freshness.expected_session }} <span class="text-slate-400">({{ freshness.source }}; {{ freshness.note }})</span>
+      {% for u in freshness.per_universe %}
+      <span class="block">{{ pill(u.current, 'current', (u.sessions_behind ~ ' session(s) behind') if u.sessions_behind else 'no bars') }} approved universe <span class="font-mono">{{ u.dataset_key }}</span> ({{ u.n_symbols }} symbols, {{ u.source }}) — newest {{ u.newest_bar or '—' }}</span>
+      {% endfor %}
+    </dd>
     <dt class="text-slate-400">Catch-up</dt>
     <dd>{{ pill(not catch_up.pending, 'not pending', 'PENDING') }} {{ catch_up.reason }}</dd>
   </dl>

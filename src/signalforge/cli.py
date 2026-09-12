@@ -1761,11 +1761,14 @@ def scan_approved_scope_cmd(
         ),
     ] = False,
 ) -> None:
-    """Scan every horizon that has a PAPER_APPROVED strategy, using EXACTLY
-    that strategy's approved dataset (the ex_meta variant, not the default
-    watchlist) so the candidates can pass research.approval_scope's five-way
-    match. The same code runs automatically at the end of the daily EOD job;
-    both are hard-gated on fresh, complete data unless --force.
+    """Scan, per PAPER_APPROVED strategy version, EXACTLY the dataset that
+    version's own approval was granted on (its newest passing evaluation's
+    dataset snapshot and source — not the default watchlist) so the
+    candidates can pass research.approval_scope's five-part match. Versions
+    sharing a (snapshot, horizon, source) are scanned together. The same
+    code runs automatically at the end of the daily EOD job; both are
+    hard-gated, per approved universe, on fresh, complete data unless
+    --force.
 
     Read-only research: creates ScanRun/Candidate rows only, never an
     alert, paper position, or brokerage interaction.
@@ -1776,18 +1779,32 @@ def scan_approved_scope_cmd(
 
     with session_scope(write=True) as session:
         report = run_approved_scope_scan(session, enforce_readiness=not force)
+    for s in report.skipped_versions:
+        typer.secho(
+            f"  SKIPPED strategy_version_id={s['strategy_version_id']} "
+            f"({s['strategy']} v{s['version']}): {s['reason']}",
+            fg=typer.colors.YELLOW,
+        )
+    for b in report.blocked_universes:
+        typer.secho(
+            f"  BLOCKED snapshot {b['dataset_snapshot_id']} ({b['dataset_key']}, "
+            f"{b['n_symbols']} symbols, {b['source']}): {b['reason']}",
+            fg=typer.colors.YELLOW,
+        )
     if not report.ran:
         typer.secho(f"NOT RUN — {report.blocked_reason}", fg=typer.colors.YELLOW, bold=True)
         raise typer.Exit(code=2)
     typer.echo(
-        f"Scanned {report.n_symbols} symbols (dataset_snapshot_id={report.dataset_snapshot_id}, "
-        f"key={report.dataset_key!r}) for horizons: {', '.join(report.horizons)}"
+        f"Scanned {len(report.runs)} approved group(s) over {report.n_symbols} distinct symbols; "
+        f"horizons: {', '.join(report.horizons)}"
         + ("  [readiness gate BYPASSED with --force]" if force else "")
     )
     for r in report.runs:
         typer.secho(
-            f"  {r['horizon']}: scanned={r['scanned']} candidates={r['candidates']} "
-            f"no_trade={r['no_trade']} dataset_snapshot_id={r['dataset_snapshot_id']}",
+            f"  {r['horizon']} on snapshot {r['dataset_snapshot_id']} ({r['dataset_key']}, "
+            f"{r['n_symbols']} symbols, {r['source']}) for strategy_version_ids="
+            f"{r['strategy_version_ids']}: scanned={r['scanned']} "
+            f"candidates={r['candidates']} no_trade={r['no_trade']}",
             fg=typer.colors.GREEN,
         )
     typer.echo("Research signal only — no order was placed.")
@@ -1803,6 +1820,7 @@ def paper_probation_status_cmd() -> None:
     from signalforge.db.session import session_scope
     from signalforge.domain import StrategyStatus
     from signalforge.research.approval_scope import approved_scopes
+    from signalforge.research.approved_scope_scan import approved_scan_groups
     from signalforge.settings_store import effective_research_config, get_setting
 
     with session_scope() as session:
@@ -1820,6 +1838,9 @@ def paper_probation_status_cmd() -> None:
         if not rows:
             typer.echo("No PAPER_APPROVED strategy exists.")
             return
+        groups, skipped = approved_scan_groups(session)
+        scanned_by_version = {vid: g for g in groups for vid in g.strategy_version_ids}
+        skipped_by_version = {int(s["strategy_version_id"]): s["reason"] for s in skipped}
         for strat, ver in rows:
             typer.echo(f"\n{strat.name} v{ver.version} (strategy_version_id={ver.id})")
             for scope in approved_scopes(session, ver.id):
@@ -1839,6 +1860,22 @@ def paper_probation_status_cmd() -> None:
                 f"  live research config hash {live_hash[:12]} {verdict}",
                 fg=typer.colors.GREEN if in_scope else typer.colors.RED,
             )
+            grp = scanned_by_version.get(ver.id)
+            if grp is not None:
+                typer.secho(
+                    f"  approved-scope scan: {grp.horizon.value} on snapshot "
+                    f"{grp.dataset_snapshot_id} ({grp.dataset_key}, {len(grp.symbols)} symbols, "
+                    f"{grp.source})",
+                    fg=typer.colors.GREEN,
+                )
+            else:
+                typer.secho(
+                    "  approved-scope scan: NOT SCANNED — "
+                    + skipped_by_version.get(
+                        ver.id, "version is not eligible (INTRADAY, or version not PAPER_APPROVED)"
+                    ),
+                    fg=typer.colors.RED,
+                )
     typer.echo("\nResearch signal only — no order was placed.")
 
 
@@ -2333,6 +2370,7 @@ def _activation_preconditions() -> list[tuple[str, bool, str]]:
     from signalforge.db.session import session_scope
     from signalforge.domain import StrategyStatus
     from signalforge.research.approval_scope import approved_scopes
+    from signalforge.research.approved_scope_scan import approved_scan_groups
     from signalforge.settings_store import effective_research_config, get_setting
 
     checks: list[tuple[str, bool, str]] = []
@@ -2346,8 +2384,28 @@ def _activation_preconditions() -> list[tuple[str, bool, str]]:
             )
         ).all()
         names = [f"{s.name} v{v.version}" for s, v in approved]
+        # NOT a fixed count: any number of approved versions is fine, on any
+        # number of dataset snapshots — what must hold is that EVERY one of
+        # them is actually reachable by the approved-scope scan, i.e. its
+        # newest approved scope resolves to a live, scannable universe.
+        groups, skipped = approved_scan_groups(session)
+        scannable = {vid for g in groups for vid in g.strategy_version_ids}
+        unreachable = [
+            f"{s.name} v{v.version} (id={v.id})" for s, v in approved if v.id not in scannable
+        ]
         checks.append(
-            ("exactly two PAPER_APPROVED strategy versions", len(approved) == 2, ", ".join(names))
+            (
+                "every PAPER_APPROVED version has a live-matching scope",
+                bool(approved) and not unreachable,
+                (
+                    f"{len(approved)} approved ({', '.join(names)}) on "
+                    f"{len({g.dataset_snapshot_id for g in groups})} snapshot(s)"
+                    if not unreachable
+                    else "unreachable: "
+                    + "; ".join(unreachable)
+                    + (" — " + "; ".join(str(s["reason"]) for s in skipped) if skipped else "")
+                ),
+            )
         )
         scoped = all(approved_scopes(session, v.id) for _s, v in approved)
         checks.append(
@@ -2394,21 +2452,50 @@ def _activation_preconditions() -> list[tuple[str, bool, str]]:
         checks.append(
             ("kill switch released", not ops["kill_switch"].active, ops["kill_switch"].reason)
         )
-        checks.append(
-            (
-                "daily bars current for last completed session",
-                bool(ops["freshness"]["current"]),
-                f"newest {ops['freshness']['newest_bar']} vs "
-                f"{ops['freshness']['expected_session']}",
+        # Both data gates are reported PER APPROVED UNIVERSE: with approved
+        # versions on more than one dataset snapshot, one collapsed verdict
+        # would either hide a stale universe or condemn a healthy one.
+        per_universe = ops["freshness"]["per_universe"]
+        if per_universe:
+            for u in per_universe:
+                checks.append(
+                    (
+                        "daily bars current for last completed session — snapshot "
+                        f"{u['dataset_snapshot_id']} {u['dataset_key']} "
+                        f"({u['n_symbols']} symbols, {u['source']})",
+                        bool(u["current"]),
+                        f"newest {u['newest_bar']} vs {ops['freshness']['expected_session']}",
+                    )
+                )
+        else:
+            checks.append(
+                (
+                    "daily bars current for last completed session",
+                    bool(ops["freshness"]["current"]),
+                    f"newest {ops['freshness']['newest_bar']} vs "
+                    f"{ops['freshness']['expected_session']}",
+                )
             )
-        )
-        checks.append(
-            (
-                "approved-scope scan data readiness",
-                bool(ops["readiness"]["ready"]),
-                ops["readiness"]["reason"],
+        readiness_rows = ops["readiness"]["universes"]
+        if readiness_rows:
+            for r in readiness_rows:
+                checks.append(
+                    (
+                        "approved-scope scan data readiness — snapshot "
+                        f"{r['dataset_snapshot_id']} {r['dataset_key']} "
+                        f"({r['n_symbols']} symbols, {r['source']})",
+                        bool(r["ready"]),
+                        str(r["reason"]),
+                    )
+                )
+        else:
+            checks.append(
+                (
+                    "approved-scope scan data readiness",
+                    bool(ops["readiness"]["ready"]),
+                    ops["readiness"]["reason"],
+                )
             )
-        )
     return checks
 
 
