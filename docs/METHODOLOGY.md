@@ -1,9 +1,16 @@
 # Methodology & data entitlement
 
-Signal Forge is **research / paper-trading / education only**. No brokerage
-connection, order placement, or trade mirroring exists anywhere in the codebase
-(enforced by import-linter contract S1). This document records the verified data
-entitlement, the pipeline, the evaluation method, and the honest limitations.
+Signal Forge is **research / paper-trading / education only**, with one narrow,
+written exception recorded on 2026-09-12 in `docs/decisions/ADR-execution-layer.md`:
+a `signalforge.execution` package may submit orders to a broker's **paper/sandbox**
+endpoint, disabled by default and armed only by an audited per-strategy-version
+operator ceremony. **No such code exists yet.** Outside that one package there is no
+brokerage connection, order placement, or trade mirroring anywhere in the codebase,
+and no module of the research/backtest/paper/alerts/LLM/agent/app stack may import it
+(import-linter contracts **S1**, **S15a**, **S15b**). No LLM can reach an order. No
+real-money endpoint is authorised. Everything in this document — the entitlement, the
+pipeline, the evaluation method, the limitations — describes the research path, which
+that ADR leaves unchanged: no promotion gate or threshold is weakened by it.
 
 ## Verified provider entitlement
 

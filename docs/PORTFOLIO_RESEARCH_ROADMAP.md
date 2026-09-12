@@ -26,14 +26,27 @@ extension of it.
 
 ## Non-negotiable boundaries
 
-These hold across every module in this document, with no exception planned
-at any phase:
+These hold across every module in this document. **One of them was superseded in
+writing on 2026-09-12** — see the first bullet; the rest stand with no exception
+planned at any phase:
 
-- **No brokerage, no order placement, no trade mirroring, anywhere.**
-  Enforced structurally by import-linter contract **S1**
-  (`pyproject.toml`) and by `ruff`'s `flake8-tidy-imports` banned-api list
-  (`ib_insync`, `ibapi`, `alpaca_trade_api`, `selenium`, `ccxt` are
-  unimportable project-wide).
+- **SUPERSEDED 2026-09-12 by `docs/decisions/ADR-execution-layer.md`** (full text:
+  `docs/research/options_designs/D6_execution_adr.md`), on the operator's direction
+  of 2026-09-11 that Signal Forge is no longer research-use-only. The bullet used
+  to read "**No brokerage, no order placement, no trade mirroring, anywhere.**"
+  It now reads: **no brokerage surface outside `signalforge.execution`** — which
+  is paper-endpoint-only, disabled by default, and armed only by an audited,
+  hard-expiring, per-strategy-version operator ceremony. **Every other module in
+  this roadmap keeps the original prohibition**, and it is now enforced in *both*
+  directions: import-linter **S1** still makes `ib_insync`, `ibapi`,
+  `alpaca_trade_api`, `selenium` and `ccxt` unimportable project-wide (with
+  `ruff`'s `flake8-tidy-imports` banned-api list saying the same), **S15a** stops
+  the execution layer importing the LLM/agents/alerts/scan/SF1000 layers, and
+  **S15b** stops `signalforge.llm`, `.agents`, `.app`, `.research`, `.alerts`,
+  `.sf1000`, `.backtest`, `.paper`, `.portfolio` and `.scheduler` from importing
+  `signalforge.execution` at all — indirectly as well as directly. No LLM can
+  reach an order. Nothing is armed by default. The kill switch blocks opening and
+  never blocks closing. No real-money endpoint is authorised by that ADR.
 - **No LLM on any decision path.** Contract **S3** forbids
   `signalforge.research`, `.risk`, `.backtest`, `.paper` from importing
   `signalforge.llm`. Every module in this roadmap inherits that boundary;
@@ -61,9 +74,16 @@ at any phase:
   profitability, anywhere in this system.** Every test-methodology section
   below reports risk-adjusted, cost-inclusive, out-of-sample evidence or it
   reports nothing.
-- **No brokerage/Webull/order-placement integration is in scope for any
-  module, at any phase.** This roadmap does not create one and does not
-  plan to.
+- **SUPERSEDED 2026-09-12 by `docs/decisions/ADR-execution-layer.md`.** This
+  bullet used to read "**No brokerage/Webull/order-placement integration is in
+  scope for any module, at any phase.** This roadmap does not create one and does
+  not plan to." It now reads: **no brokerage or order-placement integration is in
+  scope for any module in this roadmap, at any phase.** The single exception lives
+  outside this roadmap, in `signalforge.execution`, under that ADR, on paper
+  endpoints only, and no module described here may import it (contract **S15b**).
+  Browser automation of any venue — Webull included — remains prohibited
+  everywhere with no exception: the ADR's adapter speaks REST over `httpx` and
+  imports no vendor SDK and no browser driver.
 
 ## Module A — Existing U.S. Equity Paper Probation
 

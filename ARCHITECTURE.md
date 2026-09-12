@@ -35,9 +35,17 @@ fixed first and the build is measured against them.
 
 ### 1.2 Explicit non-goals (V1)
 
-- No brokerage connection of any kind.
-- No order execution, no trade routing, no OMS.
-- No browser automation of any brokerage or trading venue.
+- No brokerage connection of any kind **outside `signalforge.execution`**, and
+  that package reaches **paper/sandbox endpoints only** (amended 2026-09-12,
+  `docs/decisions/ADR-execution-layer.md`). No real-money endpoint is authorised
+  by that ADR; it would be a separate operator decision and a separate ADR.
+- No order execution, no trade routing, no OMS **outside `signalforge.execution`**,
+  which is disabled by default, armed only by an audited per-strategy-version
+  operator ceremony with a hard expiry, and armed by nothing at all by default.
+  As of this writing the package does not exist: zero lines of execution code.
+- No browser automation of any brokerage or trading venue — **no exception**. The
+  ADR's adapter speaks REST over `httpx` and imports no vendor SDK and no browser
+  driver, which is why nothing is removed from the S1 denylists.
 - No scraping of Fidelity or any site that prohibits automated access.
 - No unofficial / reverse-engineered brokerage APIs.
 - No LLM-driven entry / exit / sizing decisions.
@@ -61,9 +69,9 @@ These are enforced in code, not just documented. Each has an owning module and a
 
 | # | Invariant | Enforcement point | Test |
 |---|-----------|-------------------|------|
-| S1 | No module imports a brokerage SDK, opens a brokerage URL, or stores a field named like a broker credential. | `import-linter` contract + CI grep denylist | `tests/safety/test_no_broker_surface.py` |
-| S2 | Account import is **manual CSV only**; importer never makes an outbound network call. | `portfolio.import` package has no network client in its dependency graph | `tests/safety/test_import_offline.py` |
-| S3 | No LLM call is on the path that computes direction, entry, stop, target, size, or rank. | `research.*` and `risk.*` packages forbidden (import-linter) from importing `llm.*` | `tests/safety/test_llm_not_in_decision_path.py` |
+| S1 | No module imports a brokerage SDK, opens a brokerage URL, or stores a field named like a broker credential — **outside `signalforge.execution`, which is the only place a broker surface may exist** (amended 2026-09-12, `docs/decisions/ADR-execution-layer.md`). That package is paper-endpoint-only, disabled by default, nothing armed by default, and it imports no vendor SDK and no browser driver, so nothing is removed from the denylists: `ib_insync`, `ibapi`, `alpaca_trade_api`, `selenium`, `ccxt` stay unimportable project-wide. | `import-linter` contract S1 + Ruff `banned-api` + source denylist scan (the four order-submission call strings are allowlisted for the path prefix `src/signalforge/execution/` and nowhere else) | `tests/safety/test_s1_no_broker_surface.py` |
+| S2 | Account import is **manual CSV only**; importer never makes an outbound network call. | `portfolio.import` package has no network client in its dependency graph | `tests/safety/test_s2_import_offline.py` |
+| S3 | No LLM call is on the path that computes direction, entry, stop, target, size, or rank. | `research.*` and `risk.*` packages forbidden (import-linter) from importing `llm.*` | `tests/safety/test_s3_llm_not_in_decision_path.py` |
 | S4 | Signals, ranking, risk checks, backtests are deterministic given (inputs, code version, config hash). | Seeded RNG, no wall-clock in pure functions, config hashing | `tests/research/test_determinism.py` |
 | S5 | Secrets come only from env / local secrets store; never logged, never in DB, never in git. | `SecretStr` types, log filter, `.gitignore`, pre-commit `detect-secrets` | `tests/safety/test_no_secret_leak.py` |
 | S6 | Kill switch immediately halts polling, scheduled jobs, alert dispatch, and paper-trade creation. | Central `KillSwitch` checked in every job entrypoint + API write guard | `tests/safety/test_kill_switch.py` |
@@ -71,8 +79,16 @@ These are enforced in code, not just documented. Each has an owning module and a
 | S8 | Stale/unavailable/rate-limited required feed ⇒ live alerts disabled and affected results marked stale. | `FreshnessGate` in scan + alert pipeline | `tests/data/test_freshness_gate.py` |
 | S9 | Paper trades are immutable after creation; corrections are separate append-only events. | DB triggers / repository with no `UPDATE`/`DELETE` on `paper_trades` | `tests/paper/test_immutability.py` |
 | S10 | No confidence/probability shown unless it is a calibrated out-of-sample number for that exact strategy version. | `Candidate.probability` is `Optional`; renderer hides it without `calibration_ref` | `tests/research/test_probability_gating.py` |
+| S15a | The execution layer never imports the LLM, agents, alerts, scan, or SF1000 layers. | import-linter contract S15a (`pyproject.toml`; staged until `signalforge.execution` exists — see the comment there) | `tests/safety/test_s15_execution_boundary.py` |
+| S15b | **Nothing outside the execution layer may import it.** `signalforge.llm`, `.agents`, `.app`, `.research`, `.alerts`, `.sf1000`, `.backtest`, `.paper`, `.portfolio` and `.scheduler` cannot reach `signalforge.execution` — **indirectly as well as directly** (`allow_indirect_imports` is deliberately unset), so no LLM, agent, or app code path reaches an order. `signalforge.cli` is the one sanctioned inbound edge: the arming ceremony is a human-typed command. | import-linter contract S15b + S14 (which names `signalforge.execution` explicitly) | `tests/safety/test_s15_execution_boundary.py` (T1, T12 — transitive chain scans) |
 
-Any change that would weaken S1–S10 must be called out explicitly in the PR description.
+Numbering note: the contract named plain **S15** in `pyproject.toml` is the mechanical-grid
+contract and is unrelated to S15a/S15b. The S15a/S15b names are carried verbatim from the
+execution ADR §17.2 so the ADR, this table, and the safety tests all agree.
+
+Any change that would weaken S1–S10, S15a or S15b must be called out explicitly in the PR
+description. S15a/S15b may be made more searching, never weaker; in particular
+`allow_indirect_imports = true` must never be set on either.
 
 ---
 
@@ -643,8 +659,10 @@ Enforcement:
   template sandboxes retrieved text in a clearly delimited block with a fixed
   system instruction to treat it as content to summarize only. Adapters fetch only
   from configured provider APIs, never arbitrary URLs from content.
-- **No outbound trading surface:** import-linter + CI denylist grep (invariant
-  S1). No brokerage hostnames in any allowlist.
+- **No outbound trading surface outside `signalforge.execution`:** import-linter
+  (S1, S15a, S15b) + CI denylist grep. No brokerage hostname appears anywhere in
+  the tree outside `signalforge/execution/brokers/` (safety test T5), and no
+  brokerage hostname is in any allowlist elsewhere.
 - **Data at rest:** SQLite/Postgres file in a user-only-readable data dir; backup
   script writes to a user-specified local path; optional age/gpg encryption of
   backups.
@@ -673,7 +691,7 @@ Enforcement:
 
 - **Unit:** pure strategy functions, feature builders, cost/slippage models, risk
   math, metrics — deterministic, table-driven.
-- **Safety suite** (`tests/safety/`): invariants S1–S10, each with an explicit
+- **Safety suite** (`tests/safety/`): invariants S1–S10 plus S15a/S15b, each with an explicit
   test named after the invariant.
 - **Backtest correctness:** synthetic price series with known answers; look-ahead
   and leakage detectors; corporate-action adjustment cases.
@@ -708,5 +726,5 @@ Enforcement:
 
 - `ARCHITECTURE.md` is versioned in git. Material changes reference a dated entry
   in `docs/decisions/` (lightweight ADRs).
-- Any PR that touches invariants S1–S10 must say so and update the relevant
+- Any PR that touches invariants S1–S10, S15a or S15b must say so and update the relevant
   safety test.

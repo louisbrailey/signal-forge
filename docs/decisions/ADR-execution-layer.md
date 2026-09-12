@@ -1,0 +1,68 @@
+# ADR — Execution layer (pointer)
+
+- **Status:** accepted for the contract and documentation work only (2026-09-12). No
+  execution code exists yet. Nothing is armed. Nothing reaches real money.
+- **Deciders:** Louis Brailey (operator). Direction of 2026-09-11: Signal Forge is "no longer
+  research use only"; end-to-end operational control granted.
+- **Full text:** `docs/research/options_designs/D6_execution_adr.md` — this file is a short
+  pointer, not a second copy. Where the two could ever disagree, D6 is the ADR.
+- **Decision log it implements:** `docs/research/DECISIONS_2026-09-12_options_execution.md`
+  (decision 1 records this supersession; decisions 2, 4, 9, 10 bound it).
+- **Program context:** `docs/research/OPTIONS_EXECUTION_PROGRAM_MAP.md` §6, §6.8, §7.
+
+## What is superseded
+
+`docs/PORTFOLIO_RESEARCH_ROADMAP.md` "Non-negotiable boundaries" carried two bullets that this
+ADR supersedes **in writing rather than by routing around them**:
+
+> "**No brokerage, no order placement, no trade mirroring, anywhere.**"
+
+> "**No brokerage/Webull/order-placement integration is in scope for any module, at any phase.**
+> This roadmap does not create one and does not plan to."
+
+They are replaced by a **narrower** boundary, not deleted: a brokerage surface may exist in
+`signalforge.execution` and nowhere else. Every other module keeps the original prohibition,
+and the prohibition is now enforced in **both** directions rather than one.
+
+## What replaces it
+
+1. A `signalforge.execution` package may submit orders to a broker's **paper/sandbox**
+   endpoint only. It is disabled by default (`EXECUTION_DISABLED_BY_DEFAULT = True` plus an
+   `execution_enabled` app setting defaulting False — two independent gates, neither
+   sufficient alone), and it can submit nothing while no unexpired `armed_strategy` row
+   exists.
+2. Arming is a per-strategy-version, audited, hard-expiring operator ceremony. There is no
+   `ARMED` strategy status; arming is layered **on top of** `PAPER_APPROVED`, never folded
+   into the enum (D6 §12).
+3. The kill switch **blocks opening and never blocks closing**. Open and protective-close
+   intents are built by two different factories whose fail-closed directions are opposite: a
+   check that cannot be evaluated refuses an open and blocks no close (D6 §5.2, §5.2b, §7).
+4. **No LLM decides, shapes, ranks, sizes, times, or describes an order**, enforced
+   structurally by import-linter S15a/S15b and the S14 amendment (D6 §17.2) — not by
+   convention, and not by a direct-edge check: `allow_indirect_imports` is deliberately unset,
+   so a two-hop chain is a violation too.
+5. Credentials exist only as **env-var names or macOS Keychain item names**. The system never
+   acquires, stores, rotates, or logs one (D6 §16).
+
+## What remains absolutely prohibited
+
+- Any real-money endpoint. This ADR covers `paper_reference` (local, no network) and one
+  vendor **paper** endpoint. Live money is a separate operator decision and a separate ADR.
+- Any order sourced from a manually accepted paper trade (D6 §5 precondition P6).
+- Any structure with undefined max loss, any leg-by-leg multi-leg submission, any 0DTE, any
+  naked short option.
+- Any automatic liquidation, automatic reconciliation repair, or retry of a broker rejection.
+- Any credential acquisition, storage, rotation, or logging by the system.
+
+## Status of the work
+
+| Step | State |
+|---|---|
+| I-E1 — contracts (S15b live, S14 amended, S15a staged) + safety tests T1–T13 | done |
+| §18 documentation amendment (roadmap, methodology, capability matrix, ARCHITECTURE invariants) | done |
+| §18 amendment of the shipped strings (`README.md`, `DISCLAIMER.md`, `src/signalforge/options/__init__.py`, `src/signalforge/cli.py` help text, `src/signalforge/__init__.py` docstring) | **outstanding — lands with I-E2**, because those promises are still literally true until the package exists. Safety test T9 fails mechanically the moment it does |
+| I-E2 and later | not started; no execution code exists |
+
+The paper-first evidence discipline (`docs/research/STRATEGY_COMPLETION_MAP.md` §1 R1–R10) is
+unchanged by this ADR. No promotion gate or threshold is weakened anywhere in it; every
+addition is strictly more searching.
