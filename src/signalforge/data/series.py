@@ -111,8 +111,21 @@ class PriceSeries:
         *,
         bar_size: str = "5m",
         source: SourceFilter = None,
+        session_filter: str | None = "rth",
     ) -> PriceSeries:
-        """Intraday bars as a ``PriceSeries`` whose ``dates`` are aware datetimes."""
+        """Intraday bars as a ``PriceSeries`` whose ``dates`` are aware datetimes.
+
+        **RTH-only by default** (design item B7). ``OHLCVIntraday`` carries a
+        ``session`` column (pre | rth | post) and this loader used to ignore
+        it, so a series could silently contain extended-hours bars even when
+        gate 0 had just certified the RTH history as complete. That is not a
+        cosmetic difference: ``features.intraday._session_date`` groups bars by
+        **UTC** date, so an Eastern post-market bar at/after 19:00 ET lands on
+        the FOLLOWING calendar date and would become part of the next session's
+        opening range. Ingest discipline is policy; this filter is code.
+
+        Pass ``session_filter=None`` to load every session type deliberately
+        (diagnostics that want to see what was ingested, not what is traded)."""
         from signalforge.db.models import Instrument, OHLCVIntraday
 
         stmt = (
@@ -126,6 +139,8 @@ class PriceSeries:
             )
             .order_by(OHLCVIntraday.bar_start)
         )
+        if session_filter is not None:
+            stmt = stmt.where(OHLCVIntraday.session == session_filter)
         if source is not None:
             stmt = stmt.where(
                 OHLCVIntraday.source == source

@@ -622,18 +622,61 @@ def ingest(
 @app.command("ingest-intraday")
 def ingest_intraday_cmd(
     bar_size: Annotated[str, typer.Option(help="5m | 15m | 30m | 1h")] = "5m",
-    days: Annotated[int, typer.Option(help="Trailing days to fetch.")] = 5,
+    days: Annotated[
+        int, typer.Option(help="Trailing days to fetch. Ignored when --since is given.")
+    ] = 5,
+    since: Annotated[
+        str,
+        typer.Option(
+            help="YYYY-MM-DD. Dated backfill: calendar-chunked, resumable, records an "
+            "IngestionRun. Required for anything longer than a few days."
+        ),
+    ] = "",
+    until: Annotated[str, typer.Option(help="YYYY-MM-DD; default: today. Used with --since.")] = "",
     symbols: Annotated[
         str, typer.Option(help="Comma-separated; default: configured universe.")
     ] = "",
+    chunk_years: Annotated[
+        int, typer.Option(help="Calendar years per provider request (keeps each under 50k rows).")
+    ] = 1,
+    resume_run_id: Annotated[
+        int, typer.Option(help="Resume this ingestion_run id; symbols already OK are skipped.")
+    ] = 0,
+    dry_run: Annotated[
+        bool, typer.Option(help="Print the request plan and cost; make no provider call.")
+    ] = False,
 ) -> None:
-    """Fetch intraday bars into the local store (Phase 2)."""
+    """Fetch intraday bars into the local store (Phase 2).
+
+    Two modes. With --since it is a DATED BACKFILL: the span is split into
+    calendar-year chunks that each stay under the provider's 50,000-row
+    response cap (the adapter rejects a paginated answer rather than silently
+    truncating it), only RTH bars are stored, progress is committed per symbol
+    and recorded on an ``IngestionRun`` row that --resume-run-id can re-enter.
+    Without it, the original trailing --days top-up.
+
+    API volume, recomputed from the adapter's own limits — the 24-symbol
+    ex-META universe at 15m from 2016-10-17 to 2026-09-08 is 11 calendar-year
+    chunks per symbol = 264 paced requests, ~53 min at the Basic plan's 12.1 s
+    spacing, and ~1.55M RTH rows (~0.53 GB). Each request is at most ~16,128
+    rows against the 50,000 cap, so the chunking has ~3x headroom even if the
+    provider returns extended hours. Use --dry-run to print the exact plan for
+    the arguments you intend to run.
+
+    A backfill deliberately does NOT register a BAR_INTRADAY feed-status row:
+    a one-off historical fetch is not a live feed, and a stale feed row blocks
+    every candidate and briefing alert.
+    """
     ensure_not_engaged()
     from datetime import UTC
 
     from signalforge.config import get_settings
     from signalforge.data.adapters.registry import get_primary_adapter
-    from signalforge.data.ingest import ingest_intraday_universe
+    from signalforge.data.ingest import (
+        ingest_intraday_history,
+        ingest_intraday_universe,
+        intraday_request_plan,
+    )
     from signalforge.db.session import session_scope
 
     settings = get_settings()
@@ -644,19 +687,78 @@ def ingest_intraday_cmd(
     syms = [s.strip().upper() for s in symbols.split(",") if s.strip()] or list(
         settings.research.universe
     )
-    end = datetime.now(UTC)
-    start = end - timedelta(days=days)
-    with session_scope(write=True) as session:
-        report = ingest_intraday_universe(
-            session, adapter, syms, start, end, bar_size=bar_size  # type: ignore[arg-type]
+
+    if not since:
+        if dry_run or resume_run_id:
+            typer.secho("--dry-run and --resume-run-id require --since", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+        end_dt = datetime.now(UTC)
+        start_dt = end_dt - timedelta(days=days)
+        with session_scope(write=True) as session:
+            report = ingest_intraday_universe(
+                session, adapter, syms, start_dt, end_dt, bar_size=bar_size  # type: ignore[arg-type]
+            )
+        typer.secho(
+            f"ingest-intraday[{adapter.provider_name}] {bar_size}: "
+            f"{report.bars_written} bars across {len(syms)} symbols",
+            fg=typer.colors.GREEN,
         )
+        for err in report.errors:
+            typer.secho(f"  ! {err}", fg=typer.colors.RED)
+        return
+
+    start_d = date.fromisoformat(since)
+    end_d = date.fromisoformat(until) if until else date.today()
+    try:
+        plan = intraday_request_plan(
+            syms, start_d, end_d, bar_size=bar_size, chunk_years=chunk_years
+        )
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1) from None
+
+    typer.secho(f"plan: {plan.summary()}", fg=typer.colors.CYAN)
+    if dry_run:
+        typer.echo("dry run — no provider request was made.")
+        return
+
+    with session_scope(write=True) as session:
+        run = ingest_intraday_history(
+            session,
+            adapter,  # type: ignore[arg-type]
+            syms,
+            start_d,
+            end_d,
+            bar_size=bar_size,
+            chunk_years=chunk_years,
+            resume_run_id=resume_run_id or None,
+        )
+        run_id, status, written, skipped = (
+            run.id,
+            run.status,
+            run.bars_written,
+            run.bars_skipped,
+        )
+        failures = dict(run.symbols_failed or {})
+        gap_symbols = sorted(run.gaps_json or {})
+
+    colour = typer.colors.GREEN if status == "ok" else typer.colors.YELLOW
     typer.secho(
-        f"ingest-intraday[{adapter.provider_name}] {bar_size}: "
-        f"{report.bars_written} bars across {len(syms)} symbols",
-        fg=typer.colors.GREEN,
+        f"ingest-intraday[{adapter.provider_name}] {bar_size} {start_d}..{end_d}: {status} — "
+        f"{written} RTH bars written, {skipped} skipped (duplicate or non-RTH), "
+        f"ingestion_run id {run_id}",
+        fg=colour,
     )
-    for err in report.errors:
-        typer.secho(f"  ! {err}", fg=typer.colors.RED)
+    for sym, err in failures.items():
+        typer.secho(f"  ! {sym}: {err}", fg=typer.colors.RED)
+    if gap_symbols:
+        typer.secho(
+            f"  coverage gaps remain for: {', '.join(gap_symbols)} — promotion gate 0 "
+            f"requires 100% session coverage and will fail until they are filled",
+            fg=typer.colors.YELLOW,
+        )
+    if failures:
+        typer.echo(f"resume with: signalforge ingest-intraday --resume-run-id {run_id} ...")
 
 
 @app.command("backtest-extended")

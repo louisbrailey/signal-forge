@@ -33,27 +33,25 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from signalforge.data.calendar import rth_bounds
+from signalforge.data.calendar import BAR_MINUTES, bar_minutes, rth_bounds
 from signalforge.data.calendar import sessions as calendar_sessions
 from signalforge.data.repository import SourceFilter
 from signalforge.db.models import Instrument, OHLCVIntraday
 
 _ET = ZoneInfo("America/New_York")
 
-BAR_MINUTES: dict[str, int] = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60}
+__all__ = [
+    "BAR_MINUTES",
+    "IntradayCoverageReport",
+    "SymbolCoverage",
+    "bar_minutes",
+    "expected_rth_bars",
+    "intraday_rth_coverage",
+]
 
 # How many offending items a report names before it says "and N more" — the
 # evidence blob goes into an audit row, so it must stay bounded.
 _MAX_LISTED = 8
-
-
-def bar_minutes(bar_size: str) -> int:
-    try:
-        return BAR_MINUTES[bar_size]
-    except KeyError:
-        raise ValueError(
-            f"unsupported bar_size {bar_size!r}; known: {sorted(BAR_MINUTES)}"
-        ) from None
 
 
 def expected_rth_bars(day: date, bar_size: str) -> int:

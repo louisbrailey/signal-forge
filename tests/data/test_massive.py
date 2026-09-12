@@ -5,7 +5,7 @@ from datetime import date
 import httpx
 import pytest
 
-from signalforge.data.adapters.base import AdapterError, LatencyCategory
+from signalforge.data.adapters.base import AdapterError, FeedType, LatencyCategory
 from signalforge.data.adapters.massive import MassiveAdapter
 from signalforge.killswitch import KillSwitchEngaged, get_kill_switch
 
@@ -33,7 +33,15 @@ def test_completed_bars_and_cached_raw():
     assert bars[0].close == 101
     assert bars[0].provenance.latency_category == LatencyCategory.END_OF_DAY
     assert a.raw_payload("SPY", START, START)
-    assert len(a.capabilities) == 1
+    # daily (END_OF_DAY) + intraday historical aggregates (DELAYED, never live).
+    # The intraday capability exists only so the research backfill can run; see
+    # tests/data/test_intraday_backfill.py for its contract.
+    caps = {c.feed_type: c.latency_category for c in a.capabilities}
+    assert caps == {
+        FeedType.BAR_DAILY: LatencyCategory.END_OF_DAY,
+        FeedType.BAR_INTRADAY: LatencyCategory.DELAYED,
+    }
+    assert not any(c.latency_category.is_live for c in a.capabilities)
 
 
 @pytest.mark.parametrize("status", [401, 403, 429, 500])

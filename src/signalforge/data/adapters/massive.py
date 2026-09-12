@@ -1,11 +1,17 @@
-"""Massive completed daily bars — always treated as END-OF-DAY.
+"""Massive completed daily bars (END-OF-DAY) + historical intraday aggregates.
 
-Read-only REST adapter. It fetches *completed* split-adjusted daily bars and
-nothing else: no quotes, no streaming, no earnings, no separate corporate-action
-feed. ``latency_category`` is hard-wired to ``END_OF_DAY`` regardless of the
-account's plan, so live alerts stay disabled for horizons that need intraday
-freshness until a separate, explicitly licensed streaming integration proves a
-real-time entitlement.
+Read-only REST adapter. No quotes, no streaming, no earnings, no separate
+corporate-action feed. The daily feed's ``latency_category`` is hard-wired to
+``END_OF_DAY`` regardless of the account's plan, so live alerts stay disabled
+for horizons that need intraday freshness until a separate, explicitly licensed
+streaming integration proves a real-time entitlement.
+
+``fetch_intraday_bars`` exists for one purpose: the **research backfill** of
+``ohlcv_intraday``. Its capability is declared ``DELAYED`` (>= 15 min on this
+plan), never ``REALTIME`` — at a 15m research bar the delay equals the bar
+size, so the backtest's next-bar-open fill is permanently one bar earlier than
+this entitlement can attain. That is a disclosed modelling limit, not something
+this adapter can fix; see docs/INTRADAY_OPERATION.md.
 
 Fails closed: without an API key every fetch raises ``AdapterError``.
 """
@@ -30,9 +36,11 @@ from signalforge.data.adapters.base import (
     DailyBar,
     EarningsRecord,
     FeedType,
+    IntradayBar,
     LatencyCategory,
     Provenance,
 )
+from signalforge.data.calendar import BAR_MINUTES
 from signalforge.killswitch import ensure_not_engaged
 
 _BASE_URL = "https://api.massive.com"
@@ -50,6 +58,18 @@ _BACKOFF_CAP_S = 30.0
 # D — the same time the scheduler's EOD job fires — so a run at 17:30 ET picks
 # up D's closed bar and /ops "daily bars current" means what it says.
 COMPLETED_SESSION_CUTOFF_ET = (17, 30)
+
+
+def _intraday_span(bar_size: str) -> tuple[int, str]:
+    """``"15m"`` -> ``(15, "minute")``. The provider's aggregates endpoint takes
+    a multiplier and a unit; this is the only place the mapping lives."""
+    try:
+        minutes = BAR_MINUTES[bar_size]
+    except KeyError:
+        raise ValueError(
+            f"unsupported bar_size {bar_size!r}; known: {sorted(BAR_MINUTES)}"
+        ) from None
+    return (minutes // 60, "hour") if minutes % 60 == 0 else (minutes, "minute")
 
 
 def completed_session_cutoff(now: datetime | None = None) -> date:
@@ -94,6 +114,28 @@ class MassiveAdapter:
                     "Completed daily bars only; split-adjusted, not dividend-adjusted. "
                     "No earnings feed. Real-time entitlement is not verified by this adapter."
                 ),
+                rate_limit_per_min=5,
+                is_simulated=False,
+            ),
+            AdapterCapability(
+                provider_name=self.provider_name,
+                feed_type=FeedType.BAR_INTRADAY,
+                # DELAYED, never REALTIME: the plan's intraday aggregates are
+                # delayed by >= 15 minutes (data/entitlements.py, feed
+                # `stocks_intraday_aggs_5m`; reports/SUBSCRIPTION_STATUS.md
+                # "No real-time feed on this plan"). At a 15m research bar that
+                # delay EQUALS the bar size, so the backtest's fill (the open of
+                # bar t+1) precedes the earliest attainable action (the open of
+                # bar t+2) by exactly one bar, permanently. Historical backfill
+                # is unaffected; live intraday execution is not modelled.
+                latency_category=LatencyCategory.DELAYED,
+                supports_point_in_time=False,
+                entitlement_note=(
+                    "Historical intraday aggregates for RESEARCH BACKFILL. Delayed >= 15 min: "
+                    "at a 15m bar the modelled next-bar-open fill is one bar earlier than this "
+                    "entitlement can attain. Not a live feed."
+                ),
+                delay_estimate="15 min",
                 rate_limit_per_min=5,
                 is_simulated=False,
             ),
@@ -218,6 +260,96 @@ class MassiveAdapter:
             ) from None
         self._raw[(symbol, start, end)] = text
         return sorted(bars, key=lambda bar: bar.session_date)
+
+    def fetch_intraday_bars(
+        self, symbol: str, start: datetime, end: datetime, *, bar_size: str = "15m"
+    ) -> Sequence[IntradayBar]:
+        """One aggregates request for ``[start, end]`` at ``bar_size``.
+
+        Implements :class:`~signalforge.data.adapters.base.IntradayBarAdapter`.
+        Deliberately NOT paginated: like the daily path, a response carrying
+        ``next_url`` is rejected outright rather than silently truncated —
+        chunking a long span into requests that each fit under the provider's
+        50,000-row page cap is the caller's job
+        (``data.ingest.intraday_request_plan``), so the number of provider
+        calls a backfill costs is decided and reported up front instead of
+        discovered mid-run.
+
+        Every bar is classified against the exchange calendar
+        (``calendar.session_of``) and bars outside a real session are dropped:
+        a 'closed' stamp is not a tradeable bar. ``session`` is stored, so an
+        extended-hours bar is labelled ``pre``/``post`` rather than passed off
+        as regular hours."""
+        from signalforge.data.calendar import session_of
+
+        symbol = symbol.upper().strip()
+        if not _SYMBOL_RE.fullmatch(symbol):
+            raise ValueError("Invalid symbol")
+        if start.tzinfo is None or end.tzinfo is None:
+            raise ValueError("intraday start/end must be timezone-aware")
+        if end < start:
+            raise ValueError("end must be >= start")
+        multiplier, unit = _intraday_span(bar_size)
+
+        text = self._request(
+            f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{unit}"
+            f"/{start.date()}/{end.date()}?adjusted=true&sort=asc&limit=50000"
+        )
+        try:
+            payload = json.loads(text)
+            if (
+                payload.get("status") not in {"OK", "DELAYED"}
+                or payload.get("next_url")
+                or payload.get("adjusted") is not True
+            ):
+                raise ValueError("Incomplete or unadjusted response")
+            provenance = Provenance(
+                source=self.provider_name,
+                latency_category=LatencyCategory.DELAYED,
+                retrieved_at=datetime.now(UTC),
+                is_simulated=False,
+            )
+            bars: list[IntradayBar] = []
+            seen: set[datetime] = set()
+            for row in payload.get("results", []):
+                stamp = datetime.fromtimestamp(row["t"] / 1000, UTC)
+                o, hi, lo, c, v = (float(row[k]) for k in ("o", "h", "l", "c", "v"))
+                if (
+                    not all(math.isfinite(x) for x in (o, hi, lo, c, v))
+                    or min(o, hi, lo, c) <= 0
+                    or v < 0
+                    or lo > min(o, c)
+                    or hi < max(o, c)
+                    or stamp in seen
+                    or not start <= stamp <= end
+                    or row.get("otc")
+                ):
+                    raise ValueError("Invalid bar")
+                seen.add(stamp)
+                sess = session_of(stamp)
+                if sess == "closed":
+                    continue  # not a tradeable session bar; never stored
+                bars.append(
+                    IntradayBar(
+                        symbol=symbol,
+                        bar_start=stamp,
+                        bar_size=bar_size,
+                        session=sess,
+                        open=o,
+                        high=hi,
+                        low=lo,
+                        close=c,
+                        volume=v,
+                        provenance=provenance,
+                    )
+                )
+            if not bars:
+                raise ValueError("No bars")
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            raise AdapterError(
+                "Massive returned unavailable, incomplete, or invalid intraday data"
+            ) from None
+        return sorted(bars, key=lambda bar: bar.bar_start)
 
     def raw_payload(self, symbol: str, start: date, end: date) -> str:
         return self._raw.get((symbol.upper().strip(), start, end), "")

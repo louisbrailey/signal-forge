@@ -15,6 +15,20 @@ import pandas_market_calendars as mcal
 _RTH_OPEN = time(9, 30)
 _RTH_CLOSE = time(16, 0)
 
+# Bar sizes the intraday path understands, in minutes. Lives here — the
+# lowest layer that already owns session arithmetic — so the adapter, the
+# ingest chunker and the coverage query all read ONE definition.
+BAR_MINUTES: dict[str, int] = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60}
+
+
+def bar_minutes(bar_size: str) -> int:
+    try:
+        return BAR_MINUTES[bar_size]
+    except KeyError:
+        raise ValueError(
+            f"unsupported bar_size {bar_size!r}; known: {sorted(BAR_MINUTES)}"
+        ) from None
+
 
 @lru_cache(maxsize=1)
 def _xnys() -> mcal.MarketCalendar:

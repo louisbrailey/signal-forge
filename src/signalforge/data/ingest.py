@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from datetime import UTC as _UTC
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -460,7 +461,20 @@ def ingest_intraday_symbol(
     end: datetime,
     *,
     bar_size: str = "5m",
+    rth_only: bool = True,
+    record_feed_status: bool = True,
 ) -> SymbolIngestResult:
+    """Fetch and store one symbol's intraday bars for ``[start, end]``.
+
+    ``rth_only`` (default True) drops pre/post bars at the door — the design's
+    item B7. ``PriceSeries.load_intraday`` filters on ``session`` as well, so
+    purity is enforced twice: once as ingest policy, once as code. Dropped bars
+    are counted in ``bars_skipped``, never silently discarded.
+
+    ``record_feed_status`` writes the ``DataFeedStatus`` row for
+    ``BAR_INTRADAY``. A **historical backfill passes False** — see
+    :func:`ingest_intraday_history` for why that is a live-system safety
+    property and not a detail."""
     result = SymbolIngestResult(symbol=symbol.upper())
     inst = get_or_create_instrument(session, symbol)
     cap = _capability(adapter, FeedType.BAR_INTRADAY)
@@ -495,6 +509,13 @@ def ingest_intraday_symbol(
         if bar.bar_start in existing:
             result.bars_skipped += 1
             continue
+        if rth_only and bar.session != "rth":
+            # B7: an extended-hours bar is not tradeable by an RTH strategy, and
+            # `features.intraday._session_date` groups by UTC date — an Eastern
+            # post-market bar would land on the NEXT calendar date and corrupt
+            # that session's opening range.
+            result.bars_skipped += 1
+            continue
         flags: list[str] = []
         if min(bar.open, bar.high, bar.low, bar.close) <= 0:
             flags.append(DataQualityFlag.MISSING_VALUES.value)
@@ -518,7 +539,7 @@ def ingest_intraday_symbol(
         )
         result.bars_written += 1
 
-    if cap is not None:
+    if cap is not None and record_feed_status:
         record_feed_success(session, cap)
     session.flush()  # so a later dedupe query in the same transaction sees these rows
     return result
@@ -532,11 +553,22 @@ def ingest_intraday_universe(
     end: datetime,
     *,
     bar_size: str = "5m",
+    rth_only: bool = True,
+    record_feed_status: bool = True,
 ) -> IngestReport:
     report = IngestReport(provider=adapter.provider_name, started_at=utcnow().isoformat())
     for sym in symbols:
         report.results.append(
-            ingest_intraday_symbol(session, adapter, sym, start, end, bar_size=bar_size)
+            ingest_intraday_symbol(
+                session,
+                adapter,
+                sym,
+                start,
+                end,
+                bar_size=bar_size,
+                rth_only=rth_only,
+                record_feed_status=record_feed_status,
+            )
         )
     _log.info(
         "ingest.intraday_done",
@@ -547,3 +579,347 @@ def ingest_intraday_universe(
         errors=len(report.errors),
     )
     return report
+
+
+# --------------------------------------------------------------------------- #
+# intraday history: calendar-chunked, resumable, costed before it runs
+# --------------------------------------------------------------------------- #
+# The provider caps one aggregates response at 50,000 rows and this adapter
+# family REJECTS a paginated response outright rather than silently truncating
+# it (massive.fetch_intraday_bars / fetch_daily_bars). A long backfill must
+# therefore be split into requests that each fit under the cap, and the split
+# must be decided up front so the API budget is a stated number rather than a
+# surprise.
+PROVIDER_ROW_CAP = 50_000
+# Extended-hours minutes per session (04:00-20:00 ET). The cap has to be
+# checked against what the PROVIDER may return, not against the RTH subset we
+# keep: a 15m request answers with up to 64 bars/session even though only 26
+# are stored.
+_EXTENDED_MINUTES_PER_SESSION = 16 * 60
+
+
+@dataclass(frozen=True, slots=True)
+class IntradayChunk:
+    symbol: str
+    start: date
+    end: date
+    sessions: int
+    max_rows: int  # worst case the provider may return for this request
+
+
+@dataclass(frozen=True, slots=True)
+class IntradayRequestPlan:
+    """What a backfill will cost BEFORE a single request is made."""
+
+    symbols: list[str]
+    bar_size: str
+    start: date
+    end: date
+    chunk_years: int
+    chunks: list[IntradayChunk]
+    request_spacing_s: float
+    sessions: int
+
+    @property
+    def n_requests(self) -> int:
+        return len(self.chunks)
+
+    @property
+    def seconds(self) -> float:
+        """Paced wall clock. The first request does not wait, so the pacing
+        cost is (n-1) gaps, not n."""
+        return max(0, self.n_requests - 1) * self.request_spacing_s
+
+    @property
+    def minutes(self) -> float:
+        return self.seconds / 60.0
+
+    @property
+    def rth_rows(self) -> int:
+        """Rows actually STORED (RTH only), from the exchange calendar — early
+        closes included, so this is not sessions x 26."""
+        from signalforge.data.intraday_coverage import expected_rth_bars
+
+        per_symbol = sum(
+            expected_rth_bars(d, self.bar_size) for d in _calendar_sessions(self.start, self.end)
+        )
+        return per_symbol * len(self.symbols)
+
+    @property
+    def max_rows_per_request(self) -> int:
+        return max((c.max_rows for c in self.chunks), default=0)
+
+    def summary(self) -> str:
+        return (
+            f"{len(self.symbols)} symbols x {self.bar_size} x {self.start}..{self.end} "
+            f"({self.sessions} exchange sessions): {self.n_requests} paced provider requests "
+            f"in {self.chunk_years}-year chunks, ~{self.minutes:.1f} min at "
+            f"{self.request_spacing_s:.1f}s spacing, <= {self.max_rows_per_request:,} rows per "
+            f"request (provider cap {PROVIDER_ROW_CAP:,}), ~{self.rth_rows:,} RTH rows stored"
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "symbols": len(self.symbols),
+            "bar_size": self.bar_size,
+            "span": f"{self.start}..{self.end}",
+            "sessions": self.sessions,
+            "chunk_years": self.chunk_years,
+            "requests": self.n_requests,
+            "minutes": round(self.minutes, 1),
+            "request_spacing_s": self.request_spacing_s,
+            "max_rows_per_request": self.max_rows_per_request,
+            "provider_row_cap": PROVIDER_ROW_CAP,
+            "rth_rows_stored": self.rth_rows,
+        }
+
+
+def _calendar_sessions(start: date, end: date) -> tuple[date, ...]:
+    from signalforge.data.calendar import sessions as _sessions
+
+    return _sessions(start, end)
+
+
+def _year_chunks(start: date, end: date, chunk_years: int) -> list[tuple[date, date]]:
+    """Split ``[start, end]`` on calendar-year boundaries, ``chunk_years`` at a
+    time. Year boundaries (rather than a rolling N-day window) keep a resumed
+    or re-run backfill asking for the IDENTICAL windows, so the provider's
+    responses — and therefore the dedupe — are reproducible."""
+    out: list[tuple[date, date]] = []
+    lo = start
+    while lo <= end:
+        year_end = date(lo.year + chunk_years - 1, 12, 31)
+        hi = min(year_end, end)
+        out.append((lo, hi))
+        lo = hi + timedelta(days=1)
+    return out
+
+
+def intraday_request_plan(
+    symbols: list[str],
+    start: date,
+    end: date,
+    *,
+    bar_size: str = "15m",
+    chunk_years: int = 1,
+    request_spacing_s: float | None = None,
+) -> IntradayRequestPlan:
+    """Cost a backfill without making any request.
+
+    Raises when a chunk could exceed the provider's row cap: the adapter
+    rejects a paginated answer, so an over-large chunk would fail the whole
+    symbol rather than quietly return a prefix."""
+    from signalforge.config import get_settings
+    from signalforge.data.calendar import bar_minutes
+
+    if request_spacing_s is None:
+        request_spacing_s = float(get_settings().market_data_min_request_spacing_s)
+    minutes = bar_minutes(bar_size)
+    syms = [s.strip().upper() for s in symbols]
+
+    chunks: list[IntradayChunk] = []
+    for lo, hi in _year_chunks(start, end, chunk_years):
+        n_sessions = len(_calendar_sessions(lo, hi))
+        max_rows = n_sessions * (_EXTENDED_MINUTES_PER_SESSION // minutes)
+        if max_rows > PROVIDER_ROW_CAP:
+            raise ValueError(
+                f"a {chunk_years}-year chunk at {bar_size} could return up to {max_rows:,} rows, "
+                f"above the provider's {PROVIDER_ROW_CAP:,} cap — use a smaller --chunk-years"
+            )
+        for sym in syms:
+            chunks.append(
+                IntradayChunk(symbol=sym, start=lo, end=hi, sessions=n_sessions, max_rows=max_rows)
+            )
+    return IntradayRequestPlan(
+        symbols=syms,
+        bar_size=bar_size,
+        start=start,
+        end=end,
+        chunk_years=chunk_years,
+        chunks=chunks,
+        request_spacing_s=request_spacing_s,
+        sessions=len(_calendar_sessions(start, end)),
+    )
+
+
+def _intraday_symbol_gaps(
+    session: Session,
+    instrument_id: int,
+    source: str,
+    bar_size: str,
+    start: date,
+    end: date,
+) -> list[list[str]]:
+    """Runs of exchange sessions with no RTH bar for this symbol/source/size."""
+    from signalforge.db.models import Instrument as _Inst
+
+    rows = session.execute(
+        select(OHLCVIntraday.bar_start)
+        .where(
+            OHLCVIntraday.instrument_id == instrument_id,
+            OHLCVIntraday.source == source,
+            OHLCVIntraday.bar_size == bar_size,
+            OHLCVIntraday.session == "rth",
+        )
+        .order_by(OHLCVIntraday.bar_start)
+    )
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    have = {
+        (b.astimezone(et) if b.tzinfo else b.replace(tzinfo=_UTC).astimezone(et)).date()
+        for (b,) in rows
+    }
+    assert _Inst is not None  # keeps the import meaningful for mypy's narrowing
+    gaps: list[list[str]] = []
+    run_start: date | None = None
+    prev: date | None = None
+    for d in _calendar_sessions(start, min(end, date.today())):
+        if d in have:
+            if run_start is not None and prev is not None:
+                gaps.append([run_start.isoformat(), prev.isoformat()])
+            run_start = None
+        else:
+            if run_start is None:
+                run_start = d
+            prev = d
+    if run_start is not None and prev is not None:
+        gaps.append([run_start.isoformat(), prev.isoformat()])
+    return gaps
+
+
+def ingest_intraday_history(
+    session: Session,
+    adapter: IntradayBarAdapter,
+    symbols: list[str],
+    start: date,
+    end: date,
+    *,
+    bar_size: str = "15m",
+    chunk_years: int = 1,
+    kind: str = "full_history",
+    resume_run_id: int | None = None,
+    record_feed_status: bool = False,
+) -> IngestionRun:
+    """Incremental, idempotent, auditable intraday-history backfill.
+
+    Mirrors :func:`ingest_daily_history`'s persistence and resume contract:
+    one ``IngestionRun`` row records the requested window, per-symbol success,
+    failures, coverage gaps and row counts; a symbol already recorded in
+    ``symbols_ok`` is skipped on resume; and the run is COMMITTED after every
+    symbol, so each symbol is one short write transaction and the SQLite write
+    lock is released before the next symbol's paced network fetch
+    (docs/SQLITE_CONCURRENCY.md).
+
+    The span is split into calendar chunks that each fit under the provider's
+    row cap (:func:`intraday_request_plan`) — the adapter rejects a paginated
+    response, so the chunking is what makes a ten-year request possible at all.
+
+    ``record_feed_status`` defaults to **False**, unlike the live paths, and
+    that default is a safety property: ``alerts.dispatch`` blocks ALL candidate
+    and briefing alerts while ANY ``DataFeedStatus`` row is stale, and a
+    one-off historical backfill would register a ``BAR_INTRADAY`` feed that
+    nothing afterwards refreshes. Thirty-six hours later it would go stale and
+    silently switch off the live EOD paper probation's alerts. A backfill is
+    not a feed; only a recurring intraday poll should claim to be one.
+    """
+    from signalforge.db.models import IngestionRun as _Run
+    from signalforge.db.models import Instrument as _Inst
+
+    plan = intraday_request_plan(symbols, start, end, bar_size=bar_size, chunk_years=chunk_years)
+
+    run: _Run
+    if resume_run_id is not None:
+        found = session.get(_Run, resume_run_id)
+        if found is None:
+            raise ValueError(f"ingestion_run {resume_run_id} not found")
+        run = found
+    else:
+        run = _Run(
+            provider=adapter.provider_name,
+            feed_type=FeedType.BAR_INTRADAY,
+            kind=kind,
+            requested_start=start,
+            requested_end=end,
+            adjusted=True,
+            symbols_requested=list(plan.symbols),
+            status="running",
+            started_at=utcnow(),
+            notes=f"intraday {bar_size} RTH-only backfill — {plan.summary()}",
+        )
+        session.add(run)
+        session.flush()
+
+    ok: list[str] = list(run.symbols_ok or [])
+    failed: dict[str, str] = dict(run.symbols_failed or {})
+    gaps: dict[str, list[list[str]]] = dict(run.gaps_json or {})
+    written = int(run.bars_written or 0)
+    skipped = int(run.bars_skipped or 0)
+
+    for sym in plan.symbols:
+        if sym in ok:  # resume: already done cleanly
+            continue
+        sym_error: str | None = None
+        for chunk in (c for c in plan.chunks if c.symbol == sym):
+            lo = datetime.combine(chunk.start, datetime.min.time(), tzinfo=_UTC)
+            hi = datetime.combine(chunk.end, datetime.max.time(), tzinfo=_UTC)
+            r = ingest_intraday_symbol(
+                session,
+                adapter,
+                sym,
+                lo,
+                hi,
+                bar_size=bar_size,
+                rth_only=True,
+                record_feed_status=record_feed_status,
+            )
+            written += r.bars_written
+            skipped += r.bars_skipped
+            if r.error:
+                sym_error = f"{chunk.start}..{chunk.end}: {r.error}"
+                break  # a hole mid-history is not repaired by fetching later years
+
+        if sym_error:
+            failed[sym] = sym_error[:200]
+            ok = [s for s in ok if s != sym]
+        else:
+            failed.pop(sym, None)
+            if sym not in ok:
+                ok.append(sym)
+        inst = session.scalar(select(_Inst).where(_Inst.symbol == sym))
+        if inst is not None:
+            g = _intraday_symbol_gaps(session, inst.id, adapter.provider_name, bar_size, start, end)
+            if g:
+                gaps[sym] = g
+            else:
+                gaps.pop(sym, None)
+        run.symbols_ok = list(ok)
+        run.symbols_failed = failed
+        run.gaps_json = gaps
+        run.bars_written = written
+        run.bars_skipped = skipped
+        session.commit()  # checkpoint: resumable, and the write lock is released
+
+    cov = session.execute(
+        select(func.min(OHLCVIntraday.bar_start), func.max(OHLCVIntraday.bar_start)).where(
+            OHLCVIntraday.source == adapter.provider_name,
+            OHLCVIntraday.bar_size == bar_size,
+        )
+    ).one()
+    run.coverage_first = cov[0].date() if cov[0] is not None else None
+    run.coverage_last = cov[1].date() if cov[1] is not None else None
+    run.status = "ok" if not failed else ("partial" if ok else "failed")
+    run.finished_at = utcnow()
+    session.flush()
+    _log.info(
+        "ingest.intraday_history_done",
+        provider=adapter.provider_name,
+        bar_size=bar_size,
+        requests_planned=plan.n_requests,
+        written=written,
+        skipped=skipped,
+        ok=len(ok),
+        failed=len(failed),
+        gap_symbols=len(gaps),
+    )
+    return run
