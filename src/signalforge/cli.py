@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 import typer
 
 if TYPE_CHECKING:
+    from signalforge.data.options_backfill import OptionsCoverageSummary
     from signalforge.research.portfolio_metrics import PortfolioMetrics
 
 from signalforge import __version__
@@ -302,7 +303,10 @@ def options_ingest_cmd(
 
     from signalforge.config import get_settings
     from signalforge.data.adapters.massive_options import MassiveOptionsAdapter
-    from signalforge.data.options_ingest import ingest_options_for_underlying
+    from signalforge.data.options_ingest import (
+        ingest_options_for_underlying,
+        record_snapshot_ingestion_run,
+    )
     from signalforge.data.series import PriceSeries
     from signalforge.db.models import Instrument
     from signalforge.db.session import session_scope
@@ -315,6 +319,7 @@ def options_ingest_cmd(
     from datetime import date as _d
 
     with session_scope(write=True) as session:
+        covs = []
         for u in us:
             ref = None
             inst = session.scalar(select(Instrument).where(Instrument.symbol == u))
@@ -330,6 +335,7 @@ def options_ingest_cmd(
                 strike_pct=strike_pct,
                 reference_price=ref,
             )
+            covs.append(cov)
             if cov.error:
                 typer.secho(f"  {u}: {cov.error}", fg=typer.colors.RED)
                 continue
@@ -341,6 +347,9 @@ def options_ingest_cmd(
                 f"strikes {cov.strike_min}-{cov.strike_max}",
                 fg=typer.colors.GREEN,
             )
+        if covs:
+            run = record_snapshot_ingestion_run(session, adapter, covs)
+            typer.echo(f"  ingestion_run #{run.id} [{run.status}] recorded")
     typer.echo(
         "Delayed data (>=15 min). Education/simulation only. "
         "Research signal only — no order was placed."
@@ -352,8 +361,17 @@ def options_backfill_cmd(
     underlyings: Annotated[
         str, typer.Option(help="Comma-separated; default: configured set.")
     ] = "",
-    since: Annotated[str, typer.Option(help="YYYY-MM-DD; default: today - lookback_days.")] = "",
+    since: Annotated[str, typer.Option(help="YYYY-MM-DD; default: until - lookback-days.")] = "",
     until: Annotated[str, typer.Option(help="YYYY-MM-DD; default: today.")] = "",
+    lookback_days: Annotated[
+        int,
+        typer.Option(
+            help=(
+                "Window depth when --since is not given. The window is NEVER "
+                "re-clamped to it afterwards: --since reaches the run unchanged."
+            )
+        ),
+    ] = 0,
     max_contracts: Annotated[int, typer.Option(help="Override contracts-per-underlying cap.")] = 0,
     max_expirations: Annotated[
         int, typer.Option(help="Override expirations-per-underlying cap (narrows the range).")
@@ -383,6 +401,8 @@ def options_backfill_cmd(
     opt = s.research.options
     us = [x.strip().upper() for x in underlyings.split(",") if x.strip()] or list(opt.underlyings)
     caps = BackfillCaps.from_config(opt)
+    if lookback_days:
+        caps = replace(caps, lookback_days=lookback_days)
     if max_contracts:
         caps = replace(caps, contracts_per_underlying=max_contracts)
     if max_expirations:
@@ -433,6 +453,182 @@ def options_backfill_cmd(
         "HISTORICAL settled bars only — never live. Education/simulation only. "
         "Research signal only — no order was placed."
     )
+
+
+@options_app.command("cycle-backfill")
+def options_cycle_backfill_cmd(
+    underlyings: Annotated[
+        str, typer.Option(help="Comma-separated; default: configured set.")
+    ] = "",
+    since: Annotated[str, typer.Option(help="YYYY-MM-DD window start (required).")] = "",
+    until: Annotated[str, typer.Option(help="YYYY-MM-DD window end (required).")] = "",
+    lookback_days: Annotated[int, typer.Option(help="Window depth when --since is not given.")] = 0,
+    max_total_bars: Annotated[int, typer.Option(help="Override the total-bar ceiling.")] = 0,
+    resume: Annotated[int, typer.Option(help="Resume an existing ingestion_run id.")] = 0,
+) -> None:
+    """Per-(underlying, monthly cycle) historical options backfill.
+
+    Every cycle is centred on its OWN point-in-time reference close and selected
+    by the pre-registered moneyness ladder against that single expiry's true
+    vendor strike set. Anything the run cannot serve is excluded and counted by
+    reason — never silently shortened.
+
+    OFF unless ``research.options.cycle_backfill_enabled`` is set: this is a
+    multi-day job that must not start by accident, and it must never run
+    concurrently with the paper-probation worker against the same database file.
+    """
+    ensure_not_engaged()
+    from datetime import date as _d
+
+    from signalforge.config import get_settings
+    from signalforge.config.research import OptionsEvaluationConfig
+    from signalforge.data.adapters.massive_options import MassiveOptionsAdapter
+    from signalforge.data.options_backfill import (
+        CycleBackfillCaps,
+        backfill_option_cycles,
+        coverage_summary,
+    )
+    from signalforge.db.session import session_scope
+
+    s = get_settings()
+    opt = s.research.options
+    if not opt.cycle_backfill_enabled:
+        typer.secho(
+            "options.cycle_backfill_enabled is False — nothing was fetched. This is a "
+            "multi-day run: enable it deliberately, and only against a database file no "
+            "other worker is writing.",
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(code=1)
+    us = [x.strip().upper() for x in underlyings.split(",") if x.strip()] or list(opt.underlyings)
+    end = _d.fromisoformat(until) if until else _d.today()
+    start = (
+        _d.fromisoformat(since)
+        if since
+        else end - timedelta(days=lookback_days or opt.backfill_lookback_days)
+    )
+    caps = CycleBackfillCaps.from_config(opt, window_start=start, window_end=end)
+    if max_total_bars:
+        caps = replace(caps, max_total_bars=max_total_bars)
+
+    adapter = MassiveOptionsAdapter()
+    with session_scope(write=True) as session:
+        run = backfill_option_cycles(
+            session,
+            adapter,
+            us,
+            caps=caps,
+            options_config_hash=OptionsEvaluationConfig().options_config_hash,
+            resume_run_id=resume or None,
+        )
+        _print_options_coverage(coverage_summary(run))
+    typer.echo(
+        "HISTORICAL settled bars only — never live. Education/simulation only. "
+        "Research signal only — no order was placed."
+    )
+
+
+@options_app.command("coverage-report")
+def options_coverage_report_cmd(
+    run_id: Annotated[int, typer.Option("--run", help="ingestion_run id of a cycle backfill.")],
+) -> None:
+    """COVERAGE SUMMARY ONLY — counts and completeness, nothing else.
+
+    This is the one thing a backfill may expose before the strategy
+    pre-registration is committed. No option price, IV, greek, return, credit or
+    P&L value — and no summary statistic over any of them — is printed, and none
+    can be: the summary type has no field that could hold one, which the suite
+    asserts mechanically rather than by review.
+    """
+    from signalforge.data.options_backfill import OptionsCoverageSummary, coverage_summary
+    from signalforge.db.models import IngestionRun
+    from signalforge.db.session import session_scope
+
+    OptionsCoverageSummary.assert_price_free()
+    with session_scope() as session:
+        run = session.get(IngestionRun, run_id)
+        if run is None:
+            typer.secho(f"ingestion_run {run_id} not found", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+        _print_options_coverage(coverage_summary(run))
+    typer.echo(
+        "Counts and completeness only. No price, IV, greek, return, credit or P&L "
+        "value is reported here, and none may be inspected until the strategy "
+        "pre-registration is committed."
+    )
+
+
+def _print_options_coverage(cov: OptionsCoverageSummary) -> None:
+    """Render an ``OptionsCoverageSummary``. Counts, fractions, dates, identities."""
+    typer.secho(
+        f"run #{cov.run_id} [{cov.status}] {cov.window_start}..{cov.window_end} "
+        f"{cov.cycle_rule} {cov.ladder_id} basis={cov.strike_listing_basis}",
+        fg=typer.colors.GREEN if cov.status == "ok" else typer.colors.YELLOW,
+    )
+    typer.echo(
+        f"  cycles: {cov.cycles_covered}/{cov.cycles_total} covered "
+        f"({cov.cycles_bracket_fraction:.3f}), {cov.cycles_excluded} excluded"
+    )
+    for reason, n in cov.exclusions_by_reason:
+        typer.echo(f"    - {reason}: {n}")
+    typer.echo(
+        f"  contracts: {cov.contracts_selected} selected, {cov.contracts_fetched} fetched; "
+        f"shares_per_contract refusals {cov.shares_per_contract_refusals}"
+    )
+    typer.echo(
+        f"  bars: {cov.bars_written} written, {cov.bars_skipped} skipped; "
+        f"continuity {cov.bar_continuity_fraction:.3f} of {cov.sessions_expected} expected"
+    )
+    typer.echo(
+        f"  ceiling {cov.max_total_bars:,} (raised from {cov.max_total_bars_prior:,}, "
+        f"decision 6); pacing {cov.pacing_s}s; earliest available "
+        f"{cov.earliest_available_date}"
+    )
+    if cov.underlyings_failed:
+        typer.secho(f"  retryable: {', '.join(cov.underlyings_failed)}", fg=typer.colors.YELLOW)
+
+
+@options_app.command("corp-actions")
+def options_corp_actions_cmd(
+    symbols: Annotated[
+        str, typer.Option(help="Comma-separated; default: configured underlyings.")
+    ] = "",
+    resume: Annotated[int, typer.Option(help="Resume an existing ingestion_run id.")] = 0,
+) -> None:
+    """Ingest declared dividends + executed splits (the rank-1 source for ``q``).
+
+    The options pricing path takes a continuous dividend yield defaulted to 0.0,
+    and at q=0 a put-selling result is biased in its own favour. Decision 11
+    sources and records q rather than restricting the underlying set; gate 0.g
+    fails any run that used the default.
+    """
+    ensure_not_engaged()
+    from signalforge.config import get_settings
+    from signalforge.data.adapters.massive_options import MassiveOptionsAdapter
+    from signalforge.data.options_corporate_actions import ingest_dividends_and_splits
+    from signalforge.db.session import session_scope
+
+    s = get_settings()
+    syms = [x.strip().upper() for x in symbols.split(",") if x.strip()] or list(
+        s.research.options.underlyings
+    )
+    adapter = MassiveOptionsAdapter()
+    with session_scope(write=True) as session:
+        run = ingest_dividends_and_splits(session, adapter, syms, resume_run_id=resume or None)
+        typer.secho(
+            f"run #{run.id} [{run.status}] rows_written={run.bars_written} "
+            f"skipped={run.bars_skipped}",
+            fg=typer.colors.GREEN if run.status == "ok" else typer.colors.YELLOW,
+        )
+        for sym, d in (run.gaps_json or {}).items():
+            typer.echo(
+                f"  {sym}: {d.get('dividends_written', 0)} dividends "
+                f"({d.get('dividends_seen', 0)} seen), {d.get('splits_written', 0)} splits "
+                f"({d.get('splits_seen', 0)} seen)"
+            )
+        for k, v in (run.symbols_failed or {}).items():
+            typer.secho(f"  FAIL {k}: {v}", fg=typer.colors.RED)
+    typer.echo("Reference data only. Research signal only — no order was placed.")
 
 
 @options_app.command("simulate")

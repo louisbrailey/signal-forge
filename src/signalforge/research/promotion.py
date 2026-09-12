@@ -570,6 +570,39 @@ def _symbols_fingerprint(symbols: list[str]) -> str:
     return hashlib.sha256(",".join(sorted(s.upper() for s in symbols)).encode()).hexdigest()[:10]
 
 
+def _options_scopes_match(stored: dict[str, Any] | None, requested: dict[str, Any] | None) -> bool:
+    """Scope identity, with NULL-vs-present counted as a difference.
+
+    Imported lazily so ``promotion`` keeps no import-time dependency on the
+    options path; the comparison itself is a pure hash over canonical JSON.
+    """
+    from signalforge.research.options_scope import scopes_match
+
+    return scopes_match(stored, requested)
+
+
+def _derived_options_key(symbols: list[str], options_scope: dict[str, Any]) -> str:
+    """A distinct key for an options request that arrived without one.
+
+    The auto key the unkeyed path generates hashes the SYMBOL SET AND NOTHING
+    ELSE, so an options request and an equity request over the same universe
+    derive the *same* key. With the symbol-match fallback correctly refusing to
+    reuse the equity row, an unkeyed options request would then try to insert a
+    second row at that key and fail on ``UniqueConstraint("key")`` — an
+    IntegrityError from the database instead of a decision from this function.
+
+    Folding the scope hash into the key makes the derived key total: two
+    different options scopes get two different keys, and the SAME scope resolves
+    back to its own row through the ordinary keyed path (which still refuses a
+    scope mismatch). The equity auto key is untouched, so no existing caller's
+    key changes by a byte.
+    """
+    from signalforge.research.options_scope import options_scope_hash
+
+    fp = _symbols_fingerprint(symbols)
+    return f"options_auto_{len(symbols)}sym_{fp}_{options_scope_hash(options_scope)[:10]}"
+
+
 def get_or_create_dataset_snapshot(
     session: Session,
     *,
@@ -578,6 +611,7 @@ def get_or_create_dataset_snapshot(
     description: str = "",
     source_note: str = "",
     continuity_mapping_id: int | None = None,
+    options_scope: dict[str, Any] | None = None,
 ) -> DataSnapshot:
     """Resolve the dataset snapshot a promotion evaluation is about to use.
 
@@ -598,8 +632,23 @@ def get_or_create_dataset_snapshot(
     genuinely changed universe or superseding continuity mapping needs a new,
     distinct key, not a quiet reinterpretation of an existing one.
 
+    ``options_scope`` extends exactly that refusal to an options dataset's
+    identity. It is checked on the keyed path, NULL-vs-present included, and it
+    makes the unkeyed symbol-match fallback refuse to match at all — because the
+    live 24-symbol equity snapshot holds precisely the symbols an options
+    evaluation would ask for, and binding to it would collapse the options
+    sealed-look ledger onto the equity one. Nothing about this is a database
+    constraint: ``UniqueConstraint("key")`` is untouched, since a UNIQUE over a
+    nullable scope column would let two rows with the same key and a NULL scope
+    both be legal and would silently remove the protection the live equity
+    snapshots depend on.
+
     Creates a new, immutable snapshot only when neither lookup finds one.
     """
+    if key is None and options_scope is not None:
+        # An options request must not land on the symbol-only auto key: that key
+        # is what the equity path derives for the same universe.
+        key = _derived_options_key(symbols, options_scope)
     if key is not None:
         existing = session.scalar(select(DataSnapshot).where(DataSnapshot.key == key))
         if existing is not None:
@@ -610,6 +659,15 @@ def get_or_create_dataset_snapshot(
                 and existing.continuity_mapping_id is not None
                 and existing.continuity_mapping_id != continuity_mapping_id
             )
+            if not _options_scopes_match(existing.options_scope_json, options_scope):
+                raise ValueError(
+                    f"dataset snapshot key {key!r} already exists (id={existing.id}) with a "
+                    "different options scope than just requested. The options scope IS the "
+                    "dataset's identity: band, ladder, IV policy, q policy, rate, spread "
+                    "multiplier and strike-listing basis all change what the data means. "
+                    "Reusing this key would let a second sealed look at a genuinely "
+                    "different dataset reuse the first sealed row. Use a new, distinct key."
+                )
             if wanted != have or mapping_mismatch:
                 raise ValueError(
                     f"dataset snapshot key {key!r} already exists (id={existing.id}) with "
@@ -621,7 +679,13 @@ def get_or_create_dataset_snapshot(
                     "distinct key for the changed data."
                 )
             return existing
-    else:
+    elif options_scope is None:
+        # Symbol-set fallback — deliberately NOT reachable when an options scope
+        # is supplied. This branch consults the symbol set and nothing else, so
+        # an options evaluation over the 24 approved symbols would otherwise
+        # bind silently to the live EQUITY snapshot and ignore its own scope.
+        # The derived key above already makes that unreachable; this guard is
+        # the second lock, kept so removing either one alone cannot reopen it.
         wanted = sorted(s.upper() for s in symbols)
         for row in session.scalars(
             select(DataSnapshot).where(DataSnapshot.reusable_by_new_evaluations.is_(True))
@@ -634,6 +698,7 @@ def get_or_create_dataset_snapshot(
         description=description,
         source_note=source_note,
         continuity_mapping_id=continuity_mapping_id,
+        options_scope_json=options_scope,
     )
     session.add(snap)
     session.flush()

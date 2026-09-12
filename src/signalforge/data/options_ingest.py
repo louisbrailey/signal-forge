@@ -16,11 +16,64 @@ from sqlalchemy.orm import Session
 
 from signalforge.data.adapters.base import AdapterError
 from signalforge.data.adapters.massive_options import MassiveOptionsAdapter
-from signalforge.db.models import OptionContract, OptionQuoteSnapshot
+from signalforge.db.models import IngestionRun, OptionContract, OptionQuoteSnapshot
 from signalforge.db.types import utcnow
+from signalforge.domain import FeedType
 from signalforge.observability import get_logger
 
 _log = get_logger("options.ingest")
+
+_SNAPSHOT_KIND = "options_snapshot"
+
+
+def record_snapshot_ingestion_run(
+    session: Session,
+    adapter: MassiveOptionsAdapter,
+    coverages: list[OptionsCoverage],
+) -> IngestionRun:
+    """Write the ``IngestionRun`` this path never used to write (blocker D6).
+
+    A data path that leaves no trace cannot be audited, and provenance is a
+    gate-8 input. Counts and identities only — no price, no IV, no greek
+    reaches this row.
+    """
+    today = date.today()
+    ok = [c.underlying for c in coverages if c.error is None]
+    failed = {c.underlying: c.error[:200] for c in coverages if c.error}
+    run = IngestionRun(
+        provider=adapter.provider_name,
+        feed_type=FeedType.OPTIONS_CHAIN,
+        kind=_SNAPSHOT_KIND,
+        requested_start=today,
+        requested_end=today,
+        adjusted=False,
+        symbols_requested=[c.underlying for c in coverages],
+        status="ok" if not failed else ("partial" if ok else "failed"),
+        started_at=utcnow(),
+        finished_at=utcnow(),
+        bars_written=sum(c.snapshots_written for c in coverages),
+        symbols_ok=ok,
+        symbols_failed=failed,
+        gaps_json={
+            c.underlying: {
+                "contracts_seen": c.contracts_seen,
+                "contracts_written": c.contracts_written,
+                "snapshots_written": c.snapshots_written,
+                "expirations": list(c.expirations),
+                "vendor_greeks_present": c.greeks_present,
+                "vendor_iv_present": c.iv_present,
+            }
+            for c in coverages
+        },
+        notes=(
+            "point-in-time chain snapshots; DELAYED price fields, END_OF_DAY open "
+            "interest, vendor greeks/iv usually absent on this entitlement. Forward "
+            "series only — it can never be a history for a backtest."
+        ),
+    )
+    session.add(run)
+    session.flush()
+    return run
 
 
 @dataclass(slots=True)
