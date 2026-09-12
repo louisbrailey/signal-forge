@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 
 from signalforge import RESEARCH_ONLY_NOTICE
 from signalforge.db.models import AgentReport, AuditLog
+from signalforge.db.session import set_write_intent
 from signalforge.observability import get_logger
 
 _log = get_logger("agents")
@@ -147,6 +148,12 @@ class ResearchAgent(ABC):
     def run(self, session: Session, *, as_of: datetime | None = None) -> AgentReportResult:
         started = time.monotonic()
         as_of = as_of or datetime.now(UTC)
+        # Collect + narrate under NO write transaction: the LLM call can take
+        # seconds and a BEGIN IMMEDIATE held across it blocks every other writer
+        # (worker jobs, ingestion) — docs/SQLITE_CONCURRENCY.md. Write intent is
+        # re-armed only for the short persist step.
+        session.commit()
+        set_write_intent(session, False)
         try:
             evidence = json.loads(json.dumps(self.collect(session), default=str))
             summary = self.summarize(evidence)
@@ -181,6 +188,8 @@ class ResearchAgent(ABC):
                 error=repr(exc)[:300],
             )
         result.duration_s = round(time.monotonic() - started, 2)
+        session.commit()  # end the read transaction before re-arming write intent
+        set_write_intent(session, True)
         self._persist(session, result, as_of)
         return result
 
