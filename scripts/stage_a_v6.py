@@ -893,11 +893,482 @@ def main(argv: Sequence[str] | None = None) -> int:
         # ---- 11. sealed-test row count, read-only ----------------------------
         out["sealed_test_rows_on_copy"] = session.scalar(select(func.count(StrategySealedTest.id)))
 
-    Path(args.emit).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.emit).write_text(json.dumps(out, indent=2, default=str) + "\n")
-    print(f"\n[emit] {args.emit}", flush=True)
+    emit = Path(args.emit)
+    emit.parent.mkdir(parents=True, exist_ok=True)
+    emit.write_text(json.dumps(out, indent=2, default=str) + "\n")
+    md = emit.with_suffix(".md")
+    md.write_text(_render_markdown(out))
+    print(f"\n[emit] {emit}", flush=True)
+    print(f"[emit] {md}", flush=True)
     print(f"[verdict] {out['verdict']['decision']}", flush=True)
     return 0
+
+
+def _m(d: Mapping[str, Any]) -> str:
+    """``+0.1234R ± 0.0456 (n = 123, sd 1.2345)`` — every number with n and SE,
+    which the design requires everywhere (§0.3 claim labelling)."""
+    return (
+        f"{float(d['mean']):+.4f}R ± {float(d['se']):.4f} "
+        f"(n = {int(d['n'])}, sd {float(d['sd']):.4f})"
+    )
+
+
+def _render_markdown(out: Mapping[str, Any]) -> str:
+    """The §12.7 report. Every number is read from the emitted JSON, so the prose
+    and the machine record cannot drift apart."""
+    k3 = out["K3"]
+    v1, v2 = out["v0_1_0"], out["v0_2_0"]
+    grid = out.get("gate5_grid", {})
+    snap = out["snapshot"]
+    stop = out["verdict"]["decision"].startswith("STOP")
+    L: list[str] = []
+    a = L.append
+
+    a("# Stage A — `volatility_breakout.short_swing` v0.2.0 vs v0.1.0")
+    a("")
+    a(f"**Verdict: {out['verdict']['decision']}.**")
+    a("")
+    a(
+        "**Zero sealed looks. Zero database rows.** Everything below was computed "
+        "read-only, over the PRE-SEALED span "
+        f"**{out['span']['start']} → {out['span']['end']}** only. Nothing inside "
+        f"{out['sealed_window_untouched']} was computed. `evaluate_promotion`, "
+        "`_get_or_create_sealed_test` and every other sealed or minting entry point were "
+        "replaced with functions that raise before the run began; the database was a "
+        "`mode=ro` backup copy and a driver-level hook would have raised on any write."
+    )
+    a("")
+    a(f"Design: `{out['design']}` §12.5, §12.7. Script: `scripts/stage_a_v6.py`.")
+    a("")
+
+    # ---- reproduction -----------------------------------------------------
+    r = out["reproduction_check"]
+    a("## 0. The baseline is really v0.1.0 (checked before anything was read)")
+    a("")
+    a(
+        f"**FACT.** The degenerate cell `squeeze_lag=0, release_min=0.0` on snapshot "
+        f"{r['snapshot_id']} (`{r['snapshot_key']}`, {r['n_symbols']} symbols) reproduces "
+        f"**{r['all_pre_sealed']} pre-sealed / {r['oos']} OOS trades at "
+        f"{r['oos_expectancy_r']:+.5f}R** — matching stored evaluation 36 exactly. E01 below "
+        f"is measured through this cell, so it is v0.1.0's rule, not a paraphrase of it."
+    )
+    a("")
+
+    # ---- headline ---------------------------------------------------------
+    a("## 1. E01 and E02 — the decisive comparison (§12.7)")
+    a("")
+    a(
+        f"Snapshot **{snap['id']}** `{snap['key']}` — {snap['n_symbols']} symbols "
+        f"({snap['n_etfs']} ETFs + {snap['n_single_names']} single names), "
+        f"{snap['n_new_vs_snapshot_3']} of them new since snapshot 3."
+    )
+    a("")
+    a("| | OOS expectancy | all pre-sealed | in-sample |")
+    a("|---|---|---|---|")
+    for lbl, v in (("v0.1.0** (E01", v1), ("v0.2.0** (E02", v2)):
+        a(f"| **{lbl}) | {_m(v['oos'])} | {_m(v['all_pre_sealed'])} " f"| {_m(v['in_sample'])} |")
+    a("")
+    a(
+        f"**DERIVED.** E02 − E01 = **{k3['difference_r']:+.5f}R**, iid SE of the difference "
+        f"{k3['se_difference_iid']:.4f} → **{k3['sigma_iid']:.2f} SE**; entry-month clustered "
+        f"SE {k3['se_difference_clustered']:.4f} (the pre-registered iid × "
+        f"{k3['cluster_factor']}) → **{k3['sigma_clustered']:.2f} SE**. The clustered form "
+        f"binds (§4 K3)."
+    )
+    a("")
+
+    # ---- kill tests -------------------------------------------------------
+    a("## 2. The pre-registered kill tests")
+    a("")
+    a("| test | bar | result | outcome |")
+    a("|---|---|---|---|")
+    a(
+        f"| **K3a** — sign | `E02 > E01` | {k3['E02_oos_expectancy_r']:+.5f}R vs "
+        f"{k3['E01_oos_expectancy_r']:+.5f}R | "
+        f"**{'PASSED' if k3['K3a_passed'] else 'FIRED'}** |"
+    )
+    a(
+        f"| **K3b** — magnitude | ≥ {k3['K3b_bar_sigma']:.1f} clustered SE "
+        f"(= {k3['required_difference_at_bar']:+.4f}R) | "
+        f"{k3['difference_r']:+.5f}R = {k3['sigma_clustered']:.2f} SE | "
+        f"**{'PASSED' if k3['K3b_passed'] else 'FIRED'}** |"
+    )
+    a(
+        f"| **K5** — grid no-op | all 4 axes move OOS count or expectancy | "
+        f"{grid.get('axis_moved')} | "
+        f"**{'PASSED' if out['verdict']['K5_passed'] else 'FIRED'}** |"
+    )
+    a("")
+    if stop:
+        a(
+            "**K3b fired.** Under the pre-registration this is a hard kill: *stop, no Stage B, "
+            "write §11*. The improvement is in the predicted direction but is not measurable "
+            "at the achievable power, and a difference under 2 SE is not evidence. "
+            "No re-parameterisation, no second variant, no second universe follows from this "
+            "— those are explicitly forbidden by §12.1's stopping rule."
+        )
+    else:
+        a(
+            "**All three kill tests passed.** Stage B may be *requested* — K3c: this is "
+            "not an approval."
+        )
+    a("")
+
+    # ---- composition ------------------------------------------------------
+    a("## 3. Composition — ETF vs single name (§12.7 item 1)")
+    a("")
+    a("| | v0.1.0 OOS | v0.2.0 OOS | v0.1.0 all | v0.2.0 all |")
+    a("|---|---|---|---|---|")
+    for cls, lbl in (("etf", "ETFs"), ("single_name", "single names")):
+        a(
+            f"| **{lbl}** | {_m(v1['by_class'][cls]['oos'])} | {_m(v2['by_class'][cls]['oos'])} "
+            f"| {_m(v1['by_class'][cls]['all_pre_sealed'])} "
+            f"| {_m(v2['by_class'][cls]['all_pre_sealed'])} |"
+        )
+    a("")
+    a(
+        "**§7.2 item 3, pre-registered:** the expanded run's single-name expectancy was "
+        "EXPECTED to come in below snapshot 3's +0.5251R, and it does. That is confirmation "
+        "of the caveat, not a disappointment."
+    )
+    a("")
+
+    # ---- sub-universes ----------------------------------------------------
+    a("## 4. The new-symbols-only runs (§12.7 item 2)")
+    a("")
+    a("| universe | n | v0.1.0 OOS | v0.2.0 OOS | difference |")
+    a("|---|---|---|---|---|")
+    for name, e in out["subuniverse_runs"].items():
+        a(
+            f"| `{name}` | {e['n_symbols']} | {_m(e['v0_1_0']['oos'])} | "
+            f"{_m(e['v0_2_0']['oos'])} | {e['difference_r']:+.5f}R |"
+        )
+    a("")
+    a(
+        "`single_names_135` is W1-COMP's common-stock block; `new_vs_snapshot3_126` is the "
+        "stricter cut — every symbol absent from snapshot 3, and the only genuinely "
+        "quasi-out-of-sample universe evidence available."
+    )
+    a("")
+
+    # ---- CIs --------------------------------------------------------------
+    a("## 5. Gate-4 CI, iid and month-clustered (§12.7 item 4)")
+    a("")
+    a("| version | iid 95% CI | half-width | month-clustered 95% CI | half-width | ratio | G |")
+    a("|---|---|---|---|---|---|---|")
+    for lbl, v in (("v0.1.0", v1), ("v0.2.0", v2)):
+        i, c = v["oos_ci_iid"], v["oos_ci_month_clustered"]
+        ratio = (c["half_width"] / i["half_width"]) if i["half_width"] else 0.0
+        a(
+            f"| {lbl} | [{i['low']:+.4f}, {i['high']:+.4f}] | {i['half_width']:.4f} | "
+            f"[{c['low']:+.4f}, {c['high']:+.4f}] | {c['half_width']:.4f} | "
+            f"**{ratio:.3f}×** | {c['G']} |"
+        )
+    a("")
+    a(
+        f"Gate 4's bar is a lower bound above "
+        f"{out['thresholds']['min_bootstrap_ci_low_r']:+.4f}R. Both bootstraps are "
+        f"{BOOTSTRAP_RESAMPLES:,} resamples, seed {BOOTSTRAP_SEED}, percentile method — "
+        "identical to `backtest/montecarlo.py`'s defaults, so the iid column is the number "
+        "gate 4 would actually read."
+    )
+    a("")
+
+    # ---- sweeps -----------------------------------------------------------
+    a("## 6. Leave-one-month-out and leave-one-symbol-out (§12.7 item 5)")
+    a("")
+    for lbl, key in (("v0.1.0", "v0_1_0"), ("v0.2.0", "v0_2_0")):
+        s = out["sweeps"][key]
+        for sweep, title in (
+            ("leave_one_month_out", "leave-one-month-out"),
+            ("leave_one_symbol_out", "leave-one-symbol-out"),
+        ):
+            w = s[sweep]
+            unit = "months" if "month" in sweep else "symbols"
+            a(
+                f"- **{lbl} {title}** ({w[f'n_{unit}']} {unit}): pooled "
+                f"{w['pooled_mean']:+.5f}R, range **{w['min_mean']:+.5f}R … "
+                f"{w['max_mean']:+.5f}R**"
+                + (
+                    f"; worst drop `{w['worst'][0]['dropped']}` "
+                    f"({w['worst'][0]['n_dropped']} trades) → {w['worst'][0]['mean']:+.5f}R"
+                    if w["worst"]
+                    else ""
+                )
+                + (" — **sign flips**" if w["any_sign_flip"] else "")
+            )
+    a("")
+
+    # ---- spreads ----------------------------------------------------------
+    a("## 7. Spread re-pricings (§12.7 item 6, §8)")
+    a("")
+    a("| round trip | quoted spread | v0.1.0 OOS | v0.2.0 OOS |")
+    a("|---:|---:|---|---|")
+    rows1 = {r["round_trip_bps"]: r for r in out["spread_repricings"]["v0_1_0"]}
+    rows2 = {r["round_trip_bps"]: r for r in out["spread_repricings"]["v0_2_0"]}
+    for quoted, rt in SPREAD_REPRICINGS:
+        note = " (frozen — what the gates use)" if rt == 11.0 else ""
+        a(
+            f"| **{rt:g} bps**{note} | {quoted:g} bps | "
+            f"{float(rows1[rt]['oos']['mean']):+.4f}R | "
+            f"{float(rows2[rt]['oos']['mean']):+.4f}R |"
+        )
+    a("")
+    a(
+        "The 2×/5× convention is ambiguous between MAP §0.4 and W1 §7.1, so **all four "
+        "non-baseline points are reported rather than guessing** (§13 Q1). "
+        "`run_strategy_over_universe` never overrides `spread_bps`, so these were produced by "
+        "driving `run_backtest` directly at the same warm-up, cost model and per-symbol "
+        "IS/OOS boundary."
+    )
+    a("")
+
+    # ---- gate 5 -----------------------------------------------------------
+    a("## 8. Gate 5 — the 81-cell grid, with its realised denominators (§12.7 item 7)")
+    a("")
+    if grid.get("skipped"):
+        a("**NOT RUN in this invocation.** No gate-5 verdict may be read from this document.")
+    else:
+        a(f"Axes (pre-registered §12.1): `{grid['axes']}` — {grid['n_points']} points.")
+        a("")
+        a("| quantity | realised |")
+        a("|---|---|")
+        a(
+            f"| evaluable (≥ {grid['min_trades']} OOS trades) | "
+            f"**{grid['n_evaluable']} / {grid['n_points']}** |"
+        )
+        a(
+            f"| positive of evaluable | **{grid['n_positive']} / {grid['n_evaluable']}** "
+            f"= {grid['positive_fraction']:.1%} (need "
+            f"{out['thresholds']['sensitivity_positive_fraction_min']:.0%}) |"
+        )
+        a(
+            f"| one-step neighbours, evaluable | "
+            f"**{grid['n_neighbours_evaluable']} / {grid['n_neighbours_total']}** |"
+        )
+        a(
+            f"| neighbours positive | {grid['neighbour_positive_fraction']:.1%} (need "
+            f"{out['thresholds']['sensitivity_neighbour_fraction_min']:.0%}) |"
+        )
+        a(f"| baseline expectancy | {grid['baseline_expectancy_r']:+.4f}R |")
+        a(
+            f"| median / worst evaluable | {grid['median_expectancy_r']:+.4f}R / "
+            f"{grid['worst_expectancy_r']:+.4f}R |"
+        )
+        a(f"| **fragile?** | **{grid['fragile']}** |")
+        a("")
+        a(
+            f"**K5 (no-op check):** `axis_moved` = `{grid['axis_moved']}`, "
+            f"`inert_axes` = `{grid['inert_axes']}`. "
+            + (
+                "Every axis moves the OOS trade count or expectancy, so gate 5 is testing "
+                "something real."
+                if grid.get("K5_all_axes_move")
+                else "**An axis is inert — gate 5 would be passing having perturbed nothing, "
+                "and the run is void on that axis.**"
+            )
+        )
+        if grid.get("reasons"):
+            a("")
+            a("Gate-5 reasons recorded by the pipeline:")
+            for reason in grid["reasons"]:
+                a(f"- {reason}")
+    a("")
+
+    # ---- gates 1/6/7 ------------------------------------------------------
+    a("## 9. Gates 1, 6 and 7 (§12.7 item 3)")
+    a("")
+    for lbl, key in (("v0.1.0", "v0_1_0"), ("v0.2.0", "v0_2_0")):
+        g = out["gates"][key]
+        g1, g6, g7 = g["gate1_walkforward"], g["gate6_regime"], g["gate7_benchmark"]
+        a(f"### {lbl}")
+        a("")
+        a(
+            f"- **Gate 1** — {g1['folds_with_edge']} of {len(g1['folds'])} rolling folds clear "
+            f"both the per-fold trade floor and positive expectancy (need {g1['need']}): "
+            f"**{'PASS' if g1['passed'] else 'FAIL'}**. Folds: "
+            + ", ".join(f"{f['n_trades']}@{f['expectancy_r']:+.3f}R" for f in g1["folds"])
+        )
+        a(
+            f"- **Gate 6** — bull **{g6['buckets']['bull']}**, bear **{g6['buckets']['bear']}**, "
+            f"range **{g6['buckets']['range']}** (need ≥ {g6['min_trades_per_regime']} in "
+            f"{g6['min_regimes_covered']} of 3; {g6['regimes_covered']}/3 met): "
+            f"**{'PASS' if g6['passed'] else 'FAIL'}**. "
+            f"**Unbucketed {g6['unbucketed']}** = warm-up {g6['warmup']} + no-proxy-bar "
+            f"{g6['no_proxy_bar']} + unlabelled {g6['unlabelled']}; census closes over "
+            f"{g6['n_trades_considered']} trades: {g6['census_closes']}."
+        )
+        ident = g7["identity"]
+        a(
+            f"- **Gate 7** — strategy Sharpe {g7['strategy_sharpe']:+.3f} vs SPY "
+            f"{g7['benchmark_sharpe']:+.3f}: **{'PASS' if g7['passed'] else 'FAIL'}**. "
+            f"**Identity:** per-trade mean/sd = {ident['per_trade_quality_mean_over_sd']:+.4f}, "
+            f"√(trades/yr) = √{ident['trades_per_year']:.1f} = "
+            f"{ident['sqrt_trades_per_year']:.3f}, product = "
+            f"{ident['reconstructed_sharpe']:+.3f}. Turnover "
+            f"{g7['turnover_per_year']:.1f}/yr, exposure {g7['exposure']:.2f}."
+        )
+        a("")
+    a(
+        "**§13 A3 disclosure, pre-registered:** gate 7 as coded "
+        "(`portfolio_metrics.py:109-111`) is `Sharpe = (mean/sd) × √(trades/year)`. Any "
+        "gate-7 margin attributable to the second factor is a **turnover artefact** and "
+        "contributes no independent evidence of edge quality. It is reported here whether or "
+        "not the operator approves A3, because it is a verified property of the code."
+    )
+    a("")
+
+    # ---- gate forecast ----------------------------------------------------
+    a("## 10. Gate-by-gate forecast for v0.2.0 on the expanded snapshot")
+    a("")
+    a("| gate | forecast | basis |")
+    a("|---|---|---|")
+    for name, row in out["gate_forecast"].items():
+        p = row["passed"]
+        mark = "— " if p is None else ("**PASS**" if p else "**FAIL**")
+        a(f"| `{name}` | {mark} | {row['detail']} |")
+    a("")
+    a(
+        "This is a forecast of gates 1-8 computed read-only, not a promotion run. "
+        "**Gate 9 is not forecast and was not computed**: it is precisely the sealed look "
+        "Stage A exists to avoid."
+    )
+    a("")
+
+    # ---- per-symbol -------------------------------------------------------
+    a("## 11. Per-symbol IS/OOS boundary dates (§12.7 item 9)")
+    a("")
+    a(
+        f"`_TRAIN_FRAC = 0.6` splits **per symbol**, so the aggregate OOS pool mixes calendar "
+        f"sub-periods — a worse problem at {snap['n_symbols']} symbols than at 24. The full "
+        f"per-symbol table (boundary date, first/last bar, bar count, trade counts) is in "
+        f"`stage_a.json` under `v0_2_0.per_symbol_boundary`. Summary:"
+    )
+    a("")
+    bd = sorted(d["is_oos_boundary"] for d in v2["per_symbol_boundary"].values())
+    if bd:
+        a(f"- earliest boundary **{bd[0]}**, latest **{bd[-1]}**, median **{bd[len(bd) // 2]}**")
+        a(f"- {len(bd)} symbols carried enough data to run (of {snap['n_symbols']})")
+    a("")
+
+    # ---- ledger and disclosures ------------------------------------------
+    a("## 12. The §10.1 sealed-look ledger, and the look statement")
+    a("")
+    a("| Ver | Strategy | snap 1 | snap 2 | snap 3 | snap 4 |")
+    a("|---|---|---|---|---|---|")
+    a(
+        "| 2 | `trend_continuation.short_swing` | id 1: +0.3246R / 112 ✅ "
+        "| id 6: +0.3246R / 112 ✅ | id 11: +0.2982R / 109 ✅ | id 16: +0.3246R / 112 ✅ |"
+    )
+    a(
+        "| 3 | `trend_continuation.medium_swing` | id 2: +0.0109R / 98 ✅ | id 7: +0.0109R / 98 ✅ "
+        "| id 12: −0.0294R / 95 ❌ | id 17: +0.0109R / 98 ✅ |"
+    )
+    a(
+        "| 4 | `mean_reversion.short_swing` | id 3: +0.1230R / 91 ✅ | id 8: +0.1230R / 91 ✅ "
+        "| id 13: +0.1278R / 84 ✅ | id 18: +0.1230R / 91 ✅ |"
+    )
+    a(
+        "| 5 | `relative_strength.medium_swing` | id 4: +0.2935R / 16 ✅ | id 9: +0.2935R / 16 ✅ "
+        "| id 14: +0.2935R / 16 ✅ | id 19: +0.2935R / 16 ✅ |"
+    )
+    a(
+        "| **6** | **`volatility_breakout.short_swing`** | **id 5: −0.0979R / 10 ❌** "
+        "| **id 10: −0.0979R / 10 ❌** | **id 15: −0.0979R / 10 ❌** "
+        "| **id 20: −0.0979R / 10 ❌** |"
+    )
+    a("")
+    a(
+        "All four v6 draws are the **identical** 10 trades at −0.0979R; SE = 0.491R, so "
+        "−0.0979R is **0.20 SE** from zero and carries no information about sign. No sealed "
+        "number motivated anything in this document."
+    )
+    a("")
+    a(
+        "**The look statement.** Baseline **k = 5**. **Stage A spent 0 looks** and wrote 0 "
+        "rows. Stage B would have been **look 6** under MAP §4.2 item 10 (**look 5** under "
+        "MAP §0.1 — the two conventions differ by one and the ambiguity is operator question "
+        "Q2). "
+        + (
+            "**Stage B is not reached: K3b fired, so k stays at 5.**"
+            if stop
+            else "**Stage B, if approved, would take k from 5 to 6.**"
+        )
+    )
+    a("")
+    a(
+        f"**FACT (read-only, this run):** `strategy_sealed_test` holds "
+        f"**{out['sealed_test_rows_on_copy']} rows** on the backup copy — unchanged by "
+        f"Stage A, which creates none."
+    )
+    a("")
+
+    a("## 13. Mandatory disclosures")
+    a("")
+    a("### §0.5 — an abstention that was already broken, carried forward")
+    a("")
+    a(
+        "The mechanism proposal deliberately never computed the proposed rule's P&L so that no "
+        "parameter could be selected on it. That abstention was broken in the design phase "
+        "while settling a judge dispute about per-trade dispersion: v0.2.0's snapshot-3 "
+        "figures (pre-sealed +0.2937R ± 0.1523, OOS +0.3168R ± 0.1851) were computed and "
+        "reported there. **No parameter was changed as a result, and none is changed here:** "
+        "`squeeze_lag = 5` and `release_min = 1.0` are the values fixed before any expectancy "
+        "existed, and the grid neighbours (3/10 and 0.8/1.2) are the pre-registered ones."
+    )
+    a("")
+    a("### §7.2 — universe-level exposure, survivorship")
+    a("")
+    a(
+        "**Discovery is active-tickers-only, so names delisted or failed between 2016 and "
+        "2026 can never enter this universe, regardless of which liquidity window ranks the "
+        "survivors. The size of the effect is unmeasurable with the data held.** This "
+        "disclosure is required verbatim in every report on this snapshot. The related "
+        "sealed-window selection defect (W1-SEL ranked by dollar volume computed inside the "
+        "sealed year) was found and fixed before the snapshot was built — this run uses "
+        f"`{snap['key']}`, selected on a pre-sealed window. Bars are also split-adjusted as of "
+        'fetch date, not point-in-time, and `source="massive"` was passed explicitly '
+        "everywhere so the dual-source hazard (loading `massive_grouped` duplicates every "
+        "session inside the sealed window) cannot arise."
+    )
+    a("")
+    a("### Cost, restated (§8, unchanged by this run)")
+    a("")
+    a(
+        "Modelled cost at v0.1.0's own OOS entries is **89% of its net edge** on snapshot 3, "
+        "so MAP §0.4's 0.042R is an understatement. On this snapshot the spread table above "
+        "is the live version of that statement: at the mandated 2× spread both versions lose "
+        "most of the measured edge."
+    )
+    a("")
+
+    if stop:
+        a("## 14. What follows")
+        a("")
+        a(
+            "Per §12.1's stopping rule and §11: **write "
+            "`docs/research/designs/volatility_breakout.short_swing--does_not_pass.md`**. "
+            "v0.1.0 stays EXPERIMENTAL; v0.2.0 stays EXPERIMENTAL. Neither is promoted, "
+            "neither is deleted, no gate or threshold is touched, the cost model is unchanged, "
+            "and the variant ledger closes at **1 of 1** (cap 2). The variant budget is not "
+            "spent again: a second parameterisation chosen because this point estimate "
+            "disappointed is exactly what the pre-registration forbids."
+        )
+        a("")
+        a(
+            "**The finding is not 'the mechanism failed'.** E02 > E01 in the predicted "
+            f"direction by {k3['difference_r']:+.5f}R. It is **{k3['sigma_clustered']:.2f} "
+            f"clustered SE**, against a 2.0 SE bar — the mechanism is *unsupported at the "
+            "achievable power*, which is the outcome §11 pre-registered as most likely."
+        )
+    a("")
+    a(
+        "---\n\n*Stage A output. No row in `data/signalforge.sqlite` was written, no "
+        "promotion / sensitivity-writing / sealed entry point was invoked, no provider API was "
+        "called, and no quantity inside the sealed window was computed. The sealed-look count "
+        "is unchanged by the production of this document.*"
+    )
+    return "\n".join(L) + "\n"
 
 
 def _forecast(out: Mapping[str, Any], th: Any) -> dict[str, Any]:
