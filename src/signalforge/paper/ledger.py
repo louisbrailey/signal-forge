@@ -118,6 +118,7 @@ def record_decision(
         plan_json=_plan(cand),
         why_qualified="; ".join(cand.reasons_qualify),
         why_might_fail="; ".join(cand.reasons_fail),
+        actor=actor,
         created_at=utcnow(),
     )
     session.add(trade)
@@ -230,6 +231,11 @@ def accept_candidate(
         plan_json=_plan(cand) | {"shares": shares, "fill_price": round(fill_price, 4)},
         why_qualified="; ".join(cand.reasons_qualify),
         why_might_fail="; ".join(cand.reasons_fail),
+        # The same ``actor`` that is frozen into the snapshot JSON, also written
+        # to the indexed column an order-authorisation predicate reads (D6 §5.3).
+        # Nothing else about this path changes: the same order, fill, position,
+        # cash movement, and snapshot payload are produced as before.
+        actor=actor,
         created_at=now,
     )
     session.add(trade)

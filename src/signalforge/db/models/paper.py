@@ -114,6 +114,13 @@ class PaperTrade(Base, IntPK):
     plan_json: Mapped[dict[str, Any]] = mapped_column(JSON)  # entry/exit/stop/time-stop
     why_qualified: Mapped[str] = mapped_column(Text, default="")
     why_might_fail: Mapped[str] = mapped_column(Text, default="")
+    # First-class, indexed record of WHO decided (D6 ADR §5.3). The same value
+    # is still frozen into ``signal_snapshot_json["decision"]["actor"]``; this
+    # column exists because an order-authorisation predicate (§5 P6) must not
+    # depend on the shape of a free-form JSON blob a future writer could change
+    # without breaking anything visible. Same type/default as
+    # ``TradeCorrection.actor``.
+    actor: Mapped[str] = mapped_column(String(60), default="local-user", index=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
 
 

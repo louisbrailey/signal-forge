@@ -7,6 +7,11 @@ autogenerate and ``Base.metadata.create_all`` see the full schema.
 from __future__ import annotations
 
 from signalforge.db.base import Base
+from signalforge.db.models.execution import (
+    ArmedStrategy,
+    ExecutionEvent,
+    ExecutionLimits,
+)
 from signalforge.db.models.grid import (
     GridPosition,
     GridTradeRow,
@@ -131,6 +136,10 @@ __all__ = [
     "PaperTrade",
     "TradeCorrection",
     "JournalEntry",
+    # execution (D6 ADR — inert until an operator arms a strategy version)
+    "ArmedStrategy",
+    "ExecutionLimits",
+    "ExecutionEvent",
     # grid (mechanical strategy — NOT promotion-gated)
     "GridPosition",
     "GridTradeRow",

@@ -60,9 +60,22 @@ def test_grid_migration_matches_the_declared_models(db_url: str) -> None:
     engine.dispose()
 
 
+#: The grid migration's own revision. Named rather than reached with ``-1``:
+#: this test is about what the GRID migration adds, and ``-1`` means "one step
+#: back from head", which silently becomes a different migration the moment
+#: anything lands after it (it did, when the execution skeleton landed).
+GRID_REVISION = "f1c4a8b2d6e7"
+
+
 def test_downgrade_removes_only_the_grid_tables(db_url: str) -> None:
     cfg = alembic_config(db_url)
     engine = create_engine(db_url)
+    head_tables = set(inspect(engine).get_table_names())
+    assert {"grid_position", "grid_trade"} <= head_tables
+
+    # Rewind to the grid migration itself, so the delta measured below is the
+    # grid migration's and nothing else's.
+    command.downgrade(cfg, GRID_REVISION)
     before = set(inspect(engine).get_table_names())
     assert {"grid_position", "grid_trade"} <= before
 
@@ -73,5 +86,5 @@ def test_downgrade_removes_only_the_grid_tables(db_url: str) -> None:
     assert before - after == {"grid_position", "grid_trade"}
 
     command.upgrade(cfg, "head")
-    assert set(inspect(engine).get_table_names()) == before
+    assert set(inspect(engine).get_table_names()) == head_tables
     engine.dispose()
