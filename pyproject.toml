@@ -294,9 +294,87 @@ forbidden_modules = [
     "signalforge.data.adapters.registry",
     "signalforge.universe.pipeline",
     "signalforge.killswitch",
+    # D6 ADR §17.2: named explicitly here as well as in S15b, so the agents
+    # contract states on its own face that no agent reaches an order.
+    "signalforge.execution",
     "httpx",
     "requests",
 ]
 # The LLM client is the one sanctioned network path for agents (explanatory
 # narratives only, grounded + guarded); it may use httpx as it used the SDK.
 ignore_imports = ["signalforge.llm.client -> httpx"]
+
+# ---------------------------------------------------------------------------
+# S15a / S15b — the execution boundary (D6 ADR §17.2, I-E1).
+#
+# These two contracts run in OPPOSITE directions and neither subsumes the other:
+# S15a keeps the execution layer away from the layers that must never shape an
+# order; S15b keeps every one of those layers away from the execution layer.
+# The inbound one is the contract the operator's "no LLM ever decides an order"
+# guarantee actually rests on — nothing in the pre-existing contract set stopped
+# signalforge.llm / .agents / .app from importing a future signalforge.execution.
+#
+# `allow_indirect_imports` is deliberately NOT set on either contract. A
+# forbidden contract reports indirect chains unless it is set, and an LLM that
+# reaches an order through two hops has still reached it. Setting it would be
+# the cheap way out of a red build and would make ADR §22's claim of structural
+# enforcement false; it must not be taken. The compensating rule is D6 §2: the
+# execution job spec is injected from signalforge.cli only, so neither
+# signalforge.scheduler nor signalforge/app/** ever gains an import edge.
+#
+# NOTE (drift hazard recorded rather than silently resolved): the contract named
+# plain "S15" above is the mechanical-grid contract and is unrelated to these
+# two. The S15a/S15b names come verbatim from D6 ADR §17.2 and are kept so the
+# ADR, ARCHITECTURE.md and tests/safety/test_s15_execution_boundary.py all agree.
+# ---------------------------------------------------------------------------
+
+# S15a is written out in full here but is COMMENTED OUT until signalforge.execution
+# exists (I-E2), because import-linter 2.15 raises
+#     Module 'signalforge.execution' does not exist.
+# for a missing *source* module (ForbiddenContract._check_all_modules_exist_in_graph),
+# while a missing *forbidden* module is tolerated. So S15b and the S14 addition below
+# are live from this commit and bind the moment the package appears; S15a cannot be
+# live before the package exists without failing `make lint` outright.
+#
+# S15a enforces nothing today regardless (it constrains what execution imports, and
+# there is no execution code), so nothing is lost by the wait — but it must not be
+# forgotten. `test_s15a_contract_is_active_once_execution_exists` in
+# tests/safety/test_s15_execution_boundary.py FAILS the safety suite the moment
+# signalforge.execution exists while this block is still commented out.
+#
+# Verified green against a throwaway stub src/signalforge/execution/__init__.py
+# (docstring + EXECUTION_DISABLED_BY_DEFAULT only) per D6 ADR §17.2 requirement 2;
+# the stub was removed and is not part of this commit.
+#
+# [[tool.importlinter.contracts]]
+# name = "S15a: the execution layer never imports the LLM, agents, alerts, scan, or SF1000 layers"
+# type = "forbidden"
+# source_modules = ["signalforge.execution"]
+# forbidden_modules = [
+#     "signalforge.llm",
+#     "signalforge.agents",
+#     "signalforge.alerts",
+#     "signalforge.research.scan",
+#     "signalforge.sf1000",
+# ]
+
+[[tool.importlinter.contracts]]
+name = "S15b: nothing outside the execution layer may import it — no LLM, agent, app, research, alert, or SF1000 code path reaches an order"
+type = "forbidden"
+source_modules = [
+    "signalforge.llm",
+    "signalforge.agents",
+    "signalforge.app",
+    "signalforge.research",
+    "signalforge.alerts",
+    "signalforge.sf1000",
+    "signalforge.backtest",
+    "signalforge.paper",
+    "signalforge.portfolio",
+    "signalforge.scheduler",
+]
+# The WHOLE package, not just .brokers. signalforge.cli is deliberately absent
+# from the source list: the arming ceremony and the execution command group live
+# there, it is the one sanctioned inbound edge, and it is a human-typed entry
+# point with no LLM on it (D6 §17.2 note 2). T12 asserts it is the ONLY one.
+forbidden_modules = ["signalforge.execution"]
