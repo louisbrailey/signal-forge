@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     # string toggles execution — there is no options execution path.
     options_provider: str = ""
     options_api_key: SecretStr = SecretStr("")
+    # Minimum seconds between HTTP requests to the OPTIONS provider. ``None``
+    # (the default) inherits ``market_data_min_request_spacing_s`` — options
+    # traffic shares the equities key unless ``options_api_key`` is set, so it
+    # shares that account's rate budget too. Set it only when the options
+    # entitlement's own rate limit is known (D1 §7.5 / OQ-2); a literal is
+    # never hard-coded in the adapter.
+    options_min_request_spacing_s: float | None = None
 
     # --- News ---
     news_provider: str = ""
