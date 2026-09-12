@@ -237,6 +237,10 @@ forbidden_modules = [
     "signalforge.paper.options_ledger",
     "signalforge.paper.options_marks",
     "signalforge.paper.options_auto_simulate",
+    # The fourth sibling (W3c): the scheduled EOD chain. It calls
+    # auto_simulate_options_scan_runs, so it IS the door, and the meta-test
+    # predicted exactly this — "the next sibling cannot quietly reopen the hole".
+    "signalforge.paper.options_eod",
 ]
 
 [[tool.importlinter.contracts]]
@@ -299,6 +303,10 @@ forbidden_modules = [
     "signalforge.paper.options_ledger",
     "signalforge.paper.options_marks",
     "signalforge.paper.options_auto_simulate",
+    # The fourth sibling (W3c): the scheduled EOD chain. It calls
+    # auto_simulate_options_scan_runs, so it IS the door, and the meta-test
+    # predicted exactly this — "the next sibling cannot quietly reopen the hole".
+    "signalforge.paper.options_eod",
 ]
 
 [[tool.importlinter.contracts]]
@@ -339,6 +347,10 @@ forbidden_modules = [
     "signalforge.paper.options_ledger",
     "signalforge.paper.options_marks",
     "signalforge.paper.options_auto_simulate",
+    # The fourth sibling (W3c): the scheduled EOD chain. It calls
+    # auto_simulate_options_scan_runs, so it IS the door, and the meta-test
+    # predicted exactly this — "the next sibling cannot quietly reopen the hole".
+    "signalforge.paper.options_eod",
     "signalforge.llm",
     "signalforge.research.promotion",
     "httpx",
@@ -370,6 +382,10 @@ forbidden_modules = [
     "signalforge.paper.options_ledger",
     "signalforge.paper.options_marks",
     "signalforge.paper.options_auto_simulate",
+    # The fourth sibling (W3c): the scheduled EOD chain. It calls
+    # auto_simulate_options_scan_runs, so it IS the door, and the meta-test
+    # predicted exactly this — "the next sibling cannot quietly reopen the hole".
+    "signalforge.paper.options_eod",
     "signalforge.paper.auto_simulate",
     "signalforge.data.ingest",
     "signalforge.data.adapters.registry",
@@ -393,6 +409,10 @@ forbidden_modules = [
     "signalforge.paper.options_ledger",
     "signalforge.paper.options_marks",
     "signalforge.paper.options_auto_simulate",
+    # The fourth sibling (W3c): the scheduled EOD chain. It calls
+    # auto_simulate_options_scan_runs, so it IS the door, and the meta-test
+    # predicted exactly this — "the next sibling cannot quietly reopen the hole".
+    "signalforge.paper.options_eod",
     "signalforge.alerts.dispatch",
     "signalforge.alerts.channels",
     "signalforge.research.scan",
@@ -509,4 +529,8 @@ forbidden_modules = [
     "signalforge.paper.options_ledger",
     "signalforge.paper.options_marks",
     "signalforge.paper.options_auto_simulate",
+    # The fourth sibling (W3c): the scheduled EOD chain. It calls
+    # auto_simulate_options_scan_runs, so it IS the door, and the meta-test
+    # predicted exactly this — "the next sibling cannot quietly reopen the hole".
+    "signalforge.paper.options_eod",
 ]

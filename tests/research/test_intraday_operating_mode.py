@@ -65,17 +65,12 @@ def test_off_schedules_no_intraday_job(db_url: str) -> None:
 
     names = [s.name for s in default_job_specs()]
     assert "intraday_scan" not in names
-    # The pinned job list, in order. ``options_paper_eod`` was inserted by W3c
-    # between ``catch_up`` and ``agents_daily``: after the equity approved-scope
-    # scan (which runs INSIDE ``daily_eod_update``) and before the two jobs whose
-    # reports and cycle should see a marked, reconciled options book. Every other
-    # name and every other position is unchanged.
+    # the pre-existing job list, unchanged and in its original order
     assert names == [
         "daily_eod_update",
         "universe_update",
         "grid_daily",
         "catch_up",
-        "options_paper_eod",
         "agents_daily",
         "paper_mtm",
         "feed_probe",
@@ -85,6 +80,12 @@ def test_off_schedules_no_intraday_job(db_url: str) -> None:
         "alerts",
         "strategy_health",
     ]
+    # W3c's options EOD chain is NOT here and must not be: signalforge.app
+    # imports the scheduler, and S16 reports indirect chains, so this module may
+    # not reach the options paper layer at all. The spec is injected from
+    # signalforge.cli (the execution cycle's rule, D6 §2), and
+    # tests/paper/test_options_eod_chain.py pins the injected order.
+    assert "options_paper_eod" not in names
 
 
 def test_off_makes_the_job_a_logged_no_op_that_writes_nothing(db_url: str) -> None:

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     )
     from signalforge.data.options_merge import MergeResult
     from signalforge.execution.protocol import BrokerAdapter
+    from signalforge.jobspec import JobSpec
     from signalforge.research.portfolio_metrics import PortfolioMetrics
 
 from signalforge import __version__
@@ -3586,6 +3587,28 @@ def notify_test_discord(
     raise typer.Exit(code=0 if ok else 1)
 
 
+def _insert_options_eod(specs: list[JobSpec], options_spec: JobSpec | None) -> list[JobSpec]:
+    """Place the options EOD chain after ``catch_up`` and before ``agents_daily``.
+
+    Position is not cosmetic here even though APScheduler fires on the cron, not
+    on list order: the pinned job-list tests and the Operational Status page both
+    read this order, and an operator reading either one should see the options
+    chain where it actually runs — after the 17:30 equity chain (and its
+    catch-up), before the 18:45 agent reports that read the book it marks.
+
+    ``None`` (no options paper account, or the database momentarily unreadable)
+    returns the list unchanged, so the worker's job list is then byte-identical to
+    ``default_job_specs()``.
+    """
+    if options_spec is None:
+        return list(specs)
+    out = list(specs)
+    names = [s.name for s in out]
+    at = names.index("agents_daily") if "agents_daily" in names else len(out)
+    out.insert(at, options_spec)
+    return out
+
+
 @app.command("run-scheduler")
 def run_scheduler() -> None:
     """Run the in-process background scheduler.
@@ -3659,7 +3682,27 @@ def run_scheduler() -> None:
             fg=typer.colors.YELLOW,
             bold=True,
         )
-    scheduler = build_scheduler(specs=[*default_job_specs(), *extra])
+    # Same rule, same reason, second decision path: signalforge.scheduler must
+    # not import signalforge.paper.options_* either, because signalforge.app
+    # imports the scheduler and S16 reports indirect chains. The options EOD
+    # chain therefore exists ONLY in this worker — started from the app process
+    # there is no options job at all. It returns None unless the options paper
+    # account exists, so on a deployment that never created one the job list
+    # below is byte-identical to default_job_specs().
+    from signalforge.paper.options_eod import options_paper_eod_spec
+
+    options_spec = options_paper_eod_spec()
+    if options_spec is not None:
+        typer.secho(
+            f"options paper account present — registering {options_spec.name} at "
+            f"{options_spec.cron_hour:02d}:{options_spec.cron_minute:02d} "
+            f"{options_spec.cron_tz}. The chain itself is off unless "
+            "research.options.paper_eod_enabled is true, and it can open nothing "
+            "unless auto_simulate_options_enabled is also on (default off, cap 0/day).",
+            fg=typer.colors.YELLOW,
+        )
+    ordered = _insert_options_eod(default_job_specs(), options_spec)
+    scheduler = build_scheduler(specs=[*ordered, *extra])
     scheduler.start()
     record_heartbeat(scheduler, started_at=started)
     typer.secho("scheduler running — Ctrl-C to stop", fg=typer.colors.CYAN)
@@ -3684,7 +3727,7 @@ def run_job(
         typer.Argument(
             help="daily_eod_update | paper_mtm | feed_probe | health_check | news_poll | "
             "daily_briefing | alerts | strategy_health | approved_scope_scan | agents_daily | "
-            "universe_update | grid_daily | execution_cycle"
+            "universe_update | grid_daily | execution_cycle | options_paper_eod"
         ),
     ],
 ) -> None:
@@ -3696,14 +3739,26 @@ def run_job(
     drain and no ``cancel_all`` — a kill switch that blocks closing. It carries
     its own wrapper, which reads the same state and branches to a protective-only
     cycle instead.
+
+    ``options_paper_eod`` is resolved here rather than through
+    ``default_job_specs()`` for the same reason it is injected into
+    ``run-scheduler`` here: the scheduler module may not import the options paper
+    layer. It is guarded exactly like every other job, and it is a logged no-op
+    while ``research.options.paper_eod_enabled`` is off — which is the point of
+    being able to run it by hand.
     """
     from signalforge.execution.cycle import manual_job_entries
+    from signalforge.paper.options_eod import OPTIONS_EOD_JOB, job_options_paper_eod
     from signalforge.scheduler import MANUAL_JOBS, default_job_specs, guarded
 
     execution_jobs = manual_job_entries(adapter=_execution_adapter())
     if name in execution_jobs:
         execution_jobs[name]()
         typer.secho(f"job {name} finished (self-guarded)", fg=typer.colors.GREEN)
+        return
+    if name == OPTIONS_EOD_JOB:
+        guarded(OPTIONS_EOD_JOB, job_options_paper_eod)()
+        typer.secho(f"job {name} finished", fg=typer.colors.GREEN)
         return
     spec = next((s for s in default_job_specs() if s.name == name), None)
     fn = spec.fn if spec is not None else MANUAL_JOBS.get(name)

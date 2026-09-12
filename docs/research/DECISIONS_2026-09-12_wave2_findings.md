@@ -37,7 +37,14 @@ Migration `b9d41e07c6aa` is applied live. Nothing is scheduled or armed by any o
   numbers are unchanged (`tests/research/test_options_health_and_probation.py`). The
   "no scheduled caller" test was replaced, not deleted, by one that pins the ordering and
   the single call site, and the equity single-entry-point test names the second door
-  explicitly. **Still open:** the chain refuses (`OptionsEodUnpriceable`) a book spanning
+  explicitly. **Registration follows D6 §2's rule, not the scheduler's:** the chain body is
+  `paper/options_eod.py` and its `JobSpec` is injected from `cli.py`, because
+  `signalforge.app` imports `signalforge.scheduler` and S16 reports indirect chains — the
+  first cut put the body in `scheduler.py` and broke S16 three ways. Consequence, stated:
+  the options chain runs **only in the CLI-launched worker**, never in an API process with
+  `APP_RUN_SCHEDULER=true`, and `default_job_specs()` stays byte-identical to main.
+  `paper.options_eod` is named in S11/S11b/S13/S14/S15/S16 as the fourth options sibling.
+  **Still open:** the chain refuses (`OptionsEodUnpriceable`) a book spanning
   more than one underlying, because `mark_options_to_market` /
   `process_option_expiries` / `auto_simulate_options_scan_runs` each take ONE
   `OptionsPricingContext` per call and one `q` cannot honestly serve two names

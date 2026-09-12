@@ -162,17 +162,24 @@ def test_automatic_acceptance_has_exactly_one_guarded_entry_point() -> None:
     ``paper/ledger.py`` (the definition) and ``cli.py``.
 
     **Adapted explicitly by W3c (2026-09-12), and the adaptation is stated rather
-    than absorbed.** ``scheduler.py`` now contains a SECOND automatic-acceptance
-    entry point: ``job_options_paper_eod`` calls
-    ``paper.options_auto_simulate.auto_simulate_options_scan_runs``. That call
-    does not accidentally satisfy the assertions below —
+    than absorbed.** There is now a SECOND automatic-acceptance entry point:
+    ``paper.options_eod.job_options_paper_eod`` calls
+    ``paper.options_auto_simulate.auto_simulate_options_scan_runs``. It does not
+    accidentally satisfy the assertions below —
     ``"auto_simulate_options_scan_runs("`` does not contain the substring
-    ``"auto_simulate_scan_runs("`` — so this test would have stayed green while
-    a whole second door opened in the file it is guarding. Silence is not
-    permission: the second entry point is named here, counted here, and pinned to
-    the one job that may hold it, so the invariant this test asserts is now
-    "exactly one guarded entry point PER ASSET CLASS, each in its own module,
-    each called from exactly one scheduler job", not "exactly one call site".
+    ``"auto_simulate_scan_runs("`` — so this test would have stayed green while a
+    whole second door opened. Silence is not permission: the second entry point
+    is named here, counted here, and pinned to the one module that may hold it,
+    so the invariant this test asserts is now "exactly one guarded entry point
+    PER ASSET CLASS, each in its own module, each reachable from exactly one
+    scheduled job", not "exactly one call site".
+
+    The two doors are in DIFFERENT places on purpose. The equity one is a job in
+    ``scheduler.py``, reachable from the app process. The options one is not, and
+    cannot be: ``signalforge.app`` imports the scheduler and contract S16 reports
+    indirect chains, so the options chain lives in the paper layer with its spec
+    injected from ``cli.py`` (D6 §2's rule for the execution cycle). Asserted
+    from the other side in ``test_options_activation_guards.py``.
     """
     from pathlib import Path
 
@@ -196,21 +203,23 @@ def test_automatic_acceptance_has_exactly_one_guarded_entry_point() -> None:
     )
 
     # --- the SECOND sanctioned caller, named ------------------------------- #
-    assert sched.count("auto_simulate_options_scan_runs(") == 1
+    eod = (root / "paper" / "options_eod.py").read_text()
+    assert eod.count("auto_simulate_options_scan_runs(") == 1
     equity_job = sched.index("def job_approved_scope_scan(")
-    options_job = sched.index("def job_options_paper_eod(")
     equity_body = sched[equity_job : sched.index("\ndef ", equity_job + 1)]
-    options_body = sched[options_job : sched.index("\ndef ", options_job + 1)]
-    # each auto-simulation lives in its own job, and only there
+    options_job = eod.index("def job_options_paper_eod(")
+    options_body = eod[options_job : eod.index("\ndef ", options_job + 1)]
+    # each auto-simulation lives in its own job, in its own module, and only there
     assert "auto_simulate_scan_runs(session, [" in equity_body
     assert "auto_simulate_options_scan_runs(" in options_body
     # neither job may open the other asset class's door
-    assert "auto_simulate_options_scan_runs(" not in equity_body
-    assert "mark_options_to_market(" not in equity_body
+    assert "auto_simulate_options_scan_runs(" not in sched
+    assert "mark_options_to_market(" not in sched
     assert "accept_options_candidate(" not in options_body
     assert "auto_simulate_scan_runs(" not in options_body.replace(
         "auto_simulate_options_scan_runs(", ""
     )
+    assert "accept_candidate(" not in eod.replace("accept_options_candidate(", "")
 
 
 def test_alert_dry_run_has_no_side_effects(session: Session) -> None:

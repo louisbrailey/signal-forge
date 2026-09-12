@@ -12,12 +12,8 @@ job bodies do not change.
 
 from __future__ import annotations
 
-import math
 import threading
-from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
-from typing import TYPE_CHECKING
+from datetime import UTC, date, datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -26,11 +22,6 @@ from signalforge.domain import Horizon
 from signalforge.jobspec import JobFn, JobSpec
 from signalforge.killswitch import KillSwitchEngaged, ensure_not_engaged
 from signalforge.observability import get_logger
-
-if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
-    from sqlalchemy.orm import Session
-
-    from signalforge.paper.options_ledger import OptionsPricingContext
 
 _log = get_logger("scheduler")
 
@@ -331,333 +322,24 @@ def job_approved_scope_scan() -> None:
         )
 
 
-# --------------------------------------------------------------------------- #
-# The SIMULATED options paper EOD chain (D3 §6 / §8; the I-O6 wiring)
-# --------------------------------------------------------------------------- #
-OPTIONS_EOD_JOB = "options_paper_eod"
-
-
-class OptionsEodUnpriceable(RuntimeError):
-    """The chain refuses to price rather than guess an input.
-
-    Decision 11 forbids a silent ``q = 0``; D2 §7.4 forbids a zero-cost model.
-    When an input for a structure or candidate that is actually in play cannot
-    be SOURCED, the job fails loudly and leaves a named ``JobRun`` failure — it
-    never marks a book against an assumed number.
-    """
-
-
-@dataclass(frozen=True, slots=True)
-class OptionsEodPlan:
-    """What one EOD run must price, and what it will offer the second guard."""
-
-    account_name: str
-    #: underlyings of OPEN structures (mark + expiry) and of options CANDIDATES
-    #: (auto-simulation), unioned: one pricing context serves the whole run, so
-    #: every one of them has to resolve or none of them is priced.
-    underlyings: frozenset[str]
-    #: scan runs of ``signal_session`` that actually carry an options candidate.
-    #: EMPTY on the live database today, and that is correct:
-    #: ``job_approved_scope_scan`` is equity-only by construction ("Never
-    #: options") and no options scan pipeline exists yet. The step is still
-    #: invoked with the empty list — a wiring only exercised once candidates
-    #: appear is a wiring nobody has tested.
-    scan_run_ids: tuple[int, ...]
-
-
-def _options_account_name(session: Session) -> str:
-    from signalforge.settings_store import effective_research_config
-
-    return effective_research_config(session).options_risk.paper_account_name
-
-
-def _options_eod_plan(session: Session, *, signal_session: date) -> OptionsEodPlan:
-    """Read-only survey of what this run has to handle. No write intent."""
-    from sqlalchemy import select
-
-    from signalforge.db.models import (
-        Candidate,
-        CandidateOptionStructure,
-        OptionsPosition,
-        PaperAccount,
-        ScanRun,
-    )
-    from signalforge.paper.options_ledger import OPTIONS_STRUCTURE_KIND
-
-    account_name = _options_account_name(session)
-    open_underlyings = set(
-        session.scalars(
-            select(OptionsPosition.underlying_symbol)
-            .join(PaperAccount, OptionsPosition.account_id == PaperAccount.id)
-            .where(PaperAccount.name == account_name, OptionsPosition.closed_at.is_(None))
-        )
-    )
-    day_start = datetime.combine(signal_session, time.min, tzinfo=UTC)
-    options_candidates = (
-        select(Candidate.id, Candidate.scan_run_id)
-        .join(ScanRun, Candidate.scan_run_id == ScanRun.id)
-        .where(
-            Candidate.structure_kind == OPTIONS_STRUCTURE_KIND,
-            ScanRun.started_at >= day_start,
-            ScanRun.started_at < day_start + timedelta(days=1),
-        )
-        .subquery()
-    )
-    scan_run_ids = sorted(
-        {int(v) for v in session.scalars(select(options_candidates.c.scan_run_id))}
-    )
-    candidate_underlyings = set(
-        session.scalars(
-            select(CandidateOptionStructure.underlying_symbol).where(
-                CandidateOptionStructure.candidate_id.in_(select(options_candidates.c.id))
-            )
-        )
-    )
-    return OptionsEodPlan(
-        account_name=account_name,
-        underlyings=frozenset(open_underlyings | candidate_underlyings),
-        scan_run_ids=tuple(scan_run_ids),
-    )
-
-
-def _options_eod_pricing(
-    session: Session, *, underlyings: frozenset[str], as_of: date
-) -> OptionsPricingContext:
-    """Build the run's single pricing context, or refuse.
-
-    Three inputs, none of them defaulted into existence:
-
-    * ``cost_model`` — D5 §2.4's frozen, pre-registered model at BASELINE spread
-      (``spread_multiplier = 1.0``). D2 §7.4 forbids a zero-cost model.
-    * ``risk_free_rate`` — ``OptionsEvaluationConfig``'s recorded constant, with
-      its own ``r_source``; it is hashed into ``options_config_hash``.
-    * ``dividend_yield`` — decision 11 rank 1 ONLY (the trailing twelve-month
-      declared yield). Rank 2 (put-call parity) is not built; a silent ``q = 0``
-      is forbidden, so an unresolvable ``q`` RAISES.
-
-    Phase 1 limitation, enforced rather than assumed: ``mark_options_to_market``,
-    ``process_option_expiries`` and ``auto_simulate_options_scan_runs`` each take
-    ONE pricing context for the whole call, so one ``q`` would be applied to every
-    underlying in play. A book spanning more than one underlying therefore cannot
-    be priced honestly here and is REFUSED, loudly, instead of being marked
-    against another name's dividend yield. (``q`` reaches the IV inversion and the
-    greeks, never a fill price — but a wrong greek is a wrong cap evaluation.)
-    """
-    from signalforge.config.research import OptionsEvaluationConfig
-    from signalforge.data.options_corporate_actions import trailing_dividend_yield
-    from signalforge.data.repository import get_daily_bars
-    from signalforge.paper.options_ledger import OptionsPricingContext
-    from signalforge.research.options_strategies.short_vertical import PREREGISTERED_COST_MODEL
-
-    evaluation = OptionsEvaluationConfig()
-    if not underlyings:
-        # Nothing is priced on this path: no structure is open and no options
-        # candidate exists, so no leg is ever quoted. NaN rather than 0.0 so
-        # that a future caller which DID consult it could not mistake it for a
-        # measurement — every greek derived from it would be NaN on its face.
-        return OptionsPricingContext(
-            cost_model=PREREGISTERED_COST_MODEL,
-            risk_free_rate=evaluation.risk_free_rate,
-            dividend_yield=math.nan,
-            q_source="unused:no_underlying_in_play",
-        )
-    if len(underlyings) > 1:
-        raise OptionsEodUnpriceable(
-            "one pricing context cannot honestly price "
-            f"{sorted(underlyings)} — a single dividend yield would be applied to "
-            "every one of them (D3 Phase 1 limitation; decision 11 forbids a "
-            "substituted q)"
-        )
-    symbol = next(iter(underlyings))
-    bars = get_daily_bars(session, symbol, as_of - timedelta(days=10), as_of)
-    spot = float(bars[-1].close) if bars else 0.0
-    if spot <= 0.0:
-        raise OptionsEodUnpriceable(f"no underlying close for {symbol} on {as_of.isoformat()}")
-    q = trailing_dividend_yield(session, symbol, as_of, reference_close=spot)
-    if q is None:
-        raise OptionsEodUnpriceable(
-            f"no trailing dividend history for {symbol} at {as_of.isoformat()} — decision 11 "
-            "rank 1 unresolved and rank 2 (put-call parity) is not built; q = 0 is forbidden"
-        )
-    return OptionsPricingContext(
-        cost_model=PREREGISTERED_COST_MODEL,
-        risk_free_rate=evaluation.risk_free_rate,
-        dividend_yield=q.q,
-        q_source=q.source,
-    )
-
-
-def _previous_trading_session(as_of: date) -> date:
-    """The XNYS session before ``as_of`` — the SIGNAL session for a fill at
-    ``as_of`` (D3 §6.0: signal at t, fill at t+1)."""
-    from signalforge.data import options_calendar
-
-    return options_calendar.last_trade_session(as_of - timedelta(days=1))
-
-
-def job_options_paper_eod() -> None:
-    """The SIMULATED options paper end-of-day chain, in this order and no other::
-
-        mark_options_to_market -> reconcile_options_collateral
-            -> process_option_expiries -> auto_simulate_options_scan_runs
-
-    **Off by default, and off means byte-identical.** The job returns before it
-    opens a single write transaction unless BOTH hold:
-
-    * ``research.options.paper_eod_enabled`` is true (new, default False), and
-    * the configured options paper account EXISTS.
-
-    Neither check writes: they run inside one plain reader, so a deployment that
-    has not opted in never takes ``BEGIN IMMEDIATE`` and writes no mark, no
-    reconciliation report, no collateral entry and no audit row. (It does leave
-    the one ``JobRun`` row every guarded job leaves, once a day — the cost of
-    being *visible* on the Operational Status page. That is why this job is a
-    daily cron and not the 15-minute shape ``_intraday_scan_spec`` refused.)
-
-    The auto-simulation step needs a THIRD switch on top of those two —
-    ``auto_simulate_options_enabled``, default OFF with a cap of 0/day — and it
-    enforces it itself (``auto_simulate_options_scan_runs`` returns
-    ``enabled=False`` before it touches anything). Turning the chain on therefore
-    buys marks, reconciliation and expiry handling, all of which are protective
-    or read-mostly, and buys **nothing that can open a structure**.
-
-    Ordering is not a convention here, it is a precondition (D3 §6, §8):
-
-    1. **mark** first, so exits signalled at this session's close are acted on
-       against this session's prints;
-    2. **reconcile** second, so the collateral ledger is checked against a book
-       that has already been marked and closed down — and so that the dated,
-       clean ``OptionsReconcileReport`` the second guard's condition **AA**
-       requires exists for the fill session *before* any acceptance is offered;
-    3. **expiry** third, so it acts on a reconciled book (options_marks' own
-       module contract);
-    4. **auto-simulation** last, and only then, because condition AA refuses
-       without step 2's report for exactly this fill session.
-
-    Sessions: ``as_of`` is the last completed session, which is both the MARK
-    session and the FILL session; ``signal_session`` is the XNYS session before
-    it. A candidate signalled at yesterday's close fills at today's close, on
-    today's reconciliation — which is what makes condition AA satisfiable at all.
-
-    SQLite (docs/SQLITE_CONCURRENCY.md): one SHORT ``session_scope(write=True)``
-    per unit of the chain, each retried on lock contention per unit, and no write
-    lock is held across the survey or the pricing resolution. The job is in
-    ``NO_JOB_LEVEL_LOCK_RETRY`` because every unit persists records of its own —
-    a job-level retry would re-run a mark that already wrote its ``OptionsMark``
-    rows. (Marking and expiry are idempotent per ``(position, as_of)``, the
-    reconcile report is unique per ``(account, as_of)``, and auto-simulation
-    commits per candidate; the per-unit retry is still the correct granularity.)
-
-    SIMULATED options structures only — no order was placed.
-    """
-    from sqlalchemy import select
-
-    from signalforge.db.models import PaperAccount
-    from signalforge.db.session import session_scope
-    from signalforge.settings_store import effective_research_config
-
-    # --- the off path: one plain reader, no write intent, no rows ------------
-    with session_scope() as session:
-        cfg = effective_research_config(session)
-        if not cfg.options.paper_eod_enabled:
-            _log.info("options_eod.skipped_disabled", flag="research.options.paper_eod_enabled")
-            return
-        account_name = cfg.options_risk.paper_account_name
-        if session.scalar(select(PaperAccount.id).where(PaperAccount.name == account_name)) is None:
-            _log.warning("options_eod.skipped_no_account", account=account_name)
-            return
-
-    as_of = last_completed_session()
-    signal_session = _previous_trading_session(as_of)
-
-    # --- survey + pricing: still read-only, still no write lock --------------
-    with session_scope() as session:
-        plan = _options_eod_plan(session, signal_session=signal_session)
-        pricing = _options_eod_pricing(session, underlyings=plan.underlyings, as_of=as_of)
-
-    def _unit[T](label: str, fn: Callable[[Session], T]) -> T:
-        """One short write transaction, retried per unit (rule 5)."""
-
-        def _run() -> T:
-            with session_scope(write=True) as session:
-                return fn(session)
-
-        return retry_on_lock(
-            _run,
-            attempts=JOB_LOCK_ATTEMPTS,
-            backoff_s=JOB_LOCK_BACKOFF_S,
-            label=f"{OPTIONS_EOD_JOB}.{label}",
-        )
-
-    from signalforge.paper.options_auto_simulate import auto_simulate_options_scan_runs
-    from signalforge.paper.options_marks import (
-        mark_options_to_market,
-        process_option_expiries,
-        reconcile_options_collateral,
-    )
-
-    marks = _unit(
-        "mark",
-        lambda s: mark_options_to_market(
-            s, account_name=plan.account_name, as_of=as_of, pricing=pricing
-        ),
-    )
-    _log.info(
-        "options_eod.marked",
-        checked=marks.checked,
-        closed=marks.closed,
-        deferred=marks.deferred,
-        synthetic=marks.synthetic_marked,
-        iv_unavailable=marks.iv_unavailable,
-    )
-
-    recon = _unit(
-        "reconcile",
-        lambda s: reconcile_options_collateral(s, account_name=plan.account_name, as_of=as_of),
-    )
-    _log.info(
-        "options_eod.reconciled",
-        as_of=as_of.isoformat(),
-        clean=recon.clean,
-        findings=[f["check"] for f in recon.findings],
-        open_structures=recon.open_structures,
-    )
-
-    expiries = _unit(
-        "expiry",
-        lambda s: process_option_expiries(
-            s, account_name=plan.account_name, as_of=as_of, pricing=pricing
-        ),
-    )
-    _log.info(
-        "options_eod.expiries",
-        checked=expiries.checked,
-        force_closed=expiries.force_closed,
-        expired_worthless=expiries.expired_worthless,
-        assigned=expiries.assigned,
-        forced_close_no_print=expiries.forced_close_no_print,
-    )
-
-    sim = _unit(
-        "auto_simulate",
-        lambda s: auto_simulate_options_scan_runs(
-            s,
-            list(plan.scan_run_ids),
-            account_name=plan.account_name,
-            pricing=pricing,
-            signal_session=signal_session,
-            fill_session=as_of,
-        ),
-    )
-    _log.info(
-        "options_eod.auto_simulate",
-        enabled=sim.enabled,
-        considered=sim.considered,
-        accepted=len(sim.accepted),
-        rejected=len(sim.rejected),
-        watched=len(sim.watched),
-        skipped=len(sim.skipped),
-    )
+# The SIMULATED options paper EOD chain deliberately does NOT live here.
+#
+# It is ``signalforge.paper.options_eod``, and its ``JobSpec`` is injected from
+# ``signalforge.cli`` — the same registration rule D6 §2 established for the
+# execution cycle, and for the same structural reason. ``signalforge.app``
+# imports this module (``app.main`` at import time, ``app.views`` inside
+# ``ops_status_context``), and contract S16 reports INDIRECT chains, so a single
+# ``from signalforge.paper.options_marks import ...`` here — even inside a
+# function body, which import-linter also sees — puts the whole app layer on the
+# options paper decision path.
+#
+# The operator-visible consequence, stated rather than discovered later: the
+# options EOD chain exists **only in the CLI-launched worker**. Started from the
+# app process (``APP_RUN_SCHEDULER=true``) there is no options job at all — no
+# marks, no reconciliation, no expiry processing and no options auto-simulation.
+# ``default_job_specs()`` below is therefore byte-identical to what it was before
+# the chain existed. Only ``NO_JOB_LEVEL_LOCK_RETRY`` names it, as a plain string
+# with no import, because ``guarded()`` looks the job's retry policy up by name.
 
 
 # daily_eod_update (cron) and catch_up (interval) are different APScheduler
@@ -955,38 +637,6 @@ def default_job_specs() -> list[JobSpec]:
             job_catch_up,
             30,
             "Run the EOD update if it is owed for the last completed session (missed/slept)",
-        ),
-        # 18:30 ET — the SIMULATED options paper EOD chain (config-gated OFF).
-        #
-        # The slot, against its cron neighbours:
-        #
-        # * AFTER 17:30 (``daily_eod_update``), which chains the equity
-        #   approved-scope scan and the live equity auto-simulation inside
-        #   itself. The options chain must never straddle that: they share the
-        #   SQLite writer, and the combined delta cap the second guard evaluates
-        #   reads the EQUITY book, which is not final until the equity
-        #   auto-simulation has committed. A full hour of margin, on a job whose
-        #   long phase is a paced provider ingest.
-        # * AFTER 18:15 (``universe_update``) started, and deliberately not
-        #   before it: that job is config-gated OFF, and when on it is budgeted
-        #   and commits per unit, so the two interleave under the busy timeout
-        #   rather than starving each other. 15 minutes is the same gap the
-        #   18:45/18:50 pair already accepts.
-        # * BEFORE 18:45 (``agents_daily``) and 18:50 (``grid_daily``), so the
-        #   read-only agent reports and the grid's own cycle see a book that has
-        #   been marked, reconciled and expiry-processed for this session rather
-        #   than yesterday's.
-        # * Inside the 17:30-19:00 ET window IO2_RUNBOOK.md reserves — the
-        #   nightly options backfill is forbidden from running in it precisely
-        #   so the EOD jobs own the writer here.
-        JobSpec(
-            "options_paper_eod",
-            job_options_paper_eod,
-            24 * 60,
-            "SIMULATED options paper EOD chain: mark -> reconcile -> expiry -> "
-            "auto-simulate (config-gated OFF; auto-simulation needs its own second setting)",
-            cron_hour=18,
-            cron_minute=30,
         ),
         JobSpec(
             "agents_daily",

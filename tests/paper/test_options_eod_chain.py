@@ -24,6 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 import signalforge.paper.options_auto_simulate as auto_mod
+import signalforge.paper.options_eod as eod
 import signalforge.paper.options_marks as marks_mod
 import signalforge.scheduler as sched
 from signalforge.db.models import (
@@ -54,7 +55,7 @@ def _enable_chain(session: Session, *, on: bool = True) -> None:
 def _pin_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the chain's fill session to the fixture's, so the calendar's real
     previous-session walk lands on the fixture's signal session."""
-    monkeypatch.setattr(sched, "last_completed_session", lambda: fx.FILL_SESSION)
+    monkeypatch.setattr(eod, "last_completed_session", lambda: fx.FILL_SESSION)
 
 
 def _pin_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -64,7 +65,7 @@ def _pin_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
     tests about ORDERING and the guard, not about sourcing a dividend yield.
     """
     monkeypatch.setattr(
-        sched, "_options_eod_pricing", lambda session, *, underlyings, as_of: fx.pricing()
+        eod, "_options_eod_pricing", lambda session, *, underlyings, as_of: fx.pricing()
     )
 
 
@@ -108,7 +109,7 @@ def test_off_writes_nothing_at_all(session: Session, monkeypatch: pytest.MonkeyP
     before = _row_counts(session)
 
     _pin_sessions(monkeypatch)
-    sched.job_options_paper_eod()
+    eod.job_options_paper_eod()
 
     session.expire_all()
     assert _row_counts(session) == before
@@ -141,7 +142,7 @@ def test_off_never_takes_the_sqlite_write_lock(
 
     monkeypatch.setattr(db_session, "session_scope", _spy)
     _pin_sessions(monkeypatch)
-    sched.job_options_paper_eod()
+    eod.job_options_paper_eod()
     assert intents == [False], "the off path opens exactly one plain reader"
 
 
@@ -156,7 +157,7 @@ def test_on_but_no_account_also_writes_nothing(
     before = _row_counts(session)
 
     _pin_sessions(monkeypatch)
-    sched.job_options_paper_eod()
+    eod.job_options_paper_eod()
 
     session.expire_all()
     assert _row_counts(session) == before
@@ -173,7 +174,7 @@ def test_the_auto_simulation_step_needs_a_third_switch_of_its_own(
 
     _pin_sessions(monkeypatch)
     _pin_pricing(monkeypatch)
-    sched.job_options_paper_eod()
+    eod.job_options_paper_eod()
 
     session.expire_all()
     # the reconciliation DID run (protective, and condition AA's precondition)
@@ -219,7 +220,7 @@ def test_on_runs_mark_then_reconcile_then_expiry_then_auto_simulate(
     _pin_sessions(monkeypatch)
     _pin_pricing(monkeypatch)
 
-    sched.job_options_paper_eod()
+    eod.job_options_paper_eod()
     assert calls == ["mark", "reconcile", "expiry", "auto_simulate"]
 
 
@@ -245,34 +246,101 @@ def test_each_step_runs_in_its_own_short_write_transaction(
     monkeypatch.setattr(db_session, "session_scope", _spy)
     _pin_sessions(monkeypatch)
     _pin_pricing(monkeypatch)
-    sched.job_options_paper_eod()
+    eod.job_options_paper_eod()
 
     # two readers (the gate check, then the survey), then one writer per unit
     assert intents == [False, False, True, True, True, True]
 
 
-def test_the_job_is_registered_after_the_equity_chain_and_before_the_agents(
-    db_url: str,
+def test_the_job_is_absent_from_default_job_specs_and_that_is_the_point(
+    db_url: str, session: Session
 ) -> None:
-    specs = {s.name: s for s in sched.default_job_specs()}
-    names = [s.name for s in sched.default_job_specs()]
+    """``signalforge.app`` imports the scheduler and S16 reports indirect chains.
+
+    So the scheduler must not reach the options paper layer at all, and the
+    scheduler's own job list must therefore be byte-identical to what it was
+    before this chain existed. Only the retry policy names the job, as a string.
+    """
+    fx.options_account(session)
+    session.commit()
+    assert "options_paper_eod" not in {s.name for s in sched.default_job_specs()}
+    assert "options_paper_eod" in sched.NO_JOB_LEVEL_LOCK_RETRY
+
+
+def test_the_spec_is_none_until_an_options_paper_account_exists(
+    db_url: str, session: Session
+) -> None:
+    """With no options account the job has nothing it could ever act on, so the
+    CLI-injected list is byte-identical to ``default_job_specs()``."""
+    from signalforge.cli import _insert_options_eod
+
+    assert eod.options_paper_eod_spec() is None
+    base = sched.default_job_specs()
+    assert [s.name for s in _insert_options_eod(base, None)] == [s.name for s in base]
+
+    fx.options_account(session)
+    session.commit()
+    assert eod.options_paper_eod_spec() is not None
+
+
+def test_the_cli_injected_list_carries_the_chain_in_the_18_30_slot(
+    db_url: str, session: Session
+) -> None:
+    """What ``signalforge run-scheduler`` actually registers."""
+    from signalforge.cli import _insert_options_eod
+
+    fx.options_account(session)
+    session.commit()
+
+    spec = eod.options_paper_eod_spec()
+    assert spec is not None
+    ordered = _insert_options_eod(sched.default_job_specs(), spec)
+    names = [s.name for s in ordered]
+    specs = {s.name: s for s in ordered}
+
     assert names.index("catch_up") < names.index("options_paper_eod")
     assert names.index("options_paper_eod") < names.index("agents_daily")
     assert names.index("options_paper_eod") < names.index("paper_mtm")
-    spec = specs["options_paper_eod"]
     # 18:30 ET: an hour after the 17:30 equity chain, 15 min after the 18:15
     # universe update, 15 min before the 18:45 agents and 18:50 grid.
     assert (spec.cron_hour, spec.cron_minute, spec.cron_tz) == (18, 30, "America/New_York")
     assert specs["daily_eod_update"].cron_hour == 17
     assert (specs["agents_daily"].cron_hour, specs["agents_daily"].cron_minute) == (18, 45)
     assert (specs["grid_daily"].cron_hour, specs["grid_daily"].cron_minute) == (18, 50)
+    # guarded exactly like every other job — unlike the execution cycle, this one
+    # has no protective branch to preserve, so the kill switch simply stops it.
     assert spec.self_guarded is False
+    assert spec.fn is eod.job_options_paper_eod
+
+    # and the injected list registers cleanly on a real scheduler
+    scheduler = sched.build_scheduler(specs=ordered)
+    job = {j.id: j for j in scheduler.get_jobs()}["options_paper_eod"]
+    assert type(job.trigger).__name__ == "CronTrigger"
+
+
+def test_last_completed_session_is_the_calendars_answer_not_the_schedulers() -> None:
+    """``scheduler.last_completed_session`` does not model exchange holidays and
+    says so. The options chain cannot accept that: condition AB asks
+    ``options_calendar`` whether the fill session is a real XNYS session, so a
+    chain marking against a date the calendar rejects would write a dated
+    reconciliation report the guard can never match."""
+    from zoneinfo import ZoneInfo
+
+    # 2026-02-16 is Presidents' Day. At 18:30 ET that evening the last COMPLETED
+    # session is Friday the 13th, not "today".
+    holiday_evening = datetime(2026, 2, 16, 18, 30, tzinfo=ZoneInfo("America/New_York"))
+    assert eod.last_completed_session(holiday_evening) == date(2026, 2, 13)
+    # ...and on a normal session evening it is that session.
+    normal = datetime(2026, 2, 18, 18, 30, tzinfo=ZoneInfo("America/New_York"))
+    assert eod.last_completed_session(normal) == fx.FILL_SESSION
 
 
 def test_the_job_retries_per_unit_and_not_at_the_job_level() -> None:
     """It persists per-unit records; a job-level retry would re-run a mark that
-    already wrote its ``options_mark`` rows."""
-    assert "options_paper_eod" in sched.NO_JOB_LEVEL_LOCK_RETRY
+    already wrote its ``options_mark`` rows. The name is a plain string in
+    ``scheduler.py`` — ``guarded()`` looks a job's policy up by name, which is
+    what lets the policy live there while the body does not."""
+    assert eod.OPTIONS_EOD_JOB in sched.NO_JOB_LEVEL_LOCK_RETRY
 
 
 # --------------------------------------------------------------------------- #
@@ -307,7 +375,7 @@ def test_the_chain_writes_the_dated_reconciliation_that_condition_aa_requires(
 
     _pin_sessions(monkeypatch)
     _pin_pricing(monkeypatch)
-    sched.job_options_paper_eod()
+    eod.job_options_paper_eod()
 
     session.expire_all()
     report = session.scalar(select(OptionsReconcileReport))
@@ -338,7 +406,7 @@ def test_condition_aa_still_refuses_without_a_same_session_reconciliation(
     )
     _pin_sessions(monkeypatch)
     _pin_pricing(monkeypatch)
-    sched.job_options_paper_eod()
+    eod.job_options_paper_eod()
 
     session.expire_all()
     assert session.scalar(select(func.count()).select_from(OptionsReconcileReport)) == 0
@@ -358,15 +426,15 @@ def test_pricing_with_nothing_in_play_never_passes_a_number_off_as_a_measurement
 ) -> None:
     import math
 
-    ctx = sched._options_eod_pricing(session, underlyings=frozenset(), as_of=fx.FILL_SESSION)
+    ctx = eod._options_eod_pricing(session, underlyings=frozenset(), as_of=fx.FILL_SESSION)
     assert math.isnan(ctx.dividend_yield)
     assert ctx.q_source == "unused:no_underlying_in_play"
     assert ctx.cost_model.spread_pct_of_last_print > 0.0  # never a zero-cost model
 
 
 def test_pricing_refuses_a_book_spanning_more_than_one_underlying(session: Session) -> None:
-    with pytest.raises(sched.OptionsEodUnpriceable, match="cannot honestly price"):
-        sched._options_eod_pricing(
+    with pytest.raises(eod.OptionsEodUnpriceable, match="cannot honestly price"):
+        eod._options_eod_pricing(
             session, underlyings=frozenset({"SPY", "QQQ"}), as_of=fx.FILL_SESSION
         )
 
@@ -376,8 +444,8 @@ def test_pricing_refuses_an_unsourceable_dividend_yield(session: Session) -> Non
     biases a short-premium result in its own favour."""
     fx.underlying(session)
     session.flush()
-    with pytest.raises(sched.OptionsEodUnpriceable, match="no trailing dividend history"):
-        sched._options_eod_pricing(
+    with pytest.raises(eod.OptionsEodUnpriceable, match="no trailing dividend history"):
+        eod._options_eod_pricing(
             session, underlyings=frozenset({fx.UNDERLYING}), as_of=fx.FILL_SESSION
         )
 
@@ -397,7 +465,7 @@ def test_pricing_sources_q_from_the_rank_one_dividend_history(session: Session) 
             )
         )
     session.flush()
-    ctx = sched._options_eod_pricing(
+    ctx = eod._options_eod_pricing(
         session, underlyings=frozenset({fx.UNDERLYING}), as_of=fx.FILL_SESSION
     )
     # four quarterly $1.50 payments against a $450 close
@@ -408,5 +476,5 @@ def test_pricing_sources_q_from_the_rank_one_dividend_history(session: Session) 
 def test_the_previous_trading_session_is_the_calendar_s_answer() -> None:
     # 2026-02-16 is Presidents' Day, so the session before Tuesday 2026-02-17
     # is Friday 2026-02-13 — not "yesterday".
-    assert sched._previous_trading_session(fx.FILL_SESSION) == fx.SIGNAL_SESSION
-    assert sched._previous_trading_session(fx.SIGNAL_SESSION) == date(2026, 2, 13)
+    assert eod._previous_trading_session(fx.FILL_SESSION) == fx.SIGNAL_SESSION
+    assert eod._previous_trading_session(fx.SIGNAL_SESSION) == date(2026, 2, 13)

@@ -654,18 +654,27 @@ Valid names are the ones in `default_job_specs()`
 `feed_probe`, `health_check`, `news_poll`, `daily_briefing`, `alerts`,
 `strategy_health`, `universe_update` (18:15 ET, config-gated OFF via
 `research.universe_pipeline.enabled`), `grid_daily` (18:50 ET, config-gated OFF),
-`catch_up`, `options_paper_eod` (18:30 ET, config-gated OFF via
-`research.options.paper_eod_enabled`) — plus `MANUAL_JOBS` entries that are not on a
+`catch_up` — plus `MANUAL_JOBS` entries that are not on a
 schedule of their own: `approved_scope_scan` (it normally only runs as the
-last step of `daily_eod_update` and at catch-up).
+last step of `daily_eod_update` and at catch-up) — plus two jobs that are
+**injected from the CLI** and are therefore absent from `default_job_specs()`:
+`execution_cycle` and `options_paper_eod`.
 
-`options_paper_eod` is the SIMULATED options paper end-of-day chain: mark →
-reconcile → expiry → auto-simulate, in that order. With
+`options_paper_eod` (18:30 ET) is the SIMULATED options paper end-of-day chain:
+mark → reconcile → expiry → auto-simulate, in that order. With
 `research.options.paper_eod_enabled` off (the default) it returns before it opens
 a write transaction and writes nothing but its own `JobRun` row. Turning it on
 buys marks, the dated collateral reconciliation and expiry handling; it does
 **not** let anything open a structure — that needs the separate
 `auto_simulate_options_enabled` setting, which is off with a cap of 0/day.
+
+Like the execution cycle, it exists **only in the CLI-launched worker**
+(`signalforge run-scheduler`). `signalforge.scheduler` may not import the options
+paper layer — `signalforge.app` imports the scheduler and contract S16 reports
+indirect chains — so the spec is injected from `signalforge.cli` and an API
+process started with `APP_RUN_SCHEDULER=true` carries no options job at all. It
+is also only registered once the options paper account exists.
+
 `signalforge paper-probation-status` prints the book's state (account, open
 structures, reconciliation age, last chain run), and `signalforge options-paper
 status --json` prints the full snapshot.

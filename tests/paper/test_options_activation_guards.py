@@ -27,7 +27,13 @@ OPTIONS_ACCEPT_CALLERS = {
     "paper/options_ledger.py",
     "paper/options_auto_simulate.py",
 }
-OPTIONS_AUTO_SIM_CALLERS = {"paper/options_auto_simulate.py", "scheduler.py"}
+#: ``scheduler.py`` is deliberately NOT here, and that is the whole point of W3c's
+#: second revision: ``signalforge.app`` imports the scheduler, contract S16
+#: reports indirect chains, and a caller inside ``scheduler.py`` therefore puts
+#: every app view one hop from ``accept_options_candidate``. The scheduled chain
+#: lives in ``paper/options_eod.py`` and its ``JobSpec`` is injected from
+#: ``cli.py`` — the registration rule D6 §2 established for the execution cycle.
+OPTIONS_AUTO_SIM_CALLERS = {"paper/options_auto_simulate.py", "paper/options_eod.py"}
 
 
 def _sources() -> list[tuple[str, str]]:
@@ -65,6 +71,38 @@ def test_the_options_branch_is_reachable_through_no_other_door() -> None:
     assert "accept_candidate(" not in code.replace("accept_options_candidate(", "")
 
 
+def test_the_scheduler_module_never_reaches_the_options_paper_layer() -> None:
+    """The S16 fact this whole arrangement exists for.
+
+    ``signalforge.app.main`` imports ``signalforge.scheduler`` at import time and
+    ``app.views`` imports it inside ``ops_status_context``. Contract S16 forbids
+    the app layer from reaching the options paper decision path and reports
+    INDIRECT chains, and import-linter sees imports inside function bodies as
+    well as at module level. So ONE line — ``from
+    signalforge.paper.options_marks import ...``, anywhere in ``scheduler.py``,
+    at any indentation — puts every app view one hop from
+    ``accept_options_candidate``.
+
+    W3c's first cut did exactly that and broke S16 three ways. The repair is the
+    registration rule D6 §2 already established for the execution cycle: the body
+    lives in the paper layer and the ``JobSpec`` is injected from ``cli.py``.
+    """
+    sched = (SRC / "scheduler.py").read_text()
+    # CODE only: the module carries a comment explaining this very rule, which
+    # necessarily names the modules it must not import.
+    code = "\n".join(line for line in sched.splitlines() if not line.lstrip().startswith("#"))
+    for module in ("options_ledger", "options_marks", "options_auto_simulate", "options_eod"):
+        assert f"signalforge.paper.{module}" not in code, (
+            f"scheduler.py must not import signalforge.paper.{module} — "
+            "signalforge.app imports the scheduler and S16 reports indirect chains"
+        )
+    assert "accept_options_candidate(" not in code
+    assert "auto_simulate_options_scan_runs(" not in code
+    # the job NAME is still here, as a plain string with no import: guarded()
+    # looks a job's lock-retry policy up by name.
+    assert '"options_paper_eod",' in code
+
+
 def test_the_only_scheduled_caller_is_the_options_eod_chain() -> None:
     """W3c REPLACES I-O6's ``test_there_is_no_scheduled_caller_yet``.
 
@@ -77,17 +115,16 @@ def test_the_only_scheduled_caller_is_the_options_eod_chain() -> None:
     the same as wired correctly.
 
     That is the change this test now pins, rather than the absence it used to.
-    The negative assertion is kept in the strongest form still available: the
-    scheduler invokes the options auto-simulation EXACTLY ONCE, from
-    ``job_options_paper_eod``, it never calls the acceptance directly, and the
-    three protective steps precede the auto-simulation in source order inside
-    that one job.
+    The negative assertion is kept in the strongest form still available: exactly
+    one module invokes the options auto-simulation, from one job, it never calls
+    the acceptance directly, and the three protective steps precede the
+    auto-simulation in source order inside that one job.
     """
-    sched = (SRC / "scheduler.py").read_text()
-    assert "accept_options_candidate(" not in sched
-    assert sched.count("auto_simulate_options_scan_runs(") == 1
+    eod = (SRC / "paper" / "options_eod.py").read_text()
+    assert "accept_options_candidate(" not in eod
+    assert eod.count("auto_simulate_options_scan_runs(") == 1
 
-    body = sched[sched.index("def job_options_paper_eod(") :]
+    body = eod[eod.index("def job_options_paper_eod(") :]
     body = body[: body.index("\ndef ", 1)]  # up to the next top-level def
     order = [
         body.index("mark_options_to_market("),
@@ -96,6 +133,20 @@ def test_the_only_scheduled_caller_is_the_options_eod_chain() -> None:
         body.index("auto_simulate_options_scan_runs("),
     ]
     assert order == sorted(order), "mark -> reconcile -> expiry -> auto-simulate, in that order"
+
+
+def test_the_spec_is_injected_from_the_cli_and_from_nowhere_else() -> None:
+    """``options_paper_eod_spec`` has exactly one caller in the source tree, and
+    it is ``cli.py`` — the same single sanctioned inbound edge D6 §2 gives the
+    execution cycle, and for the same reason."""
+    callers = {
+        rel
+        for rel, text in _sources()
+        if "options_paper_eod_spec(" in text and rel != "paper/options_eod.py"
+    }
+    assert callers == {"cli.py"}
+    # ...and app/** may not resolve it either
+    assert not any(rel.startswith("app/") for rel, text in _sources() if "options_eod" in text)
 
 
 def test_the_equity_caller_allowlist_is_repaired_to_path_equality() -> None:
@@ -123,6 +174,11 @@ def test_every_contract_naming_the_equity_ledger_also_names_the_options_siblings
         "signalforge.paper.options_ledger",
         "signalforge.paper.options_marks",
         "signalforge.paper.options_auto_simulate",
+        # W3c's fourth sibling — the scheduled EOD chain. It calls the
+        # auto-simulation, so it is the door, not a reader, and this test's own
+        # docstring predicted it: "the next sibling cannot quietly reopen the
+        # hole".
+        "signalforge.paper.options_eod",
     }
     checked = 0
     for contract in contracts:
@@ -149,6 +205,7 @@ def test_the_reverse_direction_contract_exists_and_names_every_options_module() 
         "signalforge.paper.options_ledger",
         "signalforge.paper.options_marks",
         "signalforge.paper.options_auto_simulate",
+        "signalforge.paper.options_eod",
     }
     assert {
         "signalforge.llm",
@@ -159,7 +216,12 @@ def test_the_reverse_direction_contract_exists_and_names_every_options_module() 
 
 
 def test_the_options_modules_import_the_shared_maths_and_nothing_from_the_llm_layer() -> None:
-    for name in ("options_ledger.py", "options_marks.py", "options_auto_simulate.py"):
+    for name in (
+        "options_ledger.py",
+        "options_marks.py",
+        "options_auto_simulate.py",
+        "options_eod.py",
+    ):
         text = (SRC / "paper" / name).read_text()
         assert "signalforge.llm" not in text, name
         assert "signalforge.alerts" not in text, name
