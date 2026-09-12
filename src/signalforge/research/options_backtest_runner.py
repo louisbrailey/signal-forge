@@ -251,6 +251,85 @@ def joint_regime_census(trades: Sequence[OptionTrade], proxy: PriceSeries) -> Jo
     )
 
 
+@dataclass(frozen=True, slots=True)
+class RegimePartitionDisclosure:
+    """D4 §5.1a option (b): the two regime modules, cross-tabulated.
+
+    The strategy's signal gating uses ``research/regime.py``'s
+    ``RegimeState(Trend{BULL, BEAR, NEUTRAL}, Vol{LOW, HIGH})``; gate 6's census
+    reads ``backtest/regime.py``'s labels, where **any** session within +/-3% of
+    the 200-SMA is ``range_bound`` regardless of trend.  They overlap and do not
+    coincide — so a cycle the call-side mirror fires on, because
+    ``research/regime.py`` says BEAR, can be counted ``range`` by the census.
+
+    That matters because gate-6 reachability is what decided O3 ships before O1,
+    and revisions 1/2 of D4 asserted it from the wrong partition.  Option (a) —
+    make the filter read the census's function — is available to the options
+    runner, but D5 §3.2 pre-registers ``research/regime.py`` for the filter, and a
+    pre-registration is not re-opened to make a gate easier to reason about.  So
+    option (b) applies and this disclosure is **mandatory** gate-6 evidence.
+    """
+
+    signal_label_source: str
+    census_label_source: str
+    crosstab: dict[str, dict[str, int]]
+    bear_sessions_signal: int
+    bear_sessions_called_range: int
+    sessions: int
+
+    @property
+    def mismatch_fraction(self) -> float:
+        """Of the sessions the SIGNAL calls bear, the share the census calls range."""
+        if not self.bear_sessions_signal:
+            return 0.0
+        return self.bear_sessions_called_range / self.bear_sessions_signal
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "signal_regime_label_source": self.signal_label_source,
+            "regime_label_source": self.census_label_source,
+            "regime_partition_crosstab": {k: dict(v) for k, v in self.crosstab.items()},
+            "regime_partition_mismatch_fraction": round(self.mismatch_fraction, 6),
+            "bear_sessions_signal": self.bear_sessions_signal,
+            "bear_sessions_called_range": self.bear_sessions_called_range,
+            "sessions": self.sessions,
+        }
+
+
+def regime_partition_crosstab(proxy: PriceSeries) -> RegimePartitionDisclosure:
+    """Cross-tabulate the two regime modules over the proxy's own sessions.
+
+    A **label count over sessions**, computed from functions that read only the
+    proxy's closes.  It contains no option price, no IV, no credit, no return and
+    no P&L, so it is admissible under map §7's rule about what may be inspected
+    before a pre-registration is committed — which is the whole reason it can
+    turn gate-6 bear reachability from an assertion into a fact *before* the
+    design is frozen.
+    """
+    from signalforge.research.regime import regime_from_proxy
+
+    census = label_regimes(proxy)
+    crosstab: dict[str, dict[str, int]] = {}
+    bear_signal = bear_as_range = 0
+    for t, d in enumerate(proxy.dates):
+        signal_trend = regime_from_proxy(proxy, t).trend.value
+        census_label = census.get(_as_date(d), "no_proxy_bar")
+        crosstab.setdefault(signal_trend, {})
+        crosstab[signal_trend][census_label] = crosstab[signal_trend].get(census_label, 0) + 1
+        if signal_trend == "bear":
+            bear_signal += 1
+            if census_label == "range_bound":
+                bear_as_range += 1
+    return RegimePartitionDisclosure(
+        signal_label_source="signalforge.research.regime:regime_from_proxy",
+        census_label_source="signalforge.backtest.regime:label_regimes",
+        crosstab={k: dict(sorted(v.items())) for k, v in sorted(crosstab.items())},
+        bear_sessions_signal=bear_signal,
+        bear_sessions_called_range=bear_as_range,
+        sessions=len(proxy),
+    )
+
+
 # ---------------------------------------------------------------------------
 # The two-spread rule (D2 §8, §9.3 — gate 4b)
 # ---------------------------------------------------------------------------

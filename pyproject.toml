@@ -259,6 +259,29 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+# S11b NAMES the options RESEARCH modules the way S11a names the engine ones,
+# and for the same reason: S3 covers signalforge.research as a whole for the LLM
+# layer, but nothing names the alert and order paths for the options gate ladder
+# and the options strategy family. Those two are precisely where an "options
+# strategy passed, so alert on it" shortcut would be written. Ships INSIDE the
+# commit that creates the modules, so there is no window in which the module
+# exists and the contract does not.
+name = "S11b: the options gate ladder and strategy family are off the alert, LLM and order paths"
+type = "forbidden"
+source_modules = [
+    "signalforge.research.options_gates",
+    "signalforge.research.options_promotion",
+    "signalforge.research.options_strategies",
+    "signalforge.research.options_backtest_runner",
+]
+forbidden_modules = [
+    "signalforge.llm",
+    "signalforge.alerts",
+    "signalforge.execution",
+    "signalforge.paper.ledger",
+]
+
+[[tool.importlinter.contracts]]
 name = "S12: news never drives a recommendation or risk decision"
 type = "forbidden"
 source_modules = [
