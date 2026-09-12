@@ -275,3 +275,6 @@ forbidden_modules = [
     "httpx",
     "requests",
 ]
+# The LLM client is the one sanctioned network path for agents (explanatory
+# narratives only, grounded + guarded); it may use httpx as it used the SDK.
+ignore_imports = ["signalforge.llm.client -> httpx"]
