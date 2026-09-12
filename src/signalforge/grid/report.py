@@ -238,7 +238,9 @@ def render_report_md(
             "(`reanchor_on_untradeable_rise` is off), so a symbol that rises before it ever "
             "dips can never trade again."
         ),
-        "6. No leverage, no shorting: cash never goes negative and a sell never exceeds holdings.",
+        "6. A sell that would leave a remainder worth less than the minimum notional sells the "
+        "WHOLE position instead, so no unsellable stub can freeze a symbol.",
+        "7. No leverage, no shorting: cash never goes negative and a sell never exceeds holdings.",
         "",
         "## Parameters",
         "",

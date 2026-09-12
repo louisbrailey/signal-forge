@@ -13,12 +13,19 @@ import pytest
 from signalforge.grid.config import GridParams
 from signalforge.grid.engine import (
     BUY,
+    QTY_DP,
     SELL,
     GridSeries,
+    GridState,
     decide,
+    execute_fill,
     fill_price,
     run_grid_backtest,
 )
+
+
+def _qty(x: float) -> float:
+    return round(x, QTY_DP)
 
 
 def _days(n: int, start: date = date(2024, 1, 2)) -> tuple[date, ...]:
@@ -284,6 +291,42 @@ def test_budget_consistency_flag() -> None:
 
     also = GridParams(starting_cash=50_000.0, per_symbol_cap=50.0, universe_size=1_000)
     assert also.budget_is_consistent
+
+
+def test_a_partial_sell_never_leaves_an_unsellable_stub() -> None:
+    """$10 out of a $10.50 position would strand $0.50 below the $1 minimum,
+    and that stub could never be sold again — so the whole position goes."""
+    p = GridParams(starting_cash=1_000.0, per_symbol_cap=50.0, sell_usd=10.0, min_order_usd=1.0)
+    px = fill_price(100.0, SELL, p)
+    st = GridState(symbol="AAA", qty=_qty(10.50 / px), cost_basis=10.0, anchor=100.0, tracking=True)
+    dec = decide(close=106.0, anchor=100.0, qty=st.qty, cost_basis=10.0, cash=0.0, params=p)
+    assert dec.action == SELL
+
+    trade, _cash = execute_fill(st, dec, date(2024, 1, 2), date(2024, 1, 3), 100.0, 0.0, p)
+    assert trade is not None
+    assert trade.usd > p.sell_usd, "the stub is swept into the same sell"
+    assert st.qty == 0.0 and st.cost_basis == 0.0
+
+    # A remainder that IS still sellable is left alone: a $30 position sells $10.
+    st2 = GridState(symbol="BBB", qty=_qty(30.0 / px), cost_basis=30.0, anchor=100.0, tracking=True)
+    dec2 = decide(close=106.0, anchor=100.0, qty=st2.qty, cost_basis=30.0, cash=0.0, params=p)
+    trade2, _c = execute_fill(st2, dec2, date(2024, 1, 2), date(2024, 1, 3), 100.0, 0.0, p)
+    assert trade2 is not None
+    assert trade2.usd == pytest.approx(p.sell_usd, rel=1e-4)
+    assert st2.qty > 0 and st2.qty * px >= p.min_order_usd
+
+
+def test_no_open_position_is_ever_left_below_the_minimum_notional() -> None:
+    """End-to-end: the sweep rule must leave no dust anywhere."""
+    p = GridParams(starting_cash=5_000.0, per_symbol_cap=50.0, sell_usd=10.0, min_order_usd=1.0)
+    # A long sawtooth that accumulates and partially unwinds many times.
+    closes = [100.0]
+    for i in range(60):
+        closes.append(closes[-1] * (0.93 if i % 3 else 1.12))
+    res = run_grid_backtest({"AAA": _series("AAA", closes)}, p)
+    assert res.trades
+    for pos in res.positions:
+        assert pos.market_value >= p.min_order_usd - 1e-9, pos
 
 
 def test_a_rise_with_nothing_to_sell_ratchets_the_anchor_by_default() -> None:

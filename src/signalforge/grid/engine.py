@@ -18,7 +18,9 @@ The rules, stated exactly (all of them operate on DAILY bars):
   minimum notional leaves the level armed.
 * Constraints: a symbol's cost basis may never exceed ``per_symbol_cap``; cash
   may never go negative; a sell may never exceed the shares held; an order below
-  ``min_order_usd`` is skipped.
+  ``min_order_usd`` is skipped. A sell that would leave a remainder worth less
+  than ``min_order_usd`` sells the WHOLE position instead — otherwise the stub
+  could never be sold again and the symbol would freeze.
 
 Determinism: pure arithmetic over the input arrays; no RNG, no wall-clock, no
 database. Ordering inside one session is fixed — sells fill before buys (so the
@@ -642,6 +644,14 @@ def execute_fill(
         return None, cash
     qty = min(st.qty, _q(params.sell_usd / px))
     qty = _q(qty)
+    # Never leave an unsellable stub. A $10 sell out of a $10.50 position would
+    # leave $0.50, which can never clear the per-order minimum again: the sell is
+    # skipped forever, so the anchor never moves and the symbol freezes — on the
+    # 10-year 100-symbol run that stranded 69 of 92 open positions. If the
+    # remainder would fall below ``min_order_usd``, sell the whole position.
+    residual = _q(st.qty - qty)
+    if 0 < residual * px < params.min_order_usd:
+        qty = st.qty
     if qty <= 0:
         return None, cash
     gross = qty * px
