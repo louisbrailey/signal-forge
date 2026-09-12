@@ -1422,12 +1422,31 @@ def evaluate_promotion_cmd(
             )
         ),
     ] = "baseline",
+    snapshot_key: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "Evaluate against the DataSnapshot with this EXACT key, creating it from the "
+                "resolved symbols if it does not exist yet. For a dataset that is not one of "
+                "the three named variants — e.g. the intraday snapshot "
+                "'research_24_intraday15m_2016_2025'. A key whose stored symbol set differs "
+                "from the one just requested is refused, never reinterpreted."
+            )
+        ),
+    ] = "",
 ) -> None:
     """Run the formal 10-gate promotion pipeline for every default strategy.
 
     The only command that can move a strategy to paper_approved — and only when
     every gate passes on genuine licensed data. Prints a gate-by-gate table per
     strategy and, if nothing clears the bar, the canonical NO-TRADE line.
+
+    --snapshot-key exists because an UNKEYED evaluation resolves its snapshot by
+    exact symbol-set match among reusable snapshots. An intraday run on the
+    24-symbol ex-META universe would therefore silently attach to the DAILY
+    snapshot the two live paper approvals sit on — same symbols, different data.
+    A distinct key keeps gate 9's sealed test keyed to its own dataset, so it can
+    neither reuse nor be blocked by the daily snapshot's locked result.
     """
     ensure_not_engaged()
     from datetime import date as _date
@@ -1488,6 +1507,33 @@ def evaluate_promotion_cmd(
             )
             eval_source = source_for_variant(
                 dataset, get_settings().market_data_provider, mapping_id
+            )
+
+        if snapshot_key:
+            # The key wins over whatever the variant resolver or the unkeyed
+            # symbol-set match would have picked: this is the whole point of
+            # the flag. get_or_create_dataset_snapshot REFUSES a key whose
+            # stored symbols differ from the ones just requested (a DataSnapshot
+            # is immutable once created), so a typo cannot quietly reinterpret
+            # an existing dataset's provenance.
+            from signalforge.research.promotion import get_or_create_dataset_snapshot
+
+            try:
+                snap = get_or_create_dataset_snapshot(
+                    session,
+                    key=snapshot_key,
+                    symbols=list(syms or cfg.universe),
+                    description=f"keyed evaluation dataset {snapshot_key!r}",
+                    source_note=f"symbols resolved from --symbols/--dataset {dataset!r}",
+                )
+            except ValueError as exc:
+                typer.secho(str(exc), fg=typer.colors.RED)
+                raise typer.Exit(code=1) from None
+            syms = list(snap.symbols_json)
+            typer.secho(
+                f"dataset snapshot {snap.key!r} (id {snap.id}, {len(syms)} symbols) — "
+                f"gate 9's sealed test is keyed to THIS dataset",
+                fg=typer.colors.CYAN,
             )
 
         any_passed = False
