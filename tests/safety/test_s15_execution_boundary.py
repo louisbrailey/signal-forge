@@ -21,9 +21,11 @@ import importlib.util
 import re
 import tomllib
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy.orm import Session
 
 from tests.support import PKG_ROOT, REPO_ROOT, SRC_ROOT, iter_source_files, run_python
 
@@ -58,6 +60,57 @@ def execution_package_exists() -> bool:
 
 def _requires_ie2(symbol: str) -> None:
     pytest.skip(f"requires I-E2: {symbol} does not exist yet (D6 ADR §19)")
+
+
+# ---------------------------------------------------------------------------
+# The paper_reference adapter (I-E3). T6, T10 and T11 need it, so building one
+# lives here once. Every argument is required by the adapter itself: there is no
+# default account, information set or audit sink to fall back to.
+# ---------------------------------------------------------------------------
+
+PAPER_REFERENCE_DRILL_NOW = datetime(2026, 9, 11, 15, 0, tzinfo=UTC)
+
+
+def _paper_reference_adapter(audit: object, *, expected_account_id: str) -> object:
+    from signalforge.execution.brokers.paper_reference import (
+        PaperReferenceBroker,
+        PreSubmissionInformation,
+        ReferenceQuote,
+        SimulatedAccount,
+    )
+    from signalforge.execution.intents import MarketClock
+
+    earlier = PAPER_REFERENCE_DRILL_NOW - timedelta(minutes=1)
+    return PaperReferenceBroker(
+        audit=audit,  # type: ignore[arg-type]
+        account=SimulatedAccount(account_id="PAPER-SIM-DRILL-1", initial_cash=25_000.0),
+        expected_account_id=expected_account_id,
+        information=PreSubmissionInformation.of([ReferenceQuote("SPY", 470.0, earlier)]),
+        clock=MarketClock(is_open=True, as_of=PAPER_REFERENCE_DRILL_NOW),
+    )
+
+
+def _drill_intent(client_order_id: str, *, limit_price: float = 471.0) -> object:
+    from signalforge.execution.intents import (
+        CostModelFeedback,
+        IntentKind,
+        OrderIntent,
+        OrderSide,
+    )
+
+    return OrderIntent(
+        client_order_id=client_order_id,
+        intent_kind=IntentKind.OPEN,
+        side=OrderSide.BUY_TO_OPEN,
+        qty=10,
+        limit_price=limit_price,
+        shares_per_contract=1,
+        adapter_name="paper_reference",
+        created_at=PAPER_REFERENCE_DRILL_NOW,
+        expires_at=PAPER_REFERENCE_DRILL_NOW + timedelta(minutes=15),
+        cost_model=CostModelFeedback(modelled_fill_price=limit_price, modelled_spread_bps=5.0),
+        symbol="SPY",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +397,63 @@ def test_t5_protocol_and_intents_import_no_http_client() -> None:
 
 
 def test_t6_is_paper_mismatch_fails_arming() -> None:
-    _requires_ie2("signalforge.execution.protocol.IsPaperProof / execution.arming")
+    """D6 §13 / drill V9, asserted against ``paper_reference`` as §13 requires.
+
+    The arming ceremony itself is I-E4; what exists today is the proof and the
+    gate that consumes it, and all four links of the chain are asserted so that
+    the ceremony has nothing left to get wrong:
+
+    1. a stubbed broker response whose account id differs from the armed
+       record's produces an **unproven** proof, with the mismatch named;
+    2. an ``IsPaperProof`` cannot be *constructed* as proven with a mismatched
+       account id, so no code path can hand the ceremony a forged proof;
+    3. an unproven proof fails ``may_open``'s A2 check — the input the arming
+       ceremony and every cycle feed;
+    4. and it fails **every subsequent submission**, not merely arming.
+
+    The local simulator can never reach real money. That is emphatically not
+    why the proof passes: a proof that passed because the adapter "is paper"
+    would be the config-flag proof §13 rejects.
+    """
+    from signalforge.execution.limits import may_open
+    from signalforge.execution.protocol import IsPaperProof
+    from signalforge.execution.states import OrderState
+    from tests.execution.conftest import clean_limit_set, clean_open_context
+
+    class _Sink:
+        def record(self, event_type: object, /, **fields: object) -> None:
+            return None
+
+    # 1 — the armed record expects one account; the broker's body reports another.
+    adapter = _paper_reference_adapter(_Sink(), expected_account_id="PAPER-SIM-SOMEONE-ELSE")
+    proof = adapter.is_paper()  # type: ignore[attr-defined]
+    assert proof.proven is False
+    assert "does not match" in proof.failure_reason
+
+    # 2 — the mismatch cannot be asserted away by constructing a "proven" proof.
+    with pytest.raises(ValueError, match="observed account id matches"):
+        IsPaperProof(
+            proven=True,
+            observed_account_id="PAPER-SIM-DRILL-1",
+            observed_host="local.paper-reference.invalid",
+            expected_account_id="PAPER-SIM-SOMEONE-ELSE",
+            checked_at=PAPER_REFERENCE_DRILL_NOW,
+        )
+
+    # 3 — arming and every cycle read this gate, and it blocks.
+    decision = may_open(
+        clean_open_context(is_paper_proven_this_cycle=proof.proven), clean_limit_set()
+    )
+    assert decision.allowed is False
+    assert any(check.name == "A2" for check in decision.failures)
+    # The same context with a proven proof is otherwise clean, so A2 is what bit.
+    assert may_open(clean_open_context(), clean_limit_set()).allowed is True
+
+    # 4 — and every submission is refused while the proof fails.
+    result = adapter.place(_drill_intent("cid-mismatch"))  # type: ignore[attr-defined]
+    assert result.state is OrderState.REJECTED
+    assert "is_paper proof failed" in result.error_verbatim
+    assert adapter.fills_for("cid-mismatch") == ()  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -545,12 +654,130 @@ def test_t9_no_unconditional_no_order_promise_once_execution_exists() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_t10_paper_reference_fills_are_excluded_from_every_gate() -> None:
-    _requires_ie2("signalforge.execution.brokers.paper_reference and the execution_event table")
+#: Every table a promotion gate, ``strategy_health``, an expectancy figure or
+#: decision 10's closed-trade count reads. ``paper_reference`` must write to
+#: none of them.
+EVIDENCE_TABLES = (
+    "paper_trade",
+    "paper_order",
+    "paper_fill",
+    "paper_position",
+    "strategy_health",
+    "strategy_promotion_evaluation",
+    "strategy_sealed_test",
+    "backtest_run",
+    "backtest_trade",
+    "backtest_metric",
+)
 
 
-def test_t11_credential_value_reaches_no_log_and_no_execution_event() -> None:
-    _requires_ie2("signalforge.execution.credentials")
+def test_t10_paper_reference_fills_are_excluded_from_every_gate(session: Session) -> None:
+    """D6 §3.1 rule 4, against a fixture whose fills WOULD otherwise satisfy the
+    arming precondition.
+
+    Decision 10 requires ">= 20 closed paper trades with non-negative
+    expectancy". The drill below closes 25 — more than enough — and the
+    exclusion is asserted in the two forms that matter:
+
+    * **the filter has something to bite on**: every row the adapter writes
+      carries ``adapter_name = 'paper_reference'``, so excluding it removes all
+      25 and leaves nothing;
+    * **the stronger structural fact**: the adapter writes to ``execution_event``
+      and to nothing else. Not one row reaches ``paper_trade``,
+      ``strategy_health``, a promotion evaluation or a backtest table, so no
+      gate that reads those tables can see a simulated fill at all — the
+      exclusion does not depend on every future counter remembering to filter.
+
+    And there is no statistic to count in the first place: the adapter marks its
+    book at cost, so equity is identical before and after 25 filled structures.
+    """
+    from sqlalchemy import func, text
+    from sqlalchemy import select as sa_select
+
+    from signalforge.db.models import ExecutionEvent
+    from signalforge.execution.brokers.paper_reference import ExecutionEventAudit
+
+    adapter = _paper_reference_adapter(
+        ExecutionEventAudit(session), expected_account_id="PAPER-SIM-DRILL-1"
+    )
+    equity_before = adapter.account().equity  # type: ignore[attr-defined]
+    for index in range(25):
+        # Distinct economics per structure: the adapter refuses a second order
+        # with the SAME economics under a different id (the post-timeout
+        # non-duplication guarantee), so 25 closed structures must be 25 real
+        # ones rather than one order resubmitted 25 times.
+        result = adapter.place(  # type: ignore[attr-defined]
+            _drill_intent(f"drill-{index:02d}", limit_price=471.0 + index)
+        )
+        assert result.state.value == "FILLED"
+    session.flush()
+
+    total = session.scalar(sa_select(func.count()).select_from(ExecutionEvent))
+    assert total and total >= 25
+    not_paper_reference = session.scalar(
+        sa_select(func.count())
+        .select_from(ExecutionEvent)
+        .where(ExecutionEvent.adapter_name != "paper_reference")
+    )
+    assert not_paper_reference == 0, (
+        "the decision-10 counter filters on adapter_name; every row this adapter wrote must "
+        "carry it, or the filter would silently admit a simulated fill"
+    )
+
+    for table in EVIDENCE_TABLES:
+        count = session.execute(text(f"select count(*) from {table}")).scalar_one()
+        assert count == 0, f"a paper_reference drill reached the evidence table {table}"
+
+    assert adapter.account().equity == equity_before  # type: ignore[attr-defined]
+
+
+T11_SENTINEL = "t11-sentinel-value-that-must-never-be-logged"  # pragma: allowlist secret
+
+
+def test_t11_credential_value_reaches_no_log_and_no_execution_event(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D6 §16. T7 can only see source literals; this sees a RUNTIME value.
+
+    A credential is read through ``credentials.py`` from a stubbed environment
+    returning a known sentinel, and a full adapter drill then runs while the
+    process holds it. The sentinel must appear in no structlog record and in no
+    column or payload of any ``execution_event`` row.
+    """
+    import structlog
+    from pydantic import SecretStr
+    from sqlalchemy import select as sa_select
+
+    from signalforge.db.models import ExecutionEvent
+    from signalforge.execution import credentials as creds
+    from signalforge.execution.brokers.paper_reference import ExecutionEventAudit
+
+    monkeypatch.setenv("SF_EXECUTION_BROKER_KEY_ID", T11_SENTINEL)
+    with structlog.testing.capture_logs() as captured:
+        secret = creds.resolve_credential(
+            creds.CredentialRef(creds.CredentialSource.ENV, "SF_EXECUTION_BROKER_KEY_ID")
+        )
+        adapter = _paper_reference_adapter(
+            ExecutionEventAudit(session), expected_account_id="PAPER-SIM-DRILL-1"
+        )
+        adapter.is_paper()  # type: ignore[attr-defined]
+        adapter.account()  # type: ignore[attr-defined]
+        adapter.place(_drill_intent("t11"))  # type: ignore[attr-defined]
+        adapter.order_status("t11")  # type: ignore[attr-defined]
+        adapter.cancel_all()  # type: ignore[attr-defined]
+    session.flush()
+
+    assert isinstance(secret, SecretStr)
+    assert secret.get_secret_value() == T11_SENTINEL, "the reader really did read the sentinel"
+    assert captured, "there is log output to inspect, so the absence below is meaningful"
+    assert T11_SENTINEL not in repr(captured)
+
+    rows = session.scalars(sa_select(ExecutionEvent)).all()
+    assert rows
+    for row in rows:
+        assert T11_SENTINEL not in repr(
+            {column.name: getattr(row, column.name) for column in ExecutionEvent.__table__.columns}
+        )
 
 
 # ---------------------------------------------------------------------------

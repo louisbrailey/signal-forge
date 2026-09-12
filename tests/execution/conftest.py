@@ -164,36 +164,49 @@ def manual_paper_trade(session: Session, account: PaperAccount, candidate: Candi
     return trade
 
 
+#: The grid centres of §7b / decision 4, in ONE place, so the database row and
+#: the database-free :func:`clean_limit_set` cannot drift apart.
+LIMIT_GRID_CENTRES: dict[str, object] = {
+    "max_orders_per_day": 10,
+    "max_order_notional_usd": 1_000.0,
+    "max_account_exposure_pct": 40.0,
+    "per_structure_max_loss_usd": 250.0,
+    "per_structure_max_loss_pct": 0.5,
+    "aggregate_open_max_loss_usd": 1_000.0,
+    "aggregate_open_max_loss_pct": 2.0,
+    "collateral_cap_usd": 5_000.0,
+    "collateral_cap_pct": 30.0,
+    "max_net_delta_notional_usd": 10_000.0,
+    "max_net_vega_per_volpt_usd": 50.0,
+    "cycle_interval_s": 30,
+    "max_intent_age_minutes": 15,
+    "max_reconciliation_age_s": 120,
+    "execution_stale_after_s": 90,
+    "drain_timeout_s": 30,
+    "no_submit_after_open_minutes": 15,
+    "no_submit_before_close_minutes": 15,
+    "buying_power_tolerance_usd": 1.0,
+    "buying_power_tolerance_pct": 0.1,
+    "round_trips_per_5_sessions_max": 3,
+    "pdt_equity_threshold_usd": 25_000.0,
+    "preregistration_doc_id": "PREREGISTRATION_execution_limits_v1",
+}
+
+
+def clean_limit_set() -> LimitSet:
+    """The same grid centres as a :class:`LimitSet`, with no database.
+
+    ``may_open`` needs a parseable limits row and nothing else from the DB, so
+    a test about a different gate entirely (T6's ``is_paper`` proof, say) does
+    not have to stand a migration up to reach it.
+    """
+    return LimitSet(id=0, **LIMIT_GRID_CENTRES)  # type: ignore[arg-type]
+
+
 @pytest.fixture
 def limits_row(session: Session) -> ExecutionLimits:
     """The grid centres of §7b / decision 4, as a valid active row."""
-    row = ExecutionLimits(
-        created_at=NOW,
-        created_by="local-user",
-        max_orders_per_day=10,
-        max_order_notional_usd=1_000.0,
-        max_account_exposure_pct=40.0,
-        per_structure_max_loss_usd=250.0,
-        per_structure_max_loss_pct=0.5,
-        aggregate_open_max_loss_usd=1_000.0,
-        aggregate_open_max_loss_pct=2.0,
-        collateral_cap_usd=5_000.0,
-        collateral_cap_pct=30.0,
-        max_net_delta_notional_usd=10_000.0,
-        max_net_vega_per_volpt_usd=50.0,
-        cycle_interval_s=30,
-        max_intent_age_minutes=15,
-        max_reconciliation_age_s=120,
-        execution_stale_after_s=90,
-        drain_timeout_s=30,
-        no_submit_after_open_minutes=15,
-        no_submit_before_close_minutes=15,
-        buying_power_tolerance_usd=1.0,
-        buying_power_tolerance_pct=0.1,
-        round_trips_per_5_sessions_max=3,
-        pdt_equity_threshold_usd=25_000.0,
-        preregistration_doc_id="PREREGISTRATION_execution_limits_v1",
-    )
+    row = ExecutionLimits(created_at=NOW, created_by="local-user", **LIMIT_GRID_CENTRES)
     session.add(row)
     session.flush()
     return row
