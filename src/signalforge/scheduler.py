@@ -13,20 +13,18 @@ job bodies do not change.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from signalforge.db.retry import LockRetryExhausted, is_lock_error, retry_on_lock
 from signalforge.domain import Horizon
+from signalforge.jobspec import JobFn, JobSpec
 from signalforge.killswitch import KillSwitchEngaged, ensure_not_engaged
 from signalforge.observability import get_logger
 
 _log = get_logger("scheduler")
 
-JobFn = Callable[[], None]
 JOB_LOCK_ATTEMPTS = 3
 JOB_LOCK_BACKOFF_S = (0.5, 2.0, 5.0)
 # Jobs that persist per-unit results (a ScanRun per horizon, a bulk file per
@@ -45,30 +43,6 @@ NO_JOB_LEVEL_LOCK_RETRY: frozenset[str] = frozenset(
         "intraday_scan",
     }
 )
-
-
-@dataclass(frozen=True, slots=True)
-class JobSpec:
-    name: str
-    fn: JobFn
-    interval_minutes: int
-    description: str
-    # When set, the job runs on this daily wall-clock time in ``cron_tz`` instead
-    # of a fixed interval (used for the single post-close end-of-day update).
-    cron_hour: int | None = None
-    cron_minute: int = 0
-    cron_tz: str = "America/New_York"
-    # The job supplies its OWN kill-switch-aware wrapper and must NOT be wrapped
-    # in :func:`guarded`. Exactly one job sets this, and it is injected from the
-    # CLI rather than listed in ``default_job_specs()``: the order-execution
-    # cycle. ``guarded()`` RETURNS without running the body when the kill switch
-    # is engaged, which for that job would mean no protective close, no drain, no
-    # cancel_all and a dead-man lapse caused BY engaging the switch — i.e. a kill
-    # switch that blocks closing. That job's own wrapper reads the same state and
-    # branches to a protective-only cycle instead. No other spec may set this:
-    # every job in ``default_job_specs()`` leaves it False and is guarded exactly
-    # as it was before this field existed.
-    self_guarded: bool = False
 
 
 def _record_job_failure(name: str, error: str) -> None:

@@ -302,9 +302,7 @@ def test_a_protective_cycle_closes_admissions_and_a_clean_one_reopens_them(
     assert cycle_mod.SUBMISSION_LOCK.admitting is False
 
     deadman.feed(session, now=at)
-    cycle_mod.run_execution_cycle(
-        session, _posture(CycleBranch.FULL), now=at, adapter=None
-    )
+    cycle_mod.run_execution_cycle(session, _posture(CycleBranch.FULL), now=at, adapter=None)
     assert cycle_mod.SUBMISSION_LOCK.admitting is True
 
     # ...but a cycle whose dead man has lapsed does NOT reopen them.

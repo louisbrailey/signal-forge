@@ -65,7 +65,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from sqlalchemy.orm import Session
 
     from signalforge.execution.protocol import BrokerAdapter
-    from signalforge.scheduler import JobSpec
+    from signalforge.jobspec import JobSpec
 
 __all__ = [
     "EXECUTION_CYCLE_JOB",
@@ -479,8 +479,8 @@ def execution_job_specs(*, adapter: BrokerAdapter | None = None) -> list[JobSpec
     still start if the database is momentarily unavailable, and the safe answer
     there is "not scheduled".
     """
+    from signalforge.jobspec import JobSpec
     from signalforge.observability import get_logger
-    from signalforge.scheduler import JobSpec
 
     try:
         from signalforge.db.session import session_scope
