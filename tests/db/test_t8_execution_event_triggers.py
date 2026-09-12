@@ -19,6 +19,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+# Same marker as its neighbour tests/db/test_s9_paper_trade_triggers.py, so `make safety`
+# (Makefile:76, `pytest -m safety`) covers the append-only guarantee too.
+pytestmark = pytest.mark.safety
+
 EXPECTED_EXECUTION_TRIGGERS = ("execution_event_no_update", "execution_event_no_delete")
 PAPER_TRADE_TRIGGERS = ("paper_trade_no_update", "paper_trade_no_delete")
 
