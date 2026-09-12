@@ -282,3 +282,26 @@ DATABASE_URL="sqlite+pysqlite:///$TMPDIR/scratch-grid.sqlite" signalforge grid b
   is not promotion-gated, so its settings must never appear able to re-scope a genuinely
   `PAPER_APPROVED` strategy. A test asserts `config_hash` is unchanged by any grid setting
   while `full_config_hash` moves.
+
+## Ten-year results on the full top-1000 universe (added 2026-09-12)
+
+Source `massive`, 2016-10-17 → 2026-09-11, 999 symbols traded (779 with the full span,
+220 enter at their first listed bar, APLD failed to backfill). Costs 3 bps slippage +
+half of a 5 bps spread per side, commission 0, $1 minimum order.
+
+| Configuration | Total return | CAGR | Max drawdown | Trades | SPY buy-and-hold |
+|---|---|---|---|---|---|
+| $50 cap / $5,000 (operator's literal numbers) | +355.3% | +16.5% | 40.9% | 181,779 | +258.5% / +13.8% / 34.1% |
+| $5 cap / $5,000 | +108.1% | +7.7% | 21.4% | 36,198 | same |
+| $50 cap / $50,000 | +35.2% | +3.1% | 8.6% | 195,570 | same |
+
+Reports: `grid_top1000_50cap_5000cash.md`, `grid_top1000_5cap_5000cash.md`,
+`grid_top1000_50cap_50000cash.md` (+ `.json`).
+
+**Read with these caveats.** (1) Survivorship: the universe is *today's* 1,000 most
+liquid names; every stock that fell out of the top tier or delisted between 2016 and
+2026 is absent, and a dip-buying rule is flattered by that more than most. (2) ~18,000
+trades a year at $5–$10 each is only free with a zero-commission fractional-share broker;
+any per-order fee reverses the result. (3) Bars are split-adjusted as of fetch, not
+point-in-time. (4) The live paper grid runs on the same universe and parameters as the
+first row, so its forward record is the honest test of this table.
