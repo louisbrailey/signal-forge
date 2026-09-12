@@ -67,6 +67,38 @@ def test_illegal_transitions_raise(src: OrderState, dst: OrderState) -> None:
         next_state(src, dst)
 
 
+def _sufficient_resolution_to(target: OrderState) -> UnknownResolution | None:
+    """A resolution good enough to clear an ``UNKNOWN`` *into ``target``*.
+
+    Passed to the cross-product test so a pair is never refused merely because
+    no resolution was supplied: the UNKNOWN row is then refused only where the
+    table itself refuses it.
+    """
+    if target not in UNKNOWN_RESOLUTION_STATES:
+        return None
+    return UnknownResolution(
+        reconciled_from_order_status=True,
+        operator_acknowledged=True,
+        broker_terminal_state=target,
+        acknowledged_by="operator",
+    )
+
+
+@pytest.mark.parametrize("src", list(OrderState))
+@pytest.mark.parametrize("dst", list(OrderState))
+def test_every_pair_the_table_does_not_join_is_refused(src: OrderState, dst: OrderState) -> None:
+    """The whole 10x10 cross product, not a hand-picked sample of it.
+
+    The named cases above document *why* particular edges are absent; this one
+    closes the gap between "these ten are refused" and "everything outside the
+    table is refused", which is the property the machine actually promises.
+    """
+    if dst in LEGAL_TRANSITIONS.get(src, frozenset()):
+        return
+    with pytest.raises(IllegalTransition):
+        next_state(src, dst, resolution=_sufficient_resolution_to(dst))
+
+
 def test_the_terminal_set_is_complete() -> None:
     assert {
         OrderState.FILLED,
