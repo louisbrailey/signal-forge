@@ -36,3 +36,21 @@ Pass 2 started 2026-09-12 09:56 UTC on a fresh bulk copy (`data/io2_bulk.sqlite`
 590 min; first cycles committed (contracts and bars growing). Merge into the live DB only via
 `signalforge options merge --from data/io2_bulk.sqlite` after `--dry-run`, with the worker stopped
 (runbook §7). No options evaluation runs until OP-1 is decided and D5a is re-derived if needed.
+
+## Addendum (2026-09-12, later): OP-1 now gates the whole options program
+
+- **O3 short vertical v0.1.1** (D5a): expected null under the $250 per-structure cap (F14); viable widths need ≈ $254–$842.
+- **O2 covered call** (D7 DRAFT, `options_designs/D7_o2_covered_call_preregistration_DRAFT.md`): gates 0.5 and 0.i are jointly unsatisfiable under any cap below ≈ $3,428 (Stage A) / $1,061 (IWM only), and 100 shares of SPY or QQQ exceed the $25,000 account outright; the $5,000 collateral cap admits zero structures on all three underlyings. Not a fallback.
+- **O1 cash-secured put**: excluded by decision 12 (gate 6 / collateral wall).
+
+Consequence: no defined-risk options structure can pass the ladder on this account under decision 4's
+limits as they stand. The operator's choices are (a) OP-1 as recommended (per-structure ≈ $900,
+aggregate ≈ $3,600) which makes O3 evaluable, (b) a larger options paper account and collateral cap,
+which would additionally open O2 on IWM, or (c) keep the limits and accept that the options program's
+pre-registered expectation is the null result. Nothing in the code chooses among these.
+
+Execution layer status: the arming ceremony is runnable end-to-end on `paper_reference` (W4-A: enable/
+disable, limits from the pre-registration document, adapter lookup, OMS position attribution; W4-B:
+per-cycle adapter with account-scope refusal). The cycle's OPEN LANE (intent → OMS → adapter.place) is
+being built as its own increment (W4-C) under the orchestrator's decision recorded here: it is the
+ADR's designed body, default-disabled, unreachable unless a strategy is armed by the operator's ceremony.
