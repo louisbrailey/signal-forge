@@ -21,6 +21,7 @@ __all__ = [
     "EventFilters",
     "HealthMonitorConfig",
     "Horizon",
+    "IntradayOperationsConfig",
     "LiquidityFilters",
     "NewsConfig",
     "OptionsConfig",
@@ -215,6 +216,38 @@ class OptionsConfig(BaseModel):
     backfill_max_total_bars: PositiveInt = 200_000  # global storage ceiling
 
 
+class IntradayOperationsConfig(BaseModel):
+    """Whether this deployment OPERATES on the INTRADAY horizon at all.
+
+    One flag, consulted by every policy surface through
+    ``research.intraday_policy`` — before it existed the policy was stated in
+    four places that did not agree: ``ResearchConfig.enabled_horizons``
+    *includes* INTRADAY, while ``approved_scope_scan.approved_horizons``
+    excluded it, ``alerts.dispatch`` skipped it, and no scheduled job ever ran
+    during the session.
+
+    OFF by default, and OFF is not a placeholder: with it off, intraday
+    candidates are never scanned on an approved dataset, never alerted on, and
+    no intraday job is scheduled — byte-identical to the behaviour before this
+    config section existed.
+
+    Turning it ON does NOT make intraday execution realistic. The entitled feed
+    is DELAYED >= 15 min against a 15m research bar, so the backtest's
+    next-bar-open fill is permanently one bar early. That is disclosed at every
+    surface rather than silently accepted; see docs/INTRADAY_OPERATION.md."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    operating_enabled: bool = False
+    # Cadence of the scheduled in-session scan. None = the bar size, which is
+    # the only cadence at which a new bar can exist.
+    scan_interval_minutes: PositiveInt | None = None
+    # The in-session scan window, ET. Defaults to regular hours; the scan is a
+    # no-op outside it and on non-session days.
+    session_start_et: str = "09:30"
+    session_end_et: str = "16:00"
+
+
 class NewsConfig(BaseModel):
     model_config = {"frozen": True, "extra": "forbid"}
 
@@ -319,6 +352,7 @@ class ResearchConfig(BaseModel):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     options: OptionsConfig = Field(default_factory=OptionsConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
+    intraday: IntradayOperationsConfig = Field(default_factory=IntradayOperationsConfig)
 
     # Backtest cost assumptions (displayed on every candidate + report)
     commission_per_share: NonNegativeFloat = 0.0
@@ -342,6 +376,19 @@ class ResearchConfig(BaseModel):
     # never silently un-scope a live PAPER_APPROVED strategy. Adding a field
     # that DOES change signals means adding it here, and that is a deliberate
     # re-approval event.
+    #
+    # `intraday` is deliberately EXCLUDED, and here is the argument. It decides
+    # whether intraday candidates are scanned, scheduled and alerted on — an
+    # OPERATING policy. It changes no strategy's rule, no threshold, no
+    # universe and no cost: a given strategy evaluated on a given dataset
+    # produces the identical signals with the flag on or off. `intraday_bar_size`
+    # and `enabled_horizons`, which DO shape signals, are hashed and stay
+    # hashed. Including `intraday` would also move config_hash the moment this
+    # section appeared and put both live PAPER_APPROVED approvals out of scope
+    # immediately — exactly the incident this SCOPE_HASH_FIELDS list was
+    # narrowed to prevent — while buying no protection, because with the flag
+    # off no intraday candidate exists to be scoped and with it on the
+    # candidate's own hash is recorded like any other.
     SCOPE_HASH_FIELDS: ClassVar[tuple[str, ...]] = (
         "schema_version",
         "watchlist",

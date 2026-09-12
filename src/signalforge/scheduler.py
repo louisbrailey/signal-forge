@@ -40,6 +40,9 @@ NO_JOB_LEVEL_LOCK_RETRY: frozenset[str] = frozenset(
         "approved_scope_scan",
         "catchup_scan",
         "catchup_approved_scope_scan",
+        # persists a ScanRun of its own; a job-level retry would re-run the
+        # whole body and persist a second scan for the same bar
+        "intraday_scan",
     }
 )
 
@@ -311,7 +314,68 @@ def job_approved_scope_scan() -> None:
 
 # daily_eod_update (cron) and catch_up (interval) are different APScheduler
 # jobs, so max_instances=1 does not stop them overlapping — this lock does.
+# job_intraday_scan takes the SAME lock: an in-session scan must never run
+# while the post-close ingest+rescan is in flight (they write the same tables,
+# and an intraday scan straddling the EOD rescan would read half-updated data).
 _EOD_UPDATE_LOCK = threading.Lock()
+
+
+def job_intraday_scan() -> None:
+    """In-session INTRADAY scan on the approved dataset, at the bar cadence.
+
+    Config-gated OFF (``research.intraday.operating_enabled``). Every guard the
+    EOD path has applies here too, and two more:
+
+    * the kill switch — ``guarded`` wraps every scheduled job, and the adapters
+      re-check it inside their own waits;
+    * the worker lock — only the single lock-holding worker process runs jobs
+      at all (``worker_lock``), so two workers cannot scan the same bar;
+    * ``_EOD_UPDATE_LOCK`` — never overlaps the post-close ingest + rescan;
+    * the exchange calendar — a no-op outside the configured RTH window, on
+      holidays and on early-close afternoons.
+
+    It scans; it does not ingest. Intraday bars come from the operator's
+    backfill (``signalforge ingest-intraday``), so a scan can only ever read
+    what is already stored — and on a DELAYED feed the newest stored bar is at
+    least one bar behind. That is disclosed on every run rather than implied.
+    """
+    from signalforge.db.session import session_scope
+    from signalforge.research.candidates import persist_scan
+    from signalforge.research.intraday_policy import (
+        LATENCY_DISCLOSURE,
+        in_session_window,
+        operating_enabled,
+    )
+    from signalforge.research.scan import run_scan
+    from signalforge.settings_store import effective_research_config
+
+    # Read the flag under a plain READ session: a disabled run must not take
+    # the SQLite write lock (BEGIN IMMEDIATE) for nothing.
+    with session_scope() as session:
+        cfg = effective_research_config(session)
+    if not operating_enabled(cfg):
+        _log.info("intraday_scan.skipped_disabled")
+        return
+    if not in_session_window(cfg):
+        _log.info("intraday_scan.skipped_outside_session")
+        return
+    if not _EOD_UPDATE_LOCK.acquire(blocking=False):
+        _log.warning("intraday_scan.skipped_eod_update_running")
+        return
+    try:
+        with session_scope(write=True) as session:
+            result = run_scan(session, Horizon.INTRADAY)
+            run = persist_scan(session, result)
+        _log.info(
+            "intraday_scan.done",
+            scan_run_id=run.id,
+            candidates=run.candidate_count,
+            no_trade=run.no_trade_count,
+            bar_size=cfg.intraday_bar_size,
+            disclosure=LATENCY_DISCLOSURE,
+        )
+    finally:
+        _EOD_UPDATE_LOCK.release()
 
 
 def job_daily_eod_update() -> None:
@@ -381,6 +445,9 @@ MANUAL_JOBS: dict[str, JobFn] = {
     "approved_scope_scan": job_approved_scope_scan,
     "universe_update": job_universe_update,
     "agents_daily": job_agents_daily,
+    # Runnable by hand even while intraday operation is off — it is then a
+    # logged no-op, which is the point: the operator can prove what it would do.
+    "intraday_scan": job_intraday_scan,
 }
 
 
@@ -436,8 +503,44 @@ def job_health_check() -> None:
     job_feed_probe()
 
 
+def _intraday_scan_spec() -> list[JobSpec]:
+    """The in-session scan job — registered ONLY while intraday operation is on.
+
+    Deliberately not the "always scheduled, returns early when disabled" shape
+    the other config-gated jobs use: at a 15m cadence that would write ~26
+    JobRun rows per session for a deployment that has not opted in, changing
+    what the Operational Status page shows. With the flag off the job list is
+    byte-identical to what it was before this existed.
+
+    Best-effort config read: the scheduler must still start if the database is
+    momentarily unavailable, and the safe answer is "not scheduled"."""
+    try:
+        from signalforge.db.session import session_scope
+        from signalforge.research.intraday_policy import operating_enabled, scan_interval_minutes
+        from signalforge.settings_store import effective_research_config
+
+        with session_scope() as session:
+            cfg = effective_research_config(session)
+        if not operating_enabled(cfg):
+            return []
+        every = scan_interval_minutes(cfg)
+    except Exception as exc:  # pragma: no cover - DB unavailable at startup
+        _log.warning("intraday_scan.spec_unavailable", error=repr(exc)[:160])
+        return []
+    return [
+        JobSpec(
+            "intraday_scan",
+            job_intraday_scan,
+            every,
+            f"In-session INTRADAY scan every {every} min during U.S. RTH "
+            f"(config-gated; never overlaps the EOD update)",
+        )
+    ]
+
+
 def default_job_specs() -> list[JobSpec]:
     return [
+        *_intraday_scan_spec(),
         # One safe daily update, 17:30 America/New_York — ~90 min after the 16:00
         # close so the provider has published completed bars.
         JobSpec(

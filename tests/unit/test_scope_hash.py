@@ -49,4 +49,22 @@ def test_every_scope_field_exists_on_the_model() -> None:
         "health_monitor",
         "max_high_priority_alerts_per_day",
         "promotion",
+        # `intraday` is an OPERATING policy: whether intraday candidates are
+        # scanned on an approved dataset, scheduled and alerted on. It changes
+        # no rule, threshold, universe or cost, so the same strategy on the
+        # same dataset produces the same signals either way. The signal-shaping
+        # intraday settings — `intraday_bar_size`, `enabled_horizons` — are
+        # hashed and stay hashed. Hashing this section would also have moved
+        # config_hash the moment it appeared and put both live PAPER_APPROVED
+        # approvals out of scope for nothing.
+        "intraday",
     }
+
+
+def test_the_intraday_operating_flag_does_not_move_the_scope_hash() -> None:
+    base = ResearchConfig()
+    on = base.model_copy(
+        update={"intraday": base.intraday.model_copy(update={"operating_enabled": True})}
+    )
+    assert on.config_hash == base.config_hash  # not a signal-shaping change
+    assert on.full_config_hash != base.full_config_hash  # but still audited

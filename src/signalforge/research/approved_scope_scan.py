@@ -17,9 +17,10 @@ Hard gates, in order — any failure blocks the scan and records why:
    older than five calendar days).
 
 Read-only research: creates ScanRun/Candidate rows only. Never an alert,
-never a paper position, never intraday, never options, never a brokerage
-call. INTRADAY is excluded explicitly even if a strategy were ever approved
-on it (EOD-only operation).
+never a paper position, never options, never a brokerage call. INTRADAY is
+excluded unless the operator has turned intraday operation on
+(``research.intraday.operating_enabled``, default off) — the one flag every
+policy surface reads, via ``research.intraday_policy``.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from signalforge.config import get_settings
+from signalforge.config.research import ResearchConfig
 from signalforge.data.feeds import feed_status_report
 from signalforge.db.models import (
     AuditLog,
@@ -73,12 +75,25 @@ class ApprovedScopeScanReport:
         return sum(int(r["candidates"]) for r in self.runs)
 
 
-def approved_horizons(session: Session) -> list[Horizon]:
-    """Distinct horizons of every PAPER_APPROVED strategy, INTRADAY excluded."""
+def approved_horizons(session: Session, cfg: ResearchConfig | None = None) -> list[Horizon]:
+    """Distinct horizons of every PAPER_APPROVED strategy, filtered by the
+    intraday operating policy.
+
+    INTRADAY is excluded unless ``research.intraday.operating_enabled`` is on —
+    the same single flag every other policy surface consults
+    (``research.intraday_policy``). It used to be excluded by a hard-coded
+    condition here, which is why the four surfaces could disagree."""
+    from signalforge.research.intraday_policy import operating_horizons
+
+    if cfg is None:
+        from signalforge.settings_store import effective_research_config
+
+        cfg = effective_research_config(session)
     rows = session.execute(
         select(Strategy.horizon).where(Strategy.status == StrategyStatus.PAPER_APPROVED).distinct()
     ).all()
-    return sorted({h for (h,) in rows if h is not Horizon.INTRADAY}, key=lambda h: h.value)
+    found = sorted({h for (h,) in rows}, key=lambda h: h.value)
+    return operating_horizons(cfg, found)
 
 
 def data_readiness(

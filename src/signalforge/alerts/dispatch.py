@@ -51,7 +51,6 @@ from signalforge.domain import (
     AlertChannel,
     AlertStatus,
     AlertType,
-    Horizon,
     QualityGate,
     StrategyStatus,
 )
@@ -237,9 +236,14 @@ def plan_alerts(session: Session, now: datetime) -> list[PlannedAlert]:
     # about whether THIS scan used that exact dataset.
     probation_enabled = bool(_setting(session, "paper_probation_enabled", False))
     cfg = effective_research_config(session)
-    for h in cfg.enabled_horizons:
-        if h is Horizon.INTRADAY:
-            continue  # never alert on intraday signals (EOD-only operation)
+    # INTRADAY is alerted on only when the operator has turned intraday
+    # operation on (research.intraday.operating_enabled, default off) — the one
+    # flag every policy surface reads. It used to be skipped by a hard-coded
+    # condition here, which is why "EOD-only" could not be read off any single
+    # place, or reversed in one.
+    from signalforge.research.intraday_policy import operating_horizons
+
+    for h in operating_horizons(cfg, cfg.enabled_horizons):
         run = session.scalar(
             select(ScanRun)
             .where(ScanRun.horizon == h, not_universe_scan(session))
