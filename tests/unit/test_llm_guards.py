@@ -50,9 +50,18 @@ def test_timestamp_fragments_do_not_ground_fabricated_numbers() -> None:
         "breadth_pct": 61.3,
     }
     assert_grounded(f"Breadth stands at 61.3%. {AI_FOOTER}", facts)
-    for fabricated in ("45%", "18x", "2026", "07 publishers", "10 names"):
+    # the DATE may be restated; the TIME OF DAY never grounds a number
+    assert_grounded(f"As of September 10, 2026 breadth stands at 61.3%. {AI_FOOTER}", facts)
+    for fabricated in ("45%", "18x", "07 publishers", "22 names"):
         with pytest.raises(GuardViolation, match="not present in facts"):
             assert_grounded(f"Breadth improved {fabricated}. {AI_FOOTER}", facts)
+
+
+def test_fractions_may_be_restated_as_percentages() -> None:
+    facts = {"limits": {"max_position_pct": 0.10, "max_gross": 0.6}}
+    assert_grounded(f"Limits: 10% per position and 60% gross. {AI_FOOTER}", facts)
+    with pytest.raises(GuardViolation):
+        assert_grounded(f"Limits: 15% per position. {AI_FOOTER}", facts)
 
 
 def test_datetime_objects_and_timestamp_keys_are_skipped() -> None:
@@ -68,7 +77,7 @@ def test_datetime_objects_and_timestamp_keys_are_skipped() -> None:
     with pytest.raises(GuardViolation):
         assert_grounded(f"1234 symbols were checked. {AI_FOOTER}", facts)
     with pytest.raises(GuardViolation):
-        assert_grounded(f"45 symbols were checked. {AI_FOOTER}", facts)
+        assert_grounded(f"45 symbols were checked. {AI_FOOTER}", facts)  # 18:45 never grounds 45
 
 
 def test_rounded_floats_and_key_windows_are_grounded() -> None:

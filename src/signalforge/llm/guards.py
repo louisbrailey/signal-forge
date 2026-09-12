@@ -24,7 +24,6 @@ _TRIVIAL = {"0", "1", "2", "a", "one", "two"}
 # Evidence keys whose values are timestamps/dates, never quantities. A narrative
 # number is NOT grounded by coincidentally matching a digit run inside a
 # timestamp ("2026-09-10T18:45:00" must not ground "45%" or "18x").
-_TIMESTAMP_KEY_SUFFIXES = ("_at", "as_of", "_date", "date", "_ts", "ts", "timestamp", "time")
 # ISO-8601 date / datetime (with optional fractional seconds and offset).
 _ISO_TIMESTAMP = re.compile(
     r"^\s*\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?\s*$"
@@ -55,8 +54,31 @@ def extract_numeric_tokens(text: str) -> set[str]:
     return out
 
 
+def _date_tokens(node: object) -> set[str]:
+    """Year / month / day tokens of a timestamp value (never its time of day)."""
+    d: date | None
+    if isinstance(node, datetime):
+        d = node.date()
+    elif isinstance(node, date):
+        d = node
+    else:
+        try:
+            d = date.fromisoformat(str(node).strip()[:10])
+        except ValueError:
+            return set()
+    return {str(d.year), f"{d.month:02d}", str(d.month), f"{d.day:02d}", str(d.day)}
+
+
+_TIMESTAMP_KEYS = frozenset({"ts", "as_of", "date", "time", "timestamp", "datetime"})
+_TIMESTAMP_KEY_ENDINGS = ("_at", "_ts", "_date", "_time", "_timestamp", "_datetime")
+
+
 def _is_timestamp_key(key: object) -> bool:
-    return isinstance(key, str) and key.lower().endswith(_TIMESTAMP_KEY_SUFFIXES)
+    """Whole-token match only: "limits" or "items" are NOT timestamp keys."""
+    if not isinstance(key, str):
+        return False
+    k = key.lower()
+    return k in _TIMESTAMP_KEYS or k.endswith(_TIMESTAMP_KEY_ENDINGS)
 
 
 def _is_timestamp_value(node: object) -> bool:
@@ -76,10 +98,16 @@ def _grounded_numbers(facts: object) -> set[str]:
 
     def walk(node: object) -> None:
         if _is_timestamp_value(node):
+            # A narrative may restate the DATE ("September 11, 2026"); the time of
+            # day (hours/minutes/seconds) is never grounded — "18:45" must not
+            # legitimise "45%".
+            grounded.update(_date_tokens(node))
             return
         if isinstance(node, dict):
             for k, v in node.items():
                 if _is_timestamp_key(k):
+                    # the date part of a timestamp may still be restated
+                    grounded.update(_date_tokens(v))
                     continue
                 # window lengths live in key names ("market_ret_20d", "pct_above_50sma")
                 if isinstance(k, str):
@@ -97,6 +125,11 @@ def _grounded_numbers(facts: object) -> set[str]:
                 # a deterministic summary legitimately rounds; accept 1–6 decimals
                 for nd in range(1, 7):
                     grounded.add(_normalise(f"{node:.{nd}f}"))
+                # a fraction in [0, 1] may be restated as a percentage (0.6 -> 60%)
+                if 0 < abs(node) <= 1:
+                    pct = node * 100
+                    for nd in range(3):
+                        grounded.add(_normalise(f"{pct:.{nd}f}"))
             else:
                 grounded.add(_normalise(f"{node:.2f}"))
         elif isinstance(node, str):
