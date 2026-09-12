@@ -69,6 +69,7 @@ def test_off_schedules_no_intraday_job(db_url: str) -> None:
     assert names == [
         "daily_eod_update",
         "universe_update",
+        "grid_daily",
         "catch_up",
         "agents_daily",
         "paper_mtm",
