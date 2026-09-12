@@ -233,8 +233,11 @@ def test_the_listing_call_is_point_in_time_and_per_expiry(session: Session) -> N
     run = backfill_option_cycles(session, adapter, ["SPY"], caps=_caps())
     assert urls
     for u in urls:
-        assert "expired=true" in u  # otherwise an expired series returns nothing at all
+        # Measured 2026-09-12 (D1 Appendix P, P6): ``expired=true`` is judged relative
+        # to ``as_of``, so sending both returns ZERO rows for every cycle. A point-in-time
+        # listing carries ``as_of`` alone; ``expired=true`` belongs to end-of-life listings.
         assert "as_of=" in u  # otherwise the ladder is an END-OF-LIFE ladder
+        assert "expired=" not in u
         gte = re.search(r"expiration_date\.gte=([\d-]+)", u).group(1)  # type: ignore[union-attr]
         lte = re.search(r"expiration_date\.lte=([\d-]+)", u).group(1)  # type: ignore[union-attr]
         assert gte == lte  # one expiry per call: the ladder is per-cycle

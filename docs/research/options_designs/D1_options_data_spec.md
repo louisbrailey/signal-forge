@@ -1654,3 +1654,22 @@ full). The D1 window 2023-09-04 → 2026-09-04 (1,096 days) sits inside the enti
 and up to ~10 extra monthly cycles (2022-11 → 2023-08) are available if D4's gate-2/gate-6
 arithmetic needs them. Rate limit for options traffic remains unmeasured (OQ-2 second half);
 the §7 request count (~29,370) and hours (~99 at 12.1 s pacing) stand until it is.
+
+### P6 — `expired` is judged relative to `as_of` (2026-09-12, FACT; Stage A pass 1 post-mortem)
+
+Stage A pass 1 (run #17, bulk route) excluded all 102 units as `no_contracts_returned`.
+Probe on SPY, counts only:
+
+| Request | Contracts |
+|---|---|
+| expiration 2026-08-21, `expired=true` | 570 |
+| expiration 2026-08-21, `expired=true&as_of=2026-07-20` | **0** |
+| expiration 2026-08-21, `as_of=2026-07-20` (no `expired`) | 490 |
+| expiration 2024-06-21, `expired=true` | 464 |
+| expiration 2026-10-16, default (live) | 442 |
+
+`as_of` pins the listing to the contracts live on that date, and `expired` is then
+evaluated as of that date, so `expired=true&as_of=<entry>` asks for contracts already
+expired at entry. The cycle loop now sends `as_of` alone for the point-in-time ladder and
+`expired=true` only for an end-of-life listing (`listing_as_of_enabled=false`). OQ-10 is
+answered: the vendor honours `as_of` on this entitlement.

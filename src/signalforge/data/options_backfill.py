@@ -901,7 +901,16 @@ def _select_cycle(
             expiration_gte=expiry,
             expiration_lte=expiry,
             limit=1000,  # the parameter DEFAULTS to 250; a deep chain needs 4x the pages at that
-            expired=caps.listing_include_expired or None,
+            # Vendor semantics measured 2026-09-12 (D1 Appendix P, probe P6): ``as_of``
+            # pins the listing to the contracts LIVE on that date, so ``expired`` is
+            # judged relative to ``as_of`` — ``expired=true&as_of=<entry>`` asks for
+            # contracts already expired at entry and returns ZERO rows for every
+            # cycle (Stage A pass 1 excluded all 102 units this way). ``as_of`` alone
+            # returned the 490-contract point-in-time ladder of an expired series.
+            # ``expired=true`` is therefore sent only for an end-of-life listing.
+            expired=(
+                (caps.listing_include_expired or None) if not caps.listing_as_of_enabled else None
+            ),
             as_of=entry if caps.listing_as_of_enabled else None,
         )
     except AdapterError:
