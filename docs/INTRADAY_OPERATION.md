@@ -218,6 +218,16 @@ exchange calendar (a no-op outside RTH, on holidays, and after an early close).
 The job **scans only** — it never ingests, so it can only read bars the operator
 has already backfilled, which on a delayed feed are at least one bar old.
 
+**Expect zero candidates until a recurring intraday poll exists.** `run_scan`
+applies the S8 freshness gate, and a backfill registers no `BAR_INTRADAY`
+`DataFeedStatus` row (§3), so the gate reports *"no successful fetch on record"*,
+every symbol is excluded as `stale_or_unavailable_feed`, and `live_alerts_enabled`
+is false. That is the correct refusal — a 15-minute freshness budget
+(`DataQualityConfig.freshness_budget_minutes[INTRADAY]`) cannot be met by a
+backfilled history — and it is why operating mode is necessary but not
+sufficient. Turning the flag on makes the path *run*; it does not make it
+*produce*.
+
 Turn it off by setting the flag back to false and restarting the worker (the job
 list is read at scheduler build time).
 
@@ -249,8 +259,11 @@ through gates 1–5 and 9 (B1), gate 6's date normalisation (B2), the gate-5 gri
 - **§12.7 post-ingest diagnostics** — λ·w, entry rate, session-block `deff`,
   wall clock, bear-session trade count. Not implemented; the design requires
   them before any gate is scored.
-- **Live intraday ingest.** There is no recurring intraday poll. Operating mode
-  scans what the backfill stored; it does not keep it current.
+- **Live intraday ingest.** There is no recurring intraday poll, so with
+  operating mode on the S8 freshness gate excludes every symbol and the scan
+  produces no candidates (§5). Operating mode makes the path run; a poll would
+  be needed to make it produce — and that poll must then keep the
+  `BAR_INTRADAY` feed row fresh, or it blocks the EOD alerts (§3).
 - **Real-time execution.** Unentitled, and the NBBO quotes needed to calibrate
   an opening-auction spread return `403 not_authorized`, so the 5.0 bps spread
   assumption can be neither validated nor calibrated for the one time of day
