@@ -454,6 +454,8 @@ horizons are chosen — `(unverified, Phase 3 work)`.
 
 ### Data providers & latency categories
 
+**Probed 2026-09-13 (see `docs/CAPABILITY_MATRIX.md`): forex daily and minute aggregates are entitled on the current Massive key from roughly 2025-01 onward; 2024 and earlier return HTTP 403.** Everything below this line predates that probe.
+
 **Unknown and unverified.** The lead's brief states explicitly "no forex
 entitlement checked." `data/entitlements.py::verify_entitlements` has no
 forex probe today. Before any further Module D design work: run the
