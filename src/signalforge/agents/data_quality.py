@@ -149,7 +149,14 @@ class DataQualityAgent(ResearchAgent):
                     "bars_written": row.bars_written,
                     "symbols_ok": len(row.symbols_ok or []),
                     "symbols_failed": len(row.symbols_failed or {}),
-                    "gap_symbols": len(row.gaps_json or {}),
+                    # gaps_json is symbol -> [ranges], but runs also stash
+                    # run-level provenance under dunder keys that are not
+                    # symbols ("__run__" on the options backfill,
+                    # "__approved_scope__" on the daily incremental top-up).
+                    # Counting those as gap symbols would overstate the gaps.
+                    "gap_symbols": len(
+                        [k for k in (row.gaps_json or {}) if not k.startswith("__")]
+                    ),
                     "source": "signalforge.db.models.IngestionRun",
                     "as_of": row.started_at.isoformat(),
                 }

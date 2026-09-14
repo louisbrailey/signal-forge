@@ -94,6 +94,57 @@ live yet and the options paper account holds no structure, so there is nothing t
   `docs/research/options_designs/IO2_RUNBOOK.md` (nightly `--max-minutes 590`, never in the
   17:30–19:00 ET window, coverage-summary-only rule).
 
+## 2026-09-14 operations
+
+- **The daily ingest now covers every approved universe, not just the watchlist (W6a).**
+  `scheduler.job_ingest` fetched `settings.research.universe` only (~25 symbols), so
+  strategy v3 (`trend_continuation.medium_swing`), PAPER_APPROVED on DataSnapshot 11
+  (`research_150_massive_10y_presealed_sel`, 150 symbols, source `massive`), had its
+  approved-scope scan blocked **every session** —
+  `approved_scope_scan.blocked … only 24/150 approved symbols have a bar for 2026-09-14`
+  (observed 23:04Z after a manual `run-job daily_eod_update`). Friday 2026-09-11 only
+  worked because the 10-year full-history backfill (ingestion run 15) happened to include
+  that session. `job_ingest` now fetches the union of the configured universe and every
+  PAPER_APPROVED version's approved-scope universe **on the ingest adapter's source**,
+  de-duplicated, configured symbols first (they commit first, so a truncated run still
+  tops up the watchlist). The extra symbols come from
+  `approved_scope_scan.ingest_scope`, which reads `approved_universes()` — the function
+  that drives the scan — so ingest and scan cannot drift apart. An approved universe on
+  another source is skipped and recorded, never fetched with the wrong adapter: bars are
+  tagged with the writer's `provider_name` and the readiness gate counts bars
+  `WHERE source = the approved source`.
+- **`IngestionRun.status` semantics are unchanged; who a non-ok run blocks is not.**
+  `ok` still means every requested symbol succeeded. But a single global "last ingestion
+  must be `ok`" gate is too coarse once one run covers config + 150 approved symbols, so
+  `data_readiness` now decides per universe: `partial` blocks **only** the universes
+  containing a named failed symbol (naming them); `partial` with an empty
+  `symbols_failed` is unattributable and fails closed; `failed`/`running`/`killed`/
+  `stopped` still block everything. A delisted watchlist ticker can no longer silence an
+  intact 150-symbol approved scope, and vice versa.
+- **Catch-up had to follow, or it would loop.** `catch_up_pending` required an `ok` run
+  since the 17:30 cutoff. With ~151 symbols the run is `partial` whenever any one of them
+  fails, so the 30-minute `catch_up` job would have re-run a ~30-minute EOD chain all
+  evening over one permanently-bad ticker. A `partial` that finished after the cutoff and
+  got the **whole configured universe** now counts as the session's update having run;
+  a broad provider outage fails configured symbols too and still triggers a catch-up.
+  This is inert for the pre-W6a world (a partial then always had a failed configured
+  symbol).
+- **Budget, and the overlap that is accepted rather than avoided.** ~151 symbols × 12.1 s
+  pacing ≈ 30 min (Massive makes one request per symbol — `fetch_corporate_actions` and
+  `fetch_earnings` return empty on this feed). The 17:30 ET chain finishes its ingest
+  ~18:00–18:05 ET, leaving the rescan and approved-scope scan (local compute) to run into
+  the `universe_update` slot at 18:15 ET on a slow evening. `universe_update` is a
+  different APScheduler job and is **not** covered by `_EOD_UPDATE_LOCK`, so they can
+  overlap. That is safe by construction, not luck: the ingest holds no write transaction
+  across a provider call and commits per symbol (`docs/SQLITE_CONCURRENCY.md` rule 4), so
+  the worst case is bounded lock contention with the usual retry. **Cron times were not
+  moved.** If the chain starts running long, shorten the ingest window (`end - 400 days`)
+  before touching the schedule.
+- Provenance lives in `ingestion_run.gaps_json["__approved_scope__"]` (per-snapshot
+  `added` symbols, universes excluded for source, skipped versions) — a dunder key, the
+  convention the options backfill already set with `"__run__"` — and in `notes`, which
+  stays byte-identical when no approved universe contributed.
+
 ## Execution-layer facts worth knowing
 
 - `JobSpec`/`JobFn` moved to the leaf module `signalforge.jobspec` so the execution cycle

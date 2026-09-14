@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import threading
 from datetime import UTC, date, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -22,6 +23,9 @@ from signalforge.domain import Horizon
 from signalforge.jobspec import JobFn, JobSpec
 from signalforge.killswitch import KillSwitchEngaged, ensure_not_engaged
 from signalforge.observability import get_logger
+
+if TYPE_CHECKING:  # typing only — the runtime import stays inside the job bodies
+    from signalforge.db.models import IngestionRun
 
 _log = get_logger("scheduler")
 
@@ -171,11 +175,28 @@ def guarded(name: str, fn: JobFn) -> JobFn:
 # Job bodies
 # --------------------------------------------------------------------------- #
 def job_ingest() -> None:
-    """The routine daily incremental top-up. Also records a lightweight
-    ``IngestionRun`` summary (status ok/partial/failed) so the alert policy's
-    ``DATA_ISSUE`` check can see a real failure on the *scheduled* path — before
-    this, only the CLI's separate deep-history command wrote that row, so a
-    scheduled ingest with per-symbol errors was invisible to plan_alerts."""
+    """The routine daily incremental top-up, over the UNION of the configured
+    universe and every PAPER_APPROVED strategy version's approved-scope
+    universe on this adapter's source (``research.approved_scope_scan.
+    ingest_scope``).
+
+    Why the union (W6a, 2026-09-14): the approved-scope scan refuses to run on
+    a universe that has no completed bar for the latest session, but this job
+    used to fetch only ``settings.research.universe`` — so the version approved
+    on the 150-symbol snapshot 11 was blocked *every* session
+    (``only 24/150 approved symbols have a bar for …``). Its data was simply
+    never fetched. Friday 2026-09-11 only worked because a 10-year full-history
+    backfill happened to include that session.
+
+    Also records a lightweight ``IngestionRun`` summary (status
+    ok/partial/failed) so the alert policy's ``DATA_ISSUE`` check can see a real
+    failure on the *scheduled* path — before this, only the CLI's separate
+    deep-history command wrote that row, so a scheduled ingest with per-symbol
+    errors was invisible to plan_alerts. ``status`` keeps its meaning exactly:
+    ``ok`` only when every requested symbol succeeded. Which universes a
+    ``partial`` actually blocks is decided per universe from
+    ``symbols_failed``, by ``approved_scope_scan.data_readiness`` — not here.
+    """
     from datetime import date
 
     from signalforge.config import get_settings
@@ -185,14 +206,37 @@ def job_ingest() -> None:
     from signalforge.db.session import session_scope
     from signalforge.db.types import utcnow
     from signalforge.domain import FeedType
+    from signalforge.research.approved_scope_scan import ingest_scope
 
     settings = get_settings()
-    symbols = list(settings.research.universe)
     end = date.today()
     start = end - timedelta(days=400)
+    adapter = get_primary_adapter(settings)
+
+    # Resolve the symbol set as a PLAIN READER. Doing it inside the write scope
+    # would open BEGIN IMMEDIATE before the first symbol's paced network fetch
+    # and hold the SQLite write lock across it — the exact shape of the
+    # 2026-09-09 lock-starvation bug (docs/SQLITE_CONCURRENCY.md).
+    with session_scope() as session:
+        scope = ingest_scope(
+            session, list(settings.research.universe), source=adapter.provider_name
+        )
+    symbols = list(scope.symbols)
+    _log.info(
+        "ingest.scope",
+        provider=adapter.provider_name,
+        symbols=len(symbols),
+        configured=len(scope.configured),
+        added=len(scope.added),
+        snapshots=[c.dataset_snapshot_id for c in scope.contributions],
+        excluded_other_source=[u["dataset_snapshot_id"] for u in scope.other_source],
+    )
+
     with session_scope(write=True) as session:
-        adapter = get_primary_adapter(settings)
         started = utcnow()
+        # ingest_universe fetches each symbol BEFORE it writes and commits per
+        # symbol, so no write transaction ever spans a paced provider call and a
+        # run cut short is durable up to its last committed symbol.
         report = ingest_universe(session, adapter, symbols, start, end)
         ok_symbols = [r.symbol for r in report.results if not r.error]
         failed = {r.symbol: r.error for r in report.results if r.error}
@@ -211,7 +255,8 @@ def job_ingest() -> None:
                 status=status,
                 started_at=started,
                 finished_at=utcnow(),
-                notes="scheduled daily incremental top-up (job_ingest)",
+                gaps_json=scope.provenance(),
+                notes=scope.note(),
             )
         )
 
@@ -795,9 +840,43 @@ def _session_cutoff_utc(session_date: date) -> datetime:
     ).astimezone(UTC)
 
 
+def _covers_configured_universe(run: IngestionRun) -> bool:
+    """A ``partial`` daily-bar run that nonetheless got every CONFIGURED symbol.
+
+    Since W6a one ingest covers the configured universe plus ~150 approved-scope
+    symbols, and it is marked ``partial`` if ANY of them failed. Left alone,
+    ``catch_up_pending`` would then see "no OK ingestion since the close" every
+    30 minutes and re-run a ~30-minute EOD chain all evening over one
+    permanently-bad ticker — hammering the provider and producing the identical
+    ``partial`` each time.
+
+    So a partial run counts as "the session was covered" only when the
+    configured universe — the core every non-approved-scope scan reads — came
+    back intact. A broad provider outage fails configured symbols too, so it
+    still triggers a catch-up; a single bad approved-scope symbol does not, and
+    is handled where it belongs: ``data_readiness`` blocks that one universe and
+    names the symbol, and the DATA_ISSUE alert path already fires on ``partial``.
+
+    Note this is inert for the pre-W6a world: when the ingest requested only the
+    configured universe, a partial run always had a failed configured symbol.
+    """
+    from signalforge.config import get_settings
+
+    failed = {str(s).upper() for s in (run.symbols_failed or {})}
+    if not failed:
+        return False  # unattributable partial — fail closed, treat as not covered
+    requested = {str(s).upper() for s in (run.symbols_requested or ())}
+    configured = {s.upper() for s in get_settings().research.universe}
+    if not configured or not configured <= requested:
+        return False  # this run never even asked for the configured universe
+    return not (configured & failed)
+
+
 def catch_up_pending(now: datetime | None = None) -> tuple[bool, str]:
     """Is the daily EOD update owed for the last completed session? Pending
-    when no OK daily-bar ingestion finished after that session's cutoff.
+    when no daily-bar ingestion that covered the configured universe finished
+    after that session's cutoff — ``ok``, or ``partial`` with every configured
+    symbol intact (see :func:`_covers_configured_universe`).
     Backs off for ``CATCH_UP_RETRY_BACKOFF`` after a failed attempt so a
     broken provider is retried, not hammered."""
     from sqlalchemy import select
@@ -816,6 +895,23 @@ def catch_up_pending(now: datetime | None = None) -> tuple[bool, str]:
             .order_by(IngestionRun.finished_at.desc())
             .limit(1)
         )
+        # A partial run since the cutoff that still got the whole configured
+        # universe counts as the session's update having run.
+        if last_ok is None or last_ok < cutoff:
+            for run in session.scalars(
+                select(IngestionRun)
+                .where(
+                    IngestionRun.feed_type == FeedType.BAR_DAILY,
+                    IngestionRun.status == "partial",
+                    IngestionRun.finished_at.is_not(None),
+                    IngestionRun.finished_at >= cutoff,
+                )
+                .order_by(IngestionRun.finished_at.desc())
+                .limit(5)
+            ):
+                if _covers_configured_universe(run):
+                    last_ok = run.finished_at
+                    break
         last_fail = session.scalar(
             select(JobRun)
             .where(

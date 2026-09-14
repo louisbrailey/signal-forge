@@ -21,10 +21,18 @@ why (a stale or incomplete universe blocks only ITS OWN scans, never
 another universe's):
 
 1. no stale data feed (``data.feeds.feed_status_report``);
-2. the last ingestion run finished OK, recently;
+2. the last daily-bar ingestion run finished recently and did not fail for
+   any of THIS universe's symbols (``_ingest_run_blocks``);
 3. the approved universe actually has a completed daily bar for the latest
    session (>= 90% of symbols on the newest bar date, and that date is not
    older than five calendar days).
+
+The ingest that feeds gate 3 is itself derived from here: ``ingest_scope``
+returns the union of the configured universe and every approved universe on
+the ingest source, which ``scheduler.job_ingest`` fetches. Before that the
+scheduled ingest covered only ``settings.research.universe``, so a strategy
+approved on a larger snapshot was blocked by gate 3 every single session — the
+data it needed was never fetched (observed 2026-09-14 on snapshot 11).
 
 Read-only research: creates ScanRun/Candidate rows only. Never an alert,
 never a paper position, never options, never a brokerage call. INTRADAY is
@@ -317,6 +325,212 @@ def approved_universes(
     return universes, skipped
 
 
+# --------------------------------------------------------------------------- #
+# What the DAILY INGEST must cover (W6a)
+# --------------------------------------------------------------------------- #
+# Reserved, non-symbol key inside ``IngestionRun.gaps_json``. The column is
+# otherwise ``symbol -> [ranges]``; the options backfill already established the
+# dunder-key convention for run-level provenance ("__run__"), and a real ticker
+# can never collide with it.
+INGEST_PROVENANCE_KEY = "__approved_scope__"
+INGEST_NOTE = "scheduled daily incremental top-up (job_ingest)"
+
+
+@dataclass(frozen=True, slots=True)
+class IngestContribution:
+    """One approved universe's contribution to the daily ingest symbol set."""
+
+    dataset_snapshot_id: int
+    dataset_key: str
+    source: str
+    symbols: tuple[str, ...]  # every symbol of that approved snapshot
+    added: tuple[str, ...]  # the ones the configured universe does not already cover
+    horizons: tuple[str, ...]
+    strategy_version_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class IngestScope:
+    """The exact symbol set one scheduled daily ingest must fetch, plus the
+    provenance of every symbol that is not in the configured universe."""
+
+    source: str
+    configured: tuple[str, ...]
+    symbols: tuple[str, ...]
+    contributions: tuple[IngestContribution, ...]
+    # Approved universes deliberately NOT ingested here, because their approval
+    # was granted on a different source than the one this adapter writes.
+    other_source: tuple[dict[str, Any], ...]
+    skipped_versions: tuple[dict[str, Any], ...]
+
+    @property
+    def added(self) -> tuple[str, ...]:
+        """Symbols this scope adds on top of the configured universe."""
+        configured = set(self.configured)
+        return tuple(s for s in self.symbols if s not in configured)
+
+    def provenance(self) -> dict[str, Any]:
+        """The ``gaps_json`` payload: which symbols came from which approved
+        snapshot, and which approved universes were deliberately left out."""
+        return {
+            INGEST_PROVENANCE_KEY: {
+                "configured": list(self.configured),
+                "source": self.source,
+                "snapshots": [
+                    {
+                        "dataset_snapshot_id": c.dataset_snapshot_id,
+                        "dataset_key": c.dataset_key,
+                        "source": c.source,
+                        "n_symbols": len(c.symbols),
+                        "added": list(c.added),
+                        "horizons": list(c.horizons),
+                        "strategy_version_ids": list(c.strategy_version_ids),
+                    }
+                    for c in self.contributions
+                ],
+                "excluded_other_source": [dict(u) for u in self.other_source],
+                "skipped_versions": [dict(s) for s in self.skipped_versions],
+            }
+        }
+
+    def note(self) -> str:
+        """``IngestionRun.notes``. Byte-identical to the pre-W6a note when no
+        approved universe contributes, so the routine row reads exactly as it
+        always has; the suffix appears only when there is something to say."""
+        if not self.contributions:
+            return INGEST_NOTE
+        parts = "; ".join(
+            f"snapshot {c.dataset_snapshot_id} ({c.dataset_key}/{c.source}) "
+            f"+{len(c.added)} of {len(c.symbols)}"
+            for c in self.contributions
+        )
+        return f"{INGEST_NOTE} + approved scope: {parts}"
+
+
+def ingest_scope(
+    session: Session,
+    configured: list[str],
+    *,
+    source: str,
+    cfg: ResearchConfig | None = None,
+) -> IngestScope:
+    """The union of the configured universe and every PAPER_APPROVED strategy
+    version's approved-scope universe, for ONE source.
+
+    Why this exists: ``data_readiness`` demands a completed daily bar for the
+    latest session across the approved snapshot's *exact* symbol set, but the
+    scheduled ingest used to fetch only ``settings.research.universe``. A
+    version approved on a 150-symbol snapshot was therefore blocked every
+    session by its own readiness gate — the data it needed was never fetched.
+    Ingesting the union closes that loop, and deriving the extra symbols from
+    ``approved_universes`` (the very function that drives the scan) makes the
+    two definitionally impossible to drift apart.
+
+    **Source filter.** Only approved universes whose approval source equals
+    ``source`` are added. Bars are stored tagged with the writing adapter's
+    ``provider_name`` and ``data_readiness`` counts bars ``WHERE source = the
+    approved source``, so fetching a foreign-source universe with this adapter
+    would write rows that can never satisfy the gate they were fetched for. The
+    excluded universes are recorded, not silently dropped.
+
+    **Order** is deterministic and deliberate: the configured universe first, in
+    its own order, then each approved snapshot's additional symbols sorted,
+    snapshots in id order. The ingest commits per symbol, so a run cut short by
+    a provider outage, a kill switch or a laptop lid has still topped up the
+    configured watchlist — the set every non-approved-scope scan reads.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in configured:
+        sym = str(raw).upper()
+        if sym not in seen:
+            seen.add(sym)
+            ordered.append(sym)
+    configured_norm = tuple(ordered)
+    configured_set = set(seen)
+
+    universes, skipped = approved_universes(session, cfg)
+    contributions: list[IngestContribution] = []
+    other_source: list[dict[str, Any]] = []
+    for u in universes:
+        if u.source != source:
+            other_source.append(
+                {
+                    "dataset_snapshot_id": u.dataset_snapshot_id,
+                    "dataset_key": u.dataset_key,
+                    "source": u.source,
+                    "n_symbols": len(u.symbols),
+                    "reason": f"approved source {u.source!r} is not the ingest source {source!r}",
+                }
+            )
+            continue
+        snap_symbols = tuple(sorted({str(s).upper() for s in u.symbols}))
+        added = tuple(s for s in snap_symbols if s not in configured_set)
+        for sym in snap_symbols:
+            if sym not in seen:
+                seen.add(sym)
+                ordered.append(sym)
+        contributions.append(
+            IngestContribution(
+                dataset_snapshot_id=u.dataset_snapshot_id,
+                dataset_key=u.dataset_key,
+                source=u.source,
+                symbols=snap_symbols,
+                added=added,
+                horizons=tuple(u.horizons),
+                strategy_version_ids=tuple(u.strategy_version_ids),
+            )
+        )
+
+    return IngestScope(
+        source=source,
+        configured=configured_norm,
+        symbols=tuple(ordered),
+        contributions=tuple(contributions),
+        other_source=tuple(other_source),
+        skipped_versions=tuple(skipped),
+    )
+
+
+def _ingest_run_blocks(run: IngestionRun, symbols: list[str]) -> str | None:
+    """Does the last daily-bar ingestion run block a scan of THESE symbols?
+
+    The gate used to be global — ``status != "ok"`` blocked every approved
+    universe. Once one ingest covers the union of the configured universe and
+    every approved snapshot (W6a), that is far too coarse: a single delisted
+    watchlist ticker would turn the run ``partial`` and silence a 150-symbol
+    approved scope whose own data arrived intact.
+
+    ``partial`` is exactly the state that CAN be attributed — it means some
+    symbols succeeded and ``symbols_failed`` names the ones that did not — so
+    it blocks only the universes that actually contain a failed symbol. Every
+    other non-ok state (``running``, ``failed``, ``killed``, ``stopped``) is
+    unattributable or means nothing succeeded, and still blocks everything.
+
+    A ``partial`` run with an EMPTY ``symbols_failed`` fails closed: the run is
+    telling us something went wrong without saying what, and guessing that it
+    missed this universe would be the one wrong way to be wrong.
+    """
+    status = str(run.status)
+    if status == "ok":
+        return None
+    if status != "partial":
+        return f"last ingestion run is {status!r}, not ok"
+    failed = {str(s).upper(): str(e) for s, e in (run.symbols_failed or {}).items()}
+    if not failed:
+        return (
+            "last ingestion run is 'partial', not ok, and names no failed symbol — "
+            "it cannot be attributed to a universe"
+        )
+    mine = sorted(s for s in {str(x).upper() for x in symbols} if s in failed)
+    if not mine:
+        return None
+    return (
+        f"last ingestion run is 'partial' and failed for {len(mine)}/{len(symbols)} of this "
+        f"universe's symbols ({', '.join(mine[:8])}{'…' if len(mine) > 8 else ''})"
+    )
+
+
 def data_readiness(
     session: Session,
     symbols: list[str],
@@ -356,8 +570,9 @@ def data_readiness(
     )
     if last_ingest is None:
         return "no daily-bar ingestion run recorded yet"
-    if last_ingest.status != "ok":
-        return f"last ingestion run is {last_ingest.status!r}, not ok"
+    reason = _ingest_run_blocks(last_ingest, symbols)
+    if reason is not None:
+        return reason
     finished = last_ingest.finished_at or last_ingest.started_at
     if now - finished > MAX_INGEST_AGE:
         return f"last ok ingestion finished {finished.isoformat()} — older than {MAX_INGEST_AGE}"

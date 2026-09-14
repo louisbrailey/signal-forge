@@ -167,15 +167,92 @@ a terminal — not a substitute for the `pmset` settings above plus `launchd`
 (below). It stops preventing sleep the moment that terminal session ends and
 does not survive logout or reboot.
 
+### What the daily ingest actually fetches (changed 2026-09-14, W6a)
+
+`job_ingest` fetches the **union of the configured universe and every
+PAPER_APPROVED strategy version's approved-scope universe**, de-duplicated, on
+the primary adapter's source only. The extra symbols come from
+`research.approved_scope_scan.ingest_scope`, which reads them from
+`approved_universes()` — the same function that drives the scan, so the two
+cannot drift apart.
+
+Why: the approved-scope scan refuses to run on a universe that has no completed
+bar for the latest session, but the ingest used to fetch only
+`settings.research.universe` (~25 symbols). Strategy v3
+(`trend_continuation.medium_swing`), PAPER_APPROVED on DataSnapshot 11
+(`research_150_massive_10y_presealed_sel`, 150 symbols, source `massive`), was
+therefore blocked **every session** with
+`approved_scope_scan.blocked … only 24/150 approved symbols have a bar for …`.
+Friday 2026-09-11 only worked because a 10-year full-history backfill happened
+to include that session.
+
+Consequences to know:
+
+- **Order.** The configured universe is fetched first, in its own order, then
+  each approved snapshot's extra symbols sorted, snapshots in id order. The
+  ingest commits per symbol, so a run cut short (kill switch, provider outage,
+  lid closed) has still topped up the watchlist every other scan reads.
+- **Source filter.** An approved universe whose approval source is not the
+  ingest adapter's `provider_name` is **skipped** and recorded in the run's
+  provenance. Bars are stored tagged with the writing adapter's source and the
+  readiness gate counts bars `WHERE source = the approved source`, so fetching
+  it here would write rows that can never satisfy the gate they were fetched
+  for.
+- **Runtime.** ~151 symbols × 12.1 s provider pacing ≈ **30 min**, so the 17:30
+  ET chain now finishes its ingest around **18:00–18:05 ET**, then rescans and
+  runs the approved-scope scan (local compute, a few minutes). `universe_update`
+  at 18:15 ET is a *different* APScheduler job and is **not** covered by
+  `_EOD_UPDATE_LOCK`, so on a slow evening the two can overlap. That is safe by
+  construction, not by luck: the ingest holds no write transaction across a
+  provider call and commits per symbol (`docs/SQLITE_CONCURRENCY.md` rule 4), so
+  the worst case is bounded lock contention with the usual retry, not a stuck
+  writer. Cron times were deliberately **not** moved. If the chain does start
+  running long, cut the ingest window (`start = end - 400 days`) before touching
+  the schedule.
+- **Provenance.** The `ingestion_run` row records which symbols came from which
+  approved snapshot under the reserved `gaps_json` key `__approved_scope__`
+  (configured list, per-snapshot `added` symbols, snapshots excluded for source,
+  skipped versions), and `notes` names each contributing snapshot. With no
+  approved contribution the note stays byte-identical to what it always was.
+- **`status` is unchanged**: `ok` only when *every* requested symbol succeeded.
+  What changed is who a non-ok run blocks — see below.
+
+### Which universes a failed ingest blocks
+
+`status` alone is now too coarse to gate a scan, because one run covers
+config + every approved snapshot. `approved_scope_scan.data_readiness` decides
+per approved universe:
+
+| last daily-bar run | effect |
+|---|---|
+| `ok` | nothing blocked |
+| `partial`, failed symbols named | blocks **only** the universes containing a failed symbol; the reason names them |
+| `partial`, `symbols_failed` empty | blocks everything (unattributable — fails closed) |
+| `failed` / `running` / `killed` / `stopped` | blocks everything, as before |
+
+So a delisted watchlist ticker no longer silences a 150-symbol approved scope
+whose own data arrived intact, and a bad approved-scope symbol no longer
+silences the configured universe.
+
+`catch_up_pending` follows the same logic: a `partial` run that finished after
+the session's 17:30 cutoff and got the **whole configured universe** counts as
+that session's update having run. Without this the 30-minute `catch_up` job
+would see "no OK ingestion since the close" all evening and re-run a ~30-minute
+EOD chain over and over on one permanently-bad ticker. A broad provider outage
+fails configured symbols too, so it still triggers a catch-up.
+
 ### What the worker does for you (heartbeat + catch-up)
 
 `signalforge run-scheduler` (also `make worker`, foreground) writes a
 `worker_heartbeat` row every 30 s with the scheduler's real next-run times,
-and runs a `catch_up` job every 30 min: if no OK daily-bar ingestion has
-finished since the last completed session's 17:30 ET close, it runs the full
-EOD update (ingest → rescan → approved-scope scan) right then — so a Mac that
+and runs a `catch_up` job every 30 min: if no daily-bar ingestion covering the
+configured universe has finished since the last completed session's 17:30 ET
+close, it runs the full EOD update (ingest → rescan → approved-scope scan)
+right then — so a Mac that
 slept through 17:30 catches up within 30 min of waking, and a failed attempt
-backs off for 2 h before retrying. `/ops` shows: worker running / stale /
+backs off for 2 h before retrying. Both catch-up paths (the startup
+`run_catch_up` and the 30-minute `catch_up` job) go through the same
+`job_ingest`, so both fetch the same union. `/ops` shows: worker running / stale /
 never, next scheduled EOD run (from the worker itself), daily-bar freshness
 vs the expected session, and whether a catch-up is pending. Reviewed plist
 files live in `deploy/launchd/` (`make launchd-check` validates them; nothing
@@ -196,8 +273,10 @@ first (a `--reload` child can outlive Ctrl-C — `pkill -f "uvicorn signalforge"
    make worker
    ```
    Expect `scheduler running — Ctrl-C to stop`. It first runs the catch-up (ingest →
-   rescan → approved-scope scan) if the EOD update is owed; that takes ~5 min at the
-   provider's 5 req/min pacing. Starting a **second** `make worker` must print
+   rescan → approved-scope scan) if the EOD update is owed; that takes ~30 min at the
+   provider's 5 req/min pacing (~151 symbols since W6a — see "What the daily ingest
+   actually fetches"; it was ~5 min when only the 25-symbol watchlist was
+   fetched). Starting a **second** `make worker` must print
    `refusing to start: another scheduler worker already holds …` and exit 1.
 3. **Verify the heartbeat** — open `http://127.0.0.1:8787/ops`: the worker row reads
    *running · pid … · beat Ns ago* within 30 s, and "Next scheduled EOD update" shows a
@@ -688,9 +767,14 @@ briefing") or:
 uv run signalforge scan-approved-scope
 ```
 
-which prints the exact block reason (stale feed, last ingestion not `ok`,
-newest bar older than 5 days, or under 90% of the approved universe covered
-on the newest session) and exits non-zero. `--force` bypasses the gate for a
+which prints the exact block reason (stale feed, the last ingestion failing for
+one of *this* universe's symbols, newest bar older than 5 days, or under 90% of
+the approved universe covered on the newest session) and exits non-zero. If the
+reason is `incomplete data: only N/M approved symbols have a bar …`, check the
+last `ingestion_run`'s `symbols_requested` — since W6a the scheduled ingest
+should already contain that snapshot's symbols, and if it does not, the approval
+source probably does not match the primary adapter (see "What the daily ingest
+actually fetches"). `--force` bypasses the gate for a
 supervised, manual run only — the scheduled path never bypasses it:
 
 ```bash

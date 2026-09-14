@@ -36,10 +36,13 @@ from signalforge.research import approved_scope_scan as mod
 from signalforge.research.approved_scope_scan import (
     AUDIT_BLOCKED,
     AUDIT_COMPLETED,
+    INGEST_NOTE,
+    INGEST_PROVENANCE_KEY,
     approved_horizons,
     approved_scan_groups,
     approved_universes,
     data_readiness,
+    ingest_scope,
     run_approved_scope_scan,
     universe_readiness,
 )
@@ -818,3 +821,212 @@ def test_each_versions_candidates_match_only_its_own_scope(session: Session) -> 
             assert _matches(run, cand.strategy_version_id) is expected
             checked += 1
     assert checked == 4
+
+
+# --------------------------------------------------------------------------
+# W6a: the symbol set the scheduled daily ingest must cover
+# --------------------------------------------------------------------------
+CONFIG_UNIVERSE = ["SPY", "AAA", "QQQ"]
+
+
+def test_ingest_scope_is_config_only_without_an_approved_strategy(session: Session) -> None:
+    scope = ingest_scope(session, CONFIG_UNIVERSE, source=SRC)
+    assert scope.symbols == ("SPY", "AAA", "QQQ")
+    assert scope.contributions == ()
+    assert scope.added == ()
+    # the routine note must stay byte-identical when nothing was added
+    assert scope.note() == INGEST_NOTE
+
+
+def test_ingest_scope_unions_the_approved_snapshot_and_dedupes(session: Session) -> None:
+    """The defect this closes: the scheduled ingest fetched only the configured
+    universe, so an approved 150-symbol snapshot never got the session's bar
+    and its own readiness gate blocked it every day."""
+    snap = _snapshot(session, "approved_150", SYMS + OTHER_SYMS)
+    _approve(session, name="s_union", horizon=Horizon.MEDIUM_SWING, snapshot=snap)
+
+    scope = ingest_scope(session, CONFIG_UNIVERSE, source=SRC)
+    # configured universe first, in its own order; then the snapshot's extras, sorted
+    assert scope.symbols[:3] == ("SPY", "AAA", "QQQ")
+    assert set(scope.symbols) == {"SPY", "QQQ", *SYMS, *OTHER_SYMS}
+    # AAA is in both the config and the snapshot, and appears exactly once
+    assert len(scope.symbols) == len(set(scope.symbols))
+    assert scope.symbols.count("AAA") == 1
+    assert "AAA" not in scope.added  # already configured, so not "added"
+    assert sorted(scope.added) == sorted(set(SYMS + OTHER_SYMS) - {"AAA"})
+    # deterministic: the same inputs give the same order every time
+    assert ingest_scope(session, CONFIG_UNIVERSE, source=SRC).symbols == scope.symbols
+
+
+def test_ingest_scope_excludes_an_approved_universe_from_another_source(session: Session) -> None:
+    """Bars are stored tagged with the writing adapter's provider_name and
+    data_readiness counts bars WHERE source = the approved source, so fetching
+    a foreign-source universe with this adapter would write rows that can never
+    satisfy the gate they were fetched for."""
+    snap = _snapshot(session, "approved_other_source", OTHER_SYMS)
+    _approve(
+        session,
+        name="s_other_source",
+        horizon=Horizon.MEDIUM_SWING,
+        snapshot=snap,
+        source="some_other_provider",
+    )
+
+    scope = ingest_scope(session, CONFIG_UNIVERSE, source=SRC)
+    assert scope.symbols == ("SPY", "AAA", "QQQ")
+    assert scope.contributions == ()
+    assert [u["dataset_snapshot_id"] for u in scope.other_source] == [snap.id]
+    assert "some_other_provider" in scope.other_source[0]["reason"]
+
+
+def test_ingest_scope_ignores_a_snapshot_whose_version_is_not_approved(session: Session) -> None:
+    approved = _snapshot(session, "approved_snap", SYMS)
+    unapproved = _snapshot(session, "unapproved_snap", OTHER_SYMS)
+    _approve(session, name="s_live", horizon=Horizon.MEDIUM_SWING, snapshot=approved)
+
+    # an EXPERIMENTAL strategy with a passing evaluation on its own snapshot
+    strat = Strategy(
+        name="s_experimental", horizon=Horizon.MEDIUM_SWING, status=StrategyStatus.EXPERIMENTAL
+    )
+    session.add(strat)
+    session.flush()
+    ver = StrategyVersion(
+        strategy_id=strat.id,
+        version="0.1.0",
+        git_sha="0" * 40,
+        spec_json={},
+        status=StrategyStatus.EXPERIMENTAL,
+    )
+    session.add(ver)
+    session.flush()
+    session.add(
+        StrategyPromotionEvaluation(
+            strategy_version_id=ver.id,
+            dataset_snapshot_id=unapproved.id,
+            evaluated_at=NOW,
+            config_hash="cfg-hash",
+            spec_json_hash="spec-experimental",
+            universe_json=list(unapproved.symbols_json),
+            window_start=date(2020, 1, 1),
+            window_end=date(2026, 1, 1),
+            data_provenance_json={"sources": [SRC]},
+            passed=True,
+        )
+    )
+    session.flush()
+
+    scope = ingest_scope(session, CONFIG_UNIVERSE, source=SRC)
+    assert set(scope.symbols) == {"SPY", "AAA", "QQQ", *SYMS}
+    for sym in OTHER_SYMS:
+        assert sym not in scope.symbols
+    assert [c.dataset_snapshot_id for c in scope.contributions] == [approved.id]
+
+
+def test_ingest_scope_records_which_symbols_came_from_which_snapshot(session: Session) -> None:
+    snap = _snapshot(session, "approved_prov", SYMS + OTHER_SYMS)
+    ver = _approve(session, name="s_prov", horizon=Horizon.MEDIUM_SWING, snapshot=snap)
+
+    scope = ingest_scope(session, CONFIG_UNIVERSE, source=SRC)
+    payload = scope.provenance()[INGEST_PROVENANCE_KEY]
+    assert payload["configured"] == ["SPY", "AAA", "QQQ"]
+    assert payload["source"] == SRC
+    entry = payload["snapshots"][0]
+    assert entry["dataset_snapshot_id"] == snap.id
+    assert entry["dataset_key"] == "approved_prov"
+    assert entry["source"] == SRC
+    assert entry["n_symbols"] == len(SYMS + OTHER_SYMS)
+    assert entry["strategy_version_ids"] == [ver.id]
+    # AAA came from the configured universe, so it is not an "added" symbol
+    assert sorted(entry["added"]) == sorted(set(SYMS + OTHER_SYMS) - {"AAA"})
+    note = scope.note()
+    assert note.startswith(INGEST_NOTE)
+    assert f"snapshot {snap.id} (approved_prov/{SRC})" in note
+
+
+def test_ingest_scope_unions_two_approved_snapshots_deterministically(session: Session) -> None:
+    b = _snapshot(session, "approved_b", OTHER_SYMS)
+    a = _snapshot(session, "approved_a", SYMS)
+    _approve(session, name="s_b", horizon=Horizon.MEDIUM_SWING, snapshot=b)
+    _approve(session, name="s_a", horizon=Horizon.SHORT_SWING, snapshot=a)
+
+    scope = ingest_scope(session, CONFIG_UNIVERSE, source=SRC)
+    # snapshots contribute in dataset_snapshot_id order, whatever order they
+    # were created or approved in
+    assert [c.dataset_snapshot_id for c in scope.contributions] == sorted([a.id, b.id])
+    assert scope.symbols[:3] == ("SPY", "AAA", "QQQ")
+    assert set(scope.symbols) == {"SPY", "QQQ", *SYMS, *OTHER_SYMS}
+
+
+# --------------------------------------------------------------------------
+# W6a: a 'partial' ingest blocks only the universes it actually failed for
+# --------------------------------------------------------------------------
+def test_partial_ingest_blocks_only_the_universe_holding_the_failed_symbol(
+    session: Session,
+) -> None:
+    """Once ONE ingest covers config + every approved snapshot, a global
+    "status must be ok" gate would let a single delisted watchlist ticker
+    silence a 150-symbol approved scope whose own data arrived intact."""
+    _feed(session, stale=False)
+    _bars(session, {})
+    _bars(session, {}, symbols=OTHER_SYMS)
+    _ingest(session, status="partial")
+    run = session.scalar(select(IngestionRun).order_by(IngestionRun.started_at.desc()))
+    assert run is not None
+    run.symbols_requested = SYMS + OTHER_SYMS
+    run.symbols_failed = {"CCC": "HTTP 404"}
+    session.flush()
+
+    reason = data_readiness(session, SYMS, source=SRC, now=NOW) or ""
+    assert "failed for 1/4 of this universe's symbols" in reason and "CCC" in reason
+    # the other approved universe shares the run but not the failure
+    assert data_readiness(session, OTHER_SYMS, source=SRC, now=NOW) is None
+
+
+def test_partial_ingest_with_no_named_failure_still_blocks_everything(session: Session) -> None:
+    """Fail closed: a partial run that names no failed symbol is telling us
+    something went wrong without saying what."""
+    _feed(session, stale=False)
+    _bars(session, {})
+    _ingest(session, status="partial")
+    reason = data_readiness(session, SYMS, source=SRC, now=NOW) or ""
+    assert "not ok" in reason and "names no failed symbol" in reason
+
+
+@pytest.mark.parametrize("status", ["failed", "running", "killed", "stopped"])
+def test_unattributable_ingest_states_still_block_every_universe(
+    session: Session, status: str
+) -> None:
+    _feed(session, stale=False)
+    _bars(session, {})
+    _ingest(session, status=status)
+    run = session.scalar(select(IngestionRun).order_by(IngestionRun.started_at.desc()))
+    assert run is not None
+    run.symbols_failed = {"ZZZ": "unrelated"}  # not one of SYMS
+    session.flush()
+    assert f"is {status!r}, not ok" in (data_readiness(session, SYMS, source=SRC, now=NOW) or "")
+
+
+def test_readiness_passes_for_the_approved_snapshot_once_its_symbols_have_the_bar(
+    session: Session,
+) -> None:
+    """The live defect, end to end: the approved 150-symbol universe is blocked
+    while only the configured overlap has the session's bar, and passes as soon
+    as the union ingest has given every approved symbol that bar."""
+    snap = _snapshot(session, "research_150_like", SYMS + OTHER_SYMS)
+    _approve(session, name="s_e2e", horizon=Horizon.MEDIUM_SWING, snapshot=snap)
+    _feed(session, stale=False)
+    _ingest(session)
+    # only the configured overlap (SYMS) has today's bar — the pre-W6a state
+    _bars(session, {})
+    approved_syms = list(SYMS + OTHER_SYMS)
+    reason = data_readiness(session, approved_syms, source=SRC, now=NOW) or ""
+    assert reason.startswith("incomplete data") and f"4/{len(approved_syms)}" in reason
+
+    # the union ingest has now fetched the rest of the approved snapshot
+    _bars(session, {}, symbols=OTHER_SYMS)
+    assert data_readiness(session, approved_syms, source=SRC, now=NOW) is None
+
+    universes, _ = approved_universes(session)
+    rows = universe_readiness(session, universes, now=NOW)
+    assert [r["ready"] for r in rows] == [True]
+    assert rows[0]["dataset_snapshot_id"] == snap.id
