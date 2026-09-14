@@ -337,3 +337,5 @@ never be loosened is in D1 §12.
 | Date (UTC) | Pass | Command | Outcome |
 |---|---|---|---|
 | 2026-09-12 09:20 | Stage A pass 1 (SPY, QQQ, IWM; 102 units) | `options cycle-backfill --underlyings SPY,QQQ,IWM --since 2023-09-04 --until 2026-09-04 --to-database data/io2_bulk.sqlite --max-minutes 590 --yes` | started 05:20 ET (outside the 20:00–06:00 ET window by design: the bulk route has no live-DB writer and the 590-min bound ends ~15:30 ET, before the 17:30 ET jobs); corp-actions run #16 done first (422 dividends, 11 splits, 6 underlyings) |
+| 2026-09-12 09:56 → 09-14 04:34 | Stage A pass 2 (fresh copy after the P6 fix) | same + fresh `.backup` copy | `stopped` (max_minutes; the Mac slept lid-closed for most of the wall-clock): 80/89 covered, 9 excluded (2 `contract_fetch_failed` = network dropped during sleep), 2,771 contracts, 111,039 bars, continuity 0.833 |
+| 2026-09-14 04:36 | Stage A pass 3 | same + `--resume 17` | started (00:36 ET, inside the window) |
