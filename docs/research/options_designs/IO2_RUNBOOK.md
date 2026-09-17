@@ -347,3 +347,5 @@ never be loosened is in D1 §12.
 | 2026-09-15 00:26 → 00:30 | Stage B pass 1 (run 18) | runbook §3.2 Stage B command | died with the Mac's battery after 15 units (status left `running`); resumed as pass 2 |
 | 2026-09-16 10:41 → 20:26 | Stage B pass 2 | `--resume 18 --max-minutes 580` | `stopped` at the bound: 84/162 covered this pass, 78 excluded (see breakdown in the log; 1 retryable: HD), 98,318 bars, continuity 0.740; bulk file now 223,234 option bars |
 | 2026-09-17 00:03 (scheduled) | Stage B pass 3 | `--resume 18 --max-minutes 590` | 20:03 ET window |
+| 2026-09-17 00:03 → 09:56 | Stage B pass 3 | `--resume 18 --max-minutes 590` | `stopped` at the bound: 168/340 covered cumulative (0.494), 211,824 bars this pass (bulk file now 336,740 total); 1 retryable (XLC) |
+| 2026-09-18 00:03 (scheduled) | Stage B pass 4 | `--resume 18 --max-minutes 590` | 20:03 ET window |
