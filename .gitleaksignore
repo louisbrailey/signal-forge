@@ -1,0 +1,3 @@
+# Reviewed: deliberate credential-detection fixture and non-secret dataset identifier.
+f546c57cbfeac1acbb1769130a735f01fdff0e3d:tests/safety/test_s15_execution_boundary.py:generic-api-key:366
+5b32f5cb995042f6624ab73bba43b242fc1e7544:tests/research/test_evaluate_promotion_snapshot_key.py:generic-api-key:96

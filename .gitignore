@@ -46,3 +46,14 @@ build/
 # --- Node (only present if frontend Option B is chosen later) ---
 node_modules/
 frontend/dist/
+
+# Local developer tooling and private machine state
+.toolkit-runs/
+.env
+.env.*
+!.env.example
+!.env.worker.example
+*.pem
+*.key
+.DS_Store
+/output/

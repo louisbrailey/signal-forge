@@ -1,0 +1,15 @@
+{
+  "project": "Signal Forge",
+  "entry_points": [
+    "README.md",
+    "ARCHITECTURE.md",
+    "docs/decisions/ADR-execution-layer.md"
+  ],
+  "commands": {
+    "setup": "uv sync --frozen --extra llm",
+    "test": "uv run pytest --no-cov -q",
+    "focused_test": "uv run pytest tests/path_to_test.py --no-cov -q",
+    "safety": "uv run pytest -m safety --no-cov -q",
+    "lint": "make lint"
+  }
+}
