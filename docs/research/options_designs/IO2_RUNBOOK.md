@@ -349,3 +349,22 @@ never be loosened is in D1 §12.
 | 2026-09-17 00:03 (scheduled) | Stage B pass 3 | `--resume 18 --max-minutes 590` | 20:03 ET window |
 | 2026-09-17 00:03 → 09:56 | Stage B pass 3 | `--resume 18 --max-minutes 590` | `stopped` at the bound: 168/340 covered cumulative (0.494), 211,824 bars this pass (bulk file now 336,740 total); 1 retryable (XLC) |
 | 2026-09-18 00:03 (scheduled) | Stage B pass 4 | `--resume 18 --max-minutes 590` | 20:03 ET window |
+| 2026-09-18 00:03 → 09:54 | Stage B pass 4 | `--resume 18 --max-minutes 590` | `stopped`: 252/520 cycles covered cumulative (0.485), 269,640 bars this pass (bulk file 394,556 total); 1 retryable (XLP) |
+| 2026-09-22 06:19 (found) | Stage B was IDLE for 4 days (9/18–9/22) | — | root cause: nightly resume depended on a Claude session manually re-scheduling a one-shot sleep-wrapper each evening; no session was open 9/18–9/22 to do it |
+| 2026-09-22 06:19 | Stage B pass 5, and a fix for the idle gap | `/Users/louisbrailey/bin/io2_stage_b_loop.sh --resume 18` | started; see §11 below |
+
+## 11. The self-resuming loop (fixes the multi-day idle gap)
+
+`~/bin/io2_stage_b_loop.sh` is a **detached, session-independent** bash loop
+(not owned by any Claude session, not killed when one ends or the app
+restarts): every 15 minutes it checks the ET hour; inside 20:00–06:00 ET it
+launches one `--resume 18` pass bounded to end by 06:00 ET, reads the
+resulting `ingestion_run.status`, and either exits (status `ok` — Stage B is
+complete) or waits for the next night's window. It never touches
+17:30–19:00 ET. Started 2026-09-22 06:19Z as pid 82404 (`~/Library/Logs/signalforge/io2_stage_b_loop.pid`);
+its own log lines are interleaved into `io2_stage_b.log` (prefixed
+`io2_stage_b_loop:`). This replaces the "schedule tonight's pass" step
+everywhere else in this runbook — a session no longer needs to be open for
+Stage B to keep making progress. Check `ps -p $(cat
+~/Library/Logs/signalforge/io2_stage_b_loop.pid)` to confirm it is still
+alive; if not, restart it with the same command.
