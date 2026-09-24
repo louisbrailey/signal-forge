@@ -10,5 +10,14 @@ export default defineConfig({
       '/api': { target: `http://127.0.0.1:${serverPort}` },
     },
   },
-  build: { outDir: 'dist', chunkSizeWarningLimit: 1200 },
+  build: {
+    outDir: 'dist',
+    chunkSizeWarningLimit: 1200,
+    rollupOptions: {
+      input: {
+        main: 'index.html',
+        worldPreview: 'world-preview.html',
+      },
+    },
+  },
 });

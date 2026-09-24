@@ -219,7 +219,7 @@ function banner(url: string): void {
     `  ${c(90, 'Council')}   ${config.apiKeyPresent ? c(32, 'Claude API key found — real deliberation') : c(33, 'no API key — simulated missions')}`,
     `  ${c(90, 'Models')}    council ${config.council.map((s) => s.model).join(', ')}`,
     `            workers ${config.workers.join(', ')}`,
-    `  ${c(90, 'Demo')}      ${demo.isEnabled ? 'on (no live agents detected)' : 'off'}`,
+    `  ${c(90, 'Demo')}      ${demo.isEnabled ? (args.demo ? 'on (--demo)' : 'on (no live agents detected)') : 'off'}`,
     `  ${c(90, 'Sources')}   ${sources || 'scanning…'}`,
     '',
   ];

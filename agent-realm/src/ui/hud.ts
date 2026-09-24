@@ -166,7 +166,7 @@ export class Hud {
 
   private row(a: Agent): string {
     const sel = this.ctx.store.selectedId === a.id;
-    const sub = [modelLabel(a.model), a.project, !a.live ? 'demo' : ''].filter(Boolean).join(' · ') || a.title;
+    const sub = [modelLabel(a.model), a.project, !a.live ? (a.source === 'api' ? 'simulated' : 'demo') : ''].filter(Boolean).join(' · ') || a.title;
     return `<div class="row ${sel ? 'sel' : ''} ${a.status === 'offline' ? 'offline' : ''}" data-id="${a.id}" tabindex="0" role="button" aria-label="${esc(a.name)}">
       ${headImg(a.skin)}
       <div style="min-width:0">
