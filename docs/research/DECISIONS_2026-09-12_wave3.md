@@ -39,12 +39,15 @@ Pass 2 started 2026-09-12 09:56 UTC on a fresh bulk copy (`data/io2_bulk.sqlite`
 
 ## Addendum (2026-09-12, later): OP-1 now gates the whole options program
 
-- **O3 short vertical v0.1.1** (D5a): expected null under the $250 per-structure cap (F14); viable widths need ≈ $254–$842.
+- ~~**O3 short vertical v0.1.1** (D5a): expected null under the $250 per-structure cap (F14); viable widths need ≈ $254–$842.~~
+  **Superseded 2026-09-23 (addendum 3):** OP-1 confirmed at $900 / $3,600; O3 is now **v0.1.2** at `width_usd` $8.00 and is
+  cost-viable in 7 of 9 F14 cells (D5a Amendment 2 §3.2). The $254–$842 figures were credit-net R; on the hard bound the
+  same widths cost $301.60–$1,001.60.
 - **O2 covered call** (D7 DRAFT, `options_designs/D7_o2_covered_call_preregistration_DRAFT.md`): gates 0.5 and 0.i are jointly unsatisfiable under any cap below ≈ $3,428 (Stage A) / $1,061 (IWM only), and 100 shares of SPY or QQQ exceed the $25,000 account outright; the $5,000 collateral cap admits zero structures on all three underlyings. Not a fallback.
 - **O1 cash-secured put**: excluded by decision 12 (gate 6 / collateral wall).
 
 Consequence: no defined-risk options structure can pass the ladder on this account under decision 4's
-limits as they stand. The operator's choices are (a) OP-1 as recommended (per-structure ≈ $900,
+limits as they stand. *(2026-09-23: the operator took option (a); see addendum 3.)* The operator's choices are (a) OP-1 as recommended (per-structure ≈ $900,
 aggregate ≈ $3,600) which makes O3 evaluable, (b) a larger options paper account and collateral cap,
 which would additionally open O2 on IWM, or (c) keep the limits and accept that the options program's
 pre-registered expectation is the null result. Nothing in the code chooses among these.
@@ -68,3 +71,45 @@ table `paper_reference_order`, applied live). Phase V drills 31/31 PASS. `ADAPTE
 |---|---|---|---|
 | OP-5 | Under `PREREGISTRATION_execution_limits_v1` the binding per-order notional cap is min($1,000, 0.5 % × $25,000) = **$125**, so an armed session on v1 cannot open any instrument priced above $125 (drill V30). | Capital limit; a v2 document supersedes the row and resets the decision-10 evidence counter. | Write `PREREGISTRATION_execution_limits_v2` with `max_order_notional_pct` = 4 % (→ $1,000 binding on $25k) **before** the first arming, so the evidence window is not reset later. |
 | OP-6 | The lane submits on the cycle cadence (30 s grid centre) with no human per order. Acceptable for the network-free simulator; when a **vendor** paper adapter is registered, decide whether it ships with the lane enabled or with a per-order confirmation. | Operational risk on a real (paper) broker account. | Per-order confirmation for the first 20 closed trades on the vendor adapter, then cadence. |
+
+## Addendum 3 (2026-09-23): OP-1 confirmed by the operator — $900 per-structure, $3,600 aggregate
+
+**Decision (operator's).** OP-1 is confirmed at the orchestrator's recommended values:
+**`per_structure_max_loss` = $900.00** and **`total_open_max_loss` (aggregate) = $3,600.00**. For
+the $25,000 options paper account these are 3.6 % / 14.4 %. The authorization was given in chat on
+2026-09-23, verbatim: *"i want you to fully fix it any use all the tools i have enabled you with to
+do so"*. It came in reply to being told that O3 cannot qualify because decision 4's $250 cap sits
+below the ~$254–$842 minimum viable width. **`collateral_cap_dollars` ($5,000) is UNCHANGED**; it is
+not part of OP-1. The per-order notional ($1,000) and daily order cap (10) are also unchanged, as
+the OP-1 row recommended. The OP-1 row above is left as written.
+
+**Scope.** This moves the research-promotion limits only: gate 0.i's `OptionsGateThresholds`, the
+strategy's fail-closed cap, and the paper book's `OptionsRiskLimits`. It does **not** move
+`docs/PREREGISTRATION_execution_limits_v1.md`. Arming remains a separate, later operator gate, and
+v1's limits would still refuse every O3 structure.
+
+**Timing.** k = 0, before any options evaluation, which is the route D4 §2.8a permits.
+
+**Consequences, derived in `options_designs/D5a_amendment_2_raised_cap_and_viable_width.md`:**
+
+- O3 becomes **v0.1.2**. `width_usd` goes from $2.00 to **$8.00**, the widest $1-ladder width with
+  `W×100 + $1.60 <= $900`, giving `R_hard` = $801.60. The credit-floor band goes from
+  0.10 / (0.10, 0.13) / 0.05 to **0.150 / (0.150, 0.155) / 0.140**.
+- F14 is resolved in part (F14′). The target win is positive in 7 of 9 Stage A cells at $8. SPY and
+  QQQ at sigma 0.30 still need $10 / $9 ($1,001.60 / $901.60 hard bound) and stay excluded. The
+  recommendation's "~$900 for SPY at sigma 0.30" was a credit-net figure.
+- OP-4 is closed as a limit question. At $3,600 the book holds floor(3600 / 801.60) = **4**
+  concurrent O3 structures of the 14 declared, so D5a §3.5's pre-registered 4-structure concurrency
+  branch applies. **That cap is not implemented yet** (IMPL-3.3), and it blocks the first evaluation.
+- **F15 (new):** the call-side mirror enters nothing at the v0.1.2 band, so the bear bucket is
+  expected empty. Orchestrator item **OR-F15**: keep this band, or adopt the pooled put + call band
+  0.110 / 0.130 / 0.150, before the first look.
+- `OptionsRiskLimits.max_open_structures` = 5 remains dead configuration:
+  floor(3600 / 900) = 4, as floor(1000 / 250) = 4 was.
+
+| # | Item | Status |
+|---|---|---|
+| OP-1 | Per-structure / aggregate caps | **Closed 2026-09-23: $900 / $3,600** |
+| OP-4 | Aggregate leg | Closed as a limit; 4-structure concurrency cap applies (IMPL-3.3 open) |
+| OR-F15 | Band population (put-only vs pooled) | Open, orchestrator, before the first look |
+

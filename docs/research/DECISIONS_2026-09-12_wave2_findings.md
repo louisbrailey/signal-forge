@@ -19,6 +19,10 @@ live yet and the options paper account holds no structure, so there is nothing t
    R scales with price, so a multi-underlying v0.1.0 fails gate 0.5 as pre-registered.
 3. **Gate 0.i fails by arithmetic today**: two of the three declared widths breach decision
    4's $250 per-structure cap before any data exists (D4 §2.8a predicted this).
+   *Resolved in two steps, at k = 0:* D5a (v0.1.1) declared `width_usd` $2.00, which fits $250
+   but is cost-unviable everywhere (F14, "expected null" — now superseded).
+   **2026-09-23:** the operator confirmed OP-1 ($900 / $3,600). D5a Amendment 2 (v0.1.2) declares
+   $8.00, which is viable in 7 of 9 cells (`DECISIONS_2026-09-12_wave3.md` addendum 3).
 4. **OQ-1** (MEDIUM_SWING vs POSITION horizon) is taken as D5 declares it and is baked into
    the family name, hence into `count_sealed_looks`. Ratify before the first evaluation.
 

@@ -1491,3 +1491,8 @@ Do not act on the following numbers from this document without reading D5a first
 | **OQ-1** (MEDIUM_SWING vs POSITION) — **ratified MEDIUM_SWING**, OQ-1 closed | D5a §5 |
 
 Everything not listed above is unchanged and still binding.
+
+**Addendum (2026-09-23).** D5a is itself amended by
+`docs/research/options_designs/D5a_amendment_2_raised_cap_and_viable_width.md` (v0.1.2: OP-1
+raised the per-structure cap to $900 and the aggregate to $3,600, `width_usd` $8.00, band 0.140 /
+0.150 / 0.155). Read it before acting on any D5a number.

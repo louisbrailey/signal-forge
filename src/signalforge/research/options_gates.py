@@ -146,9 +146,11 @@ class OptionsGateThresholds:
     pct_otm_proxy_max_fraction: float = 0.0
     surface_n_floor: int = 5
     surface_min_distinct_strikes: int = 3
-    # gate 0.i — decisions #4 / #13, D4 §2.8a
-    options_per_structure_max_loss: float = 250.0
-    options_total_open_max_loss: float = 1000.0
+    # gate 0.i — decisions #4 / #13, D4 §2.8a; raised by the operator's OP-1
+    # confirmation (2026-09-23, before any look) from $250 / $1,000 to $900 /
+    # $3,600 — DECISIONS_2026-09-12_wave3.md addendum 3, D5a Amendment 2.
+    options_per_structure_max_loss: float = 900.0
+    options_total_open_max_loss: float = 3600.0
     account_equity_basis: float = 25_000.0
     # gate 1-4 — the equity PromotionThresholds, restated verbatim because
     # ``PromotionThresholds`` is outside SCOPE_HASH_FIELDS (D5 §2.5 item 2) and
@@ -765,9 +767,12 @@ def gate_0i_risk_limits(av: OptionsDataAvailability, th: OptionsGateThresholds) 
     Without this the ladder certifies an R stream the arming limits refuse, and
     the first thing anyone wants to move after a pass is the limit.  That is the
     R1/R4 move the ladder exists to block, arrived at by omission.  At decision
-    #4's $250 per-structure cap, two of D5's three declared widths breach
-    unconditionally — a decision to take **now**, in the open, not a measurement
-    to wait for.
+    #4's $250 per-structure cap, two of D5's three declared widths breached
+    unconditionally — a decision taken in the open, before any look: OP-1 raised
+    the caps to $900 / $3,600 (D5a Amendment 2).  The aggregate leg is measured
+    from the trades' concurrent open R, so a 14-underlying run at O3 v0.1.2's
+    $801.60 hard bound fits only if at most floor(3600 / 801.60) = 4 structures
+    are open at once.
     """
     fits_per_structure = av.r_max_observed_usd <= th.options_per_structure_max_loss
     fits_aggregate = av.concurrent_open_r_max_usd <= th.options_total_open_max_loss

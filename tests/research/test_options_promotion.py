@@ -106,7 +106,7 @@ def test_the_passing_bundle_actually_passes_so_a_failure_below_means_something(
         ("0.f", {"cost_model_frozen_at": ""}),
         ("0.g", {"q_defaulted_count": 1}),
         ("0.h", {"deliverable_refusal_count": 2}),
-        ("0.i", {"r_max_observed_usd": 600.0}),
+        ("0.i", {"r_max_observed_usd": 901.60}),  # $9 wide: the first width over $900
         ("0.i", {"limits_in_options_config_hash": False}),
     ],
 )
@@ -191,10 +191,15 @@ def test_gate_0f_emits_every_option_cost_model_field_with_no_default_elided(
 
 def test_gate_0i_refuses_a_population_the_arming_limits_would_refuse(session: Session) -> None:
     """D4 §2.8a: the ladder must not certify an R stream gate 10 can never reproduce."""
-    av = sup.availability(r_max_observed_usd=375.0, structures_breaching_per_structure_cap=12)
+    # OP-1 raised the cap to $900 (was decision 4's $250, at which a $375 R already
+    # breached).  $1,001.60 is the hard bound of the $10 width SPY needs at sigma
+    # 0.30 to be cost-viable (D5a Amendment 2 §3.2) — the population OP-1 still
+    # refuses — and $901.60 ($9) is the first whole-dollar width over the cap.
+    av = sup.availability(r_max_observed_usd=1001.60, structures_breaching_per_structure_cap=12)
     g = _gate(_run(session, sup.passing_evidence(availability=av)), "0.i")
     assert not g.passed
-    assert g.evidence["options_per_structure_max_loss"] == 250.0
+    assert g.evidence["options_per_structure_max_loss"] == 900.0
+    assert g.evidence["options_total_open_max_loss"] == 3600.0
     assert g.evidence["account_equity_basis"] == 25_000.0
 
 
