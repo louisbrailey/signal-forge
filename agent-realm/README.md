@@ -20,7 +20,10 @@ npm start            # builds the client, starts the server, opens http://127.0.
 To run real council deliberation and worker execution, set a Claude API key before starting:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...      # Windows PowerShell: $env:ANTHROPIC_API_KEY="sk-ant-..."
+# macOS / Linux — replace the placeholder with your key from console.anthropic.com
+export ANTHROPIC_API_KEY=<your-api-key>
+# Windows PowerShell
+$env:ANTHROPIC_API_KEY = "<your-api-key>"
 npm start
 ```
 
