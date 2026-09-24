@@ -1,0 +1,36 @@
+{
+  "name": "agent-realm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A Minecraft-style voxel world dashboard for your AI agents, with a council of frontier models that plans and delegates.",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:client": "vite",
+    "build": "vite build",
+    "start": "npm run build && tsx server/index.ts --open",
+    "serve": "tsx server/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
+    "open": "^11.0.4",
+    "three": "^0.186.0",
+    "ws": "^8.21.3",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "@types/three": "^0.186.0",
+    "@types/ws": "^8.18.1",
+    "playwright": "1.56",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0"
+  }
+}
