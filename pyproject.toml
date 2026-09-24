@@ -58,6 +58,7 @@ dev = [
     "pre-commit>=4.0",
     "types-python-dateutil",
     "pandas-stubs",
+    "pytest-xdist>=3.6",
 ]
 
 [build-system]
