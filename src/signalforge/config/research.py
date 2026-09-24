@@ -361,14 +361,19 @@ class OptionsRiskLimits(BaseModel):
     change moves ``spec_json_hash`` and costs a counted sealed look.
 
     Every value is decision 4's (``DECISIONS_2026-09-12_options_execution.md``),
-    recorded as an evaluation-grid CENTRE. The operator may change any of them
-    before arming.
+    recorded as an evaluation-grid CENTRE, except the two max-loss caps: the
+    operator confirmed OP-1 on 2026-09-23 (``DECISIONS_2026-09-12_wave3.md``
+    addendum 3) and raised them from $250 / $1,000 to $900 / $3,600 (3.6% / 14.4%
+    of the $25,000 options paper account). The operator may change any of them
+    before arming. These are the PAPER-book research limits; the execution-layer
+    arming limits live in ``docs/PREREGISTRATION_execution_limits_v1.md`` and are
+    NOT moved by OP-1.
     """
 
     model_config = {"frozen": True, "extra": "forbid"}
 
-    per_structure_max_loss_dollars: PositiveFloat = 250.0
-    total_open_max_loss_dollars: PositiveFloat = 1_000.0
+    per_structure_max_loss_dollars: PositiveFloat = 900.0  # OP-1 (was decision 4's 250)
+    total_open_max_loss_dollars: PositiveFloat = 3_600.0  # OP-1 (was decision 4's 1,000)
     collateral_cap_dollars: PositiveFloat = 5_000.0
     max_net_delta_notional_dollars: PositiveFloat = 10_000.0
     max_net_vega_dollars_per_vol_pt: PositiveFloat = 50.0
@@ -381,9 +386,12 @@ class OptionsRiskLimits(BaseModel):
     per_order_notional_dollars: PositiveFloat = 1_000.0
     daily_order_cap: PositiveInt = 10
     account_exposure_cap_pct: PositiveFloat = 40.0
-    # Dead configuration at decision 4's numbers — $1,000 / $250 already caps the
-    # book at 4 structures (D3 §3.5). Kept because it binds if the per-structure
-    # cap falls, and every refusal reports WHICH limit actually bound.
+    # Dead configuration at OP-1's numbers, as it was at decision 4's: $3,600 /
+    # $900 caps the book at floor(3600 / 900) = 4 full-cap structures (was
+    # floor(1000 / 250) = 4, D3 §3.5), and at O3 v0.1.2's $801.60 hard bound at
+    # floor(3600 / 801.60) = 4. Kept because it binds if the per-structure cap
+    # falls (below $720 = 3600 / 5 for full-cap structures), and every refusal
+    # reports WHICH limit actually bound.
     max_open_structures: PositiveInt = 5
     max_structures_per_underlying: PositiveInt = 1  # keyed on the UNDERLYING
     # Decision 13's separate SIMULATED options account. The account is named in
