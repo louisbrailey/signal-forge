@@ -9,6 +9,7 @@ export const clientMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('set_role'), agentId: id, role: z.enum(['council', 'worker']) }),
   z.object({ type: z.literal('assign_task'), taskId: id, agentId: id }),
   z.object({ type: z.literal('retry_task'), taskId: id }),
+  z.object({ type: z.literal('complete_task'), taskId: id, note: z.string().max(20000).optional() }),
   z.object({ type: z.literal('set_demo'), enabled: z.boolean() }),
   z.object({ type: z.literal('rename_agent'), agentId: id, name: z.string().trim().min(1).max(64) }),
   z.object({ type: z.literal('ping') }),

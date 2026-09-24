@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { ServerMessage } from '../shared/protocol.ts';
 import { Council } from '../server/council.ts';
 import { loadConfig } from '../server/config.ts';
+import { makeAgent } from '../server/agents.ts';
 import { SimBrain, SIM_BANNER } from '../server/simulation.ts';
 import { Realm } from '../server/state.ts';
 import { seededRandom } from '../server/util.ts';
@@ -145,6 +146,34 @@ test('assign_task to an observed (non-controllable) agent prepares a hand-off', 
   assert.equal(agent.currentTaskId, backlog.id);
   assert.equal(agent.recent.at(-1)?.text, 'Instructions ready — hand off');
   council.cancel(mission.id);
+  council.dispose();
+  realm.dispose();
+});
+
+test('hand-off task to an observed agent can be marked done by the operator', async () => {
+  const { realm, council, messages } = setup('handoff');
+  // Stop the API workers from picking anything up so the task stays with the observed agent.
+  for (const a of realm.agents.values()) if (a.role === 'worker') realm.patchAgent(a.id, { role: 'council' });
+  const observed = realm.upsertAgent(makeAgent({ id: 'claude-code:test', source: 'claude-code', live: true, controllable: false }));
+  const mission = council.summon('Write a README');
+  const deadline = Date.now() + 4000;
+  while (!realm.missions.get(mission.id)?.taskIds.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+  const taskId = realm.missions.get(mission.id)!.taskIds[0];
+
+  council.completeTask(taskId); // not assigned yet → refused
+  assert.notEqual(realm.tasks.get(taskId)!.status, 'done');
+
+  council.assignTask(taskId, observed.id);
+  assert.equal(realm.tasks.get(taskId)!.status, 'assigned');
+  assert.equal(realm.getAgent(observed.id)!.currentTaskId, taskId);
+
+  council.completeTask(taskId, 'Shipped it by hand');
+  const t = realm.tasks.get(taskId)!;
+  assert.equal(t.status, 'done');
+  assert.equal(t.output, 'Shipped it by hand');
+  assert.equal(realm.getAgent(observed.id)!.currentTaskId, undefined);
+  assert.equal(realm.getAgent(observed.id)!.stats.tasksDone, 1);
+  assert.ok(messages.some((m) => m.type === 'deliver' && m.taskId === taskId));
   council.dispose();
   realm.dispose();
 });

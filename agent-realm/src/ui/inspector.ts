@@ -28,6 +28,7 @@ export class Inspector {
         const t = ctx.store.tasks.get(a.currentTaskId);
         ctx.openChamber(t?.missionId, a.currentTaskId);
       }
+      if (act === 'complete' && a.currentTaskId) ctx.store.send({ type: 'complete_task', taskId: a.currentTaskId });
       if (act === 'copy' && a.currentTaskId) {
         const t = ctx.store.tasks.get(a.currentTaskId);
         if (t) {
@@ -83,7 +84,8 @@ export class Inspector {
       <button class="btn small ${following ? 'gold' : ''}" data-act="follow" title="Camera follows this villager (F)">${following ? '◉ Following' : '◎ Follow'}</button>
       <button class="btn small" data-act="role" title="Council members plan & delegate; workers execute">${a.role === 'council' ? '↓ Move to workforce' : '♛ Promote to council'}</button>
       ${a.currentTaskId ? `<button class="btn small" data-act="task">📜 Open task</button>` : ''}
-      ${a.currentTaskId && !a.controllable ? `<button class="btn small primary" data-act="copy" title="This agent is observed, not driven — hand it the brief">⧉ Copy brief</button>` : ''}`;
+      ${a.currentTaskId && !a.controllable ? `<button class="btn small primary" data-act="copy" title="This agent is observed, not driven — hand it the brief">⧉ Copy brief</button>
+        <button class="btn small" data-act="complete" title="Confirm the hand-off quest is finished">✔ Mark done</button>` : ''}`;
 
     const task = a.currentTaskId ? store.tasks.get(a.currentTaskId) : undefined;
     const p = a.process;

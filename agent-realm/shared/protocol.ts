@@ -217,6 +217,7 @@ export type ClientMessage =
   | { type: 'set_role'; agentId: string; role: AgentRole }
   | { type: 'assign_task'; taskId: string; agentId: string }
   | { type: 'retry_task'; taskId: string }
+  | { type: 'complete_task'; taskId: string; note?: string } // user confirms a hand-off task finished outside the realm
   | { type: 'set_demo'; enabled: boolean }
   | { type: 'rename_agent'; agentId: string; name: string }
   | { type: 'ping' };

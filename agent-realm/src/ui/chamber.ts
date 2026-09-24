@@ -72,6 +72,7 @@ export class Chamber {
     if (t.dataset.act === 'new') { this.ctx.closeChamber(); document.querySelector<HTMLInputElement>('.command input')?.focus(); return; }
     if (t.dataset.act === 'cancel' && store.missionId) store.send({ type: 'cancel_mission', missionId: store.missionId });
     if (t.dataset.act === 'retry' && this.taskId) store.send({ type: 'retry_task', taskId: this.taskId });
+    if (t.dataset.act === 'complete' && this.taskId) store.send({ type: 'complete_task', taskId: this.taskId });
     if (t.dataset.act === 'untask') this.taskId = null;
     if (t.dataset.mission) { store.missionId = t.dataset.mission; this.taskId = null; }
     if (t.dataset.task) { this.taskId = t.dataset.task; this.tab = 'board'; }
@@ -189,6 +190,7 @@ export class Chamber {
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <select class="pick" name="assignee" aria-label="Reassign"><option value="">Reassign to…</option>${workers.map((w) => `<option value="${w.id}">${esc(w.name)} — ${esc(modelLabel(w.model) || w.title)}${w.controllable ? '' : ' (hand-off)'}</option>`).join('')}</select>
             ${t.status === 'failed' || t.status === 'done' ? `<button class="btn small" data-act="retry">↻ Run again</button>` : ''}
+            ${t.status === 'assigned' && a && !a.controllable ? `<button class="btn small primary" data-act="complete" title="${esc(a.name)} is observed, not driven — confirm when it has finished">✔ Mark done</button>` : ''}
           </div>
           ${t.status === 'in_progress' ? `<div class="progress xp" style="margin-top:10px"><i style="width:${Math.round(t.progress * 100)}%"></i></div>` : ''}
           ${deps.length ? `<div style="margin-top:10px" class="faint">Depends on: ${deps.map((d) => `<a data-task="${d.id}" style="cursor:pointer;color:var(--text-2);text-decoration:underline">${esc(d.title)}</a>`).join(', ')}</div>` : ''}

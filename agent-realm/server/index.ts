@@ -107,6 +107,9 @@ function handle(msg: ClientMessage): void {
     case 'assign_task':
       council.assignTask(msg.taskId, msg.agentId);
       break;
+    case 'complete_task':
+      council.completeTask(msg.taskId, msg.note);
+      break;
     case 'retry_task':
       council.retryTask(msg.taskId);
       break;

@@ -416,6 +416,32 @@ export class Council {
     }
   }
 
+  /** A hand-off task (observed agent) can't be watched to completion, so the user confirms it. */
+  completeTask(taskId: string, note?: string): void {
+    const task = this.realm.tasks.get(taskId);
+    if (!task || task.status !== 'assigned' || this.running.has(taskId)) {
+      this.realm.toast('warn', 'Only handed-off tasks can be marked done by hand');
+      return;
+    }
+    const agent = task.assigneeId ? this.realm.getAgent(task.assigneeId) : undefined;
+    this.realm.patchTask(taskId, {
+      status: 'done',
+      progress: 1,
+      output: note?.trim() || '_Completed outside the realm and confirmed by the operator._',
+    });
+    if (agent) {
+      this.realm.patchAgent(agent.id, {
+        currentTaskId: agent.currentTaskId === taskId ? undefined : agent.currentTaskId,
+        stats: { ...agent.stats, tasksDone: agent.stats.tasksDone + 1 },
+      });
+      this.realm.pushActivity(agent.id, { kind: 'complete', text: `Finished “${truncate(task.title, 60)}”`, taskId });
+      const chair = this.chair();
+      if (chair) this.realm.broadcast({ type: 'deliver', fromId: agent.id, toId: chair.id, taskId });
+    }
+    this.checkMission(task.missionId);
+    this.dispatch();
+  }
+
   assignTask(taskId: string, agentId: string): void {
     const task = this.realm.tasks.get(taskId);
     const agent = this.realm.getAgent(agentId);
