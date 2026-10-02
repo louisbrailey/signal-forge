@@ -1,25 +1,8 @@
-"""The equity paper path is byte-identical after the ``PaperTrade.actor``
-column (D6 §5.3).
+"""Equity accounting/evidence golden and actor authorization regressions.
 
-The execution layer's one change to code that runs today is an additive,
-indexed ``actor`` column plus the line that fills it. Everything the equity path
-produces — the order, the fill, the spread and slippage arithmetic, the
-position, the cash movement, and the complete evidence snapshot — must be
-unchanged, byte for byte, and this test pins it as a canonical JSON blob rather
-than a handful of spot assertions.
-
-The only volatile keys (a git SHA and wall-clock timestamps) are excluded and
-listed explicitly, so the exclusion is visible rather than convenient.
-
-**How the golden below was shown to be the PARENT commit's output, not merely
-this branch's** (a golden captured after a change proves nothing about the
-change). The parent tree was extracted with ``git archive HEAD`` into a scratch
-directory, this file was copied in with the single ``"actor"`` key removed from
-``GOLDEN["trade"]`` and from ``_canonical``, and the test was run there against
-``signalforge`` as it stood before the column existed: **it passed**. So the one
-and only difference this commit makes to the equity path's output is the
-presence of the ``actor`` key — every price, quantity, cash figure, snapshot key
-and notice is byte-identical. Re-run that procedure if this golden ever moves.
+Updated for the conservative ledger correction: one share under the 5% cap,
+rounded execution-price cash accounting, and explicit acceptance risk evidence.
+Automatic-actor coverage uses a genuinely approved, fresh, enabled fixture.
 """
 
 from __future__ import annotations
@@ -50,13 +33,13 @@ VOLATILE_KEYS = ("code_version", "as_of", "created_at", "submitted_at", "filled_
 #: place. If a future change moves any number here, it is a change to the paper
 #: path and not an incidental refactor.
 GOLDEN = {
-    "account_cash_after": "7642.40",
+    "account_cash_after": "9528.740000",
     "fill": {
         "commission": "0.000000",
         "price": "471.260000",
-        "qty": 5,
-        "slippage": "0.710000",
-        "spread_cost": "0.590000",
+        "qty": 1,
+        "slippage": "0.140000",
+        "spread_cost": "0.120000",
     },
     "order": {
         "assumptions_json": {
@@ -66,31 +49,79 @@ GOLDEN = {
             "spread_bps": 5.0,
         },
         "order_type": "market",
-        "qty": 5,
+        "qty": 1,
         "side": "long",
     },
     "position": {
         "avg_price": "471.260000",
-        "qty": 5,
+        "qty": 1,
         "realized_pnl": "0.000000",
         "side": "long",
         "stop_level": 466.0,
         "target_level": 485.0,
     },
     "trade": {
-        "actor": "auto_simulate",
+        "actor": "local-user",
         "decision": "accepted",
         "notice": "Research signal only — no order was placed.",
         "plan_json": {
             "direction": "LONG",
             "entry_zone": [470.0, 472.0],
-            "fill_price": 471.2591,
+            "fill_price": 471.26,
             "invalidation": 466.0,
-            "shares": 5,
+            "shares": 1,
             "target": 485.0,
             "time_stop_days": 10,
+            "acceptance_context": {"mode": "historical_replay", "as_of": "2024-02-01"},
+            "risk_decision": {
+                "policy": "conservative-long-only-v1",
+                "equity": "10000.000000",
+                "cash": "10000.000000",
+                "reserved_collateral": "0.000000",
+                "gross_before": "0",
+                "open_risk_before": "0",
+                "symbol_before": "0",
+                "sector_before": "0",
+                "sector": "tech",
+                "configured_limits": {
+                    "per_trade_risk_pct": 0.5,
+                    "max_daily_portfolio_risk_pct": 1.5,
+                    "max_position_concentration_pct": 10.0,
+                    "max_portfolio_exposure_pct": 60.0,
+                    "max_correlated_exposure_pct": 25.0,
+                    "min_reward_to_risk": 1.5,
+                },
+                "effective_limits": {
+                    "per_trade_risk_pct": 0.5,
+                    "max_daily_portfolio_risk_pct": 1.5,
+                    "max_position_concentration_pct": 5.0,
+                    "max_portfolio_exposure_pct": 60.0,
+                    "max_correlated_exposure_pct": 20.0,
+                },
+                "candidate_risk_dollars": "25.0",
+                "risk_per_share": "5.52",
+                "exit_slippage_bps": 3.0,
+                "accepted_risk_dollars": "5.52",
+                "share_caps": {
+                    "candidate_risk": 4,
+                    "per_trade_risk": 9,
+                    "open_risk": 27,
+                    "cash": 21,
+                    "symbol": 1,
+                    "gross": 12,
+                    "sector": 4,
+                },
+                "shares": 1,
+                "reduced": True,
+                "reductions": ["symbol"],
+                "binding_caps": ["symbol"],
+                "limit_overrides_narrowed": [
+                    "max_position_concentration_pct",
+                    "max_correlated_exposure_pct",
+                ],
+            },
         },
-        "snapshot_decision": {"actor": "auto_simulate", "automatic": True, "note": ""},
+        "snapshot_decision": {"actor": "local-user", "automatic": False, "note": ""},
         "snapshot_keys": [
             "approval_scope",
             "calibration_ref",
@@ -193,7 +224,7 @@ def test_the_equity_accept_path_is_byte_identical(
     passing_candidate.reasons_fail = ["regime flip"]
     session.flush()
 
-    res = _accept(session, passing_candidate, actor=AUTO_SIM_ACTOR)
+    res = _accept(session, passing_candidate)
     canonical = _canonical(session, res, account)
 
     assert json.dumps(canonical, sort_keys=True) == json.dumps(GOLDEN, sort_keys=True)
@@ -207,16 +238,21 @@ def test_the_equity_accept_path_is_byte_identical(
         assert not set(VOLATILE_KEYS) & set(canonical[section])
 
 
-def test_the_new_column_records_the_actor_the_caller_passed(
-    session: Session, passing_candidate: Candidate, account: PaperAccount
-) -> None:
-    """P6's predicate is this column. The JSON keeps its copy; the column is the
-    one an order-authorisation check may read."""
-    res = _accept(session, passing_candidate, actor=AUTO_SIM_ACTOR)
+def test_the_new_column_records_the_actor_the_caller_passed(session: Session, monkeypatch) -> None:
+    """P6's indexed actor and its immutable snapshot must agree on a valid auto fill."""
+    from signalforge.research import approval_scope
+    from signalforge.settings_store import set_setting
+    from tests.paper.test_auto_simulate import SPEC_HASH, _seed
+
+    monkeypatch.setattr(approval_scope, "current_spec_json_hash", lambda _s, _v: SPEC_HASH)
+    _, (candidate,) = _seed(session)
+    set_setting(session, "auto_simulate_qualified_signals", True)
+    res = accept_candidate(session, candidate.id, actor=AUTO_SIM_ACTOR)
     trade = session.get(PaperTrade, res.paper_trade_id)
     assert trade is not None
     assert trade.actor == AUTO_SIM_ACTOR
     assert trade.signal_snapshot_json["decision"]["actor"] == AUTO_SIM_ACTOR
+    assert trade.signal_snapshot_json["decision"]["automatic"] is True
 
 
 def test_the_default_actor_is_the_manual_one(

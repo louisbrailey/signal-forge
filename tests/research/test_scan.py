@@ -222,3 +222,20 @@ def test_s10_probability_never_shown_without_calibration(session: Session) -> No
     assert NO_TRADE_MESSAGE == "NO TRADE — insufficient evidence or poor risk/reward."
     assert NO_TRADE_MESSAGE in confidence_note(None)
     assert NO_TRADE_MESSAGE not in confidence_note("reports/x.md")
+
+
+def test_live_scan_does_not_treat_old_bars_as_fresh_provider_success(session, monkeypatch):
+    from signalforge.config import get_settings
+
+    _seed(session, oos_expectancy_r=0.5)
+    settings = get_settings().model_copy(update={"market_data_provider": "massive"})
+    from types import SimpleNamespace
+
+    import signalforge.research.scan as scan_module
+
+    monkeypatch.setattr(
+        scan_module, "gate_for_horizon", lambda *a, **k: SimpleNamespace(fresh=True, reasons=[])
+    )
+    result = run_scan(session, Horizon.SHORT_SWING, settings=settings, symbols=UNIVERSE)
+    assert result.excluded.get("stale_or_unavailable_feed") == UNIVERSE
+    assert not result.candidates

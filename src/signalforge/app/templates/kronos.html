@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Kronos Research · Signal Forge{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold">Kronos Research</h1>
+<div class="my-4 border border-amber-400 bg-amber-50 rounded p-4"><strong>HISTORICAL REPLAY · experimental AI research</strong><p>{{ runtime.notice }}</p><p>Research signal only — no order was placed.</p></div>
+<p>{{ runtime.model }} · {{ 'Local runtime present (inference not yet verified)' if runtime.configured else 'Local runtime unavailable' }} · Offline CPU inference. No model prediction changes entries, exits, ranking, or sizing.</p>
+<form class="my-5 flex flex-wrap gap-3 items-end" action="/kronos/replay" method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<label>Watchlist symbol<select class="block border rounded p-2" name="symbol">{% for symbol in symbols %}<option>{{ symbol }}</option>{% endfor %}</select></label>
+<label>Replay horizon<select class="block border rounded p-2" name="horizon"><option value="5">5 sessions</option><option value="20">20 sessions</option></select></label>
+<button class="bg-slate-900 text-white rounded p-2">Run bounded replay</button>
+</form>
+<p class="text-sm text-slate-600">Uses 128 persisted real Massive daily bars before the replay window. Up to 90 seconds; only one model inference at a time. No paid API call, new data download, or paper trade is triggered.</p>
+{% if error %}<p role="alert" class="my-4 p-3 bg-red-50 text-red-800 border border-red-300">{{ error }}</p>{% endif %}
+{% if result %}
+<section class="mt-6">
+<h2 class="text-xl font-semibold">{{ result.ticker }} · Replay evidence</h2>
+<p>{{ result.source }} · Recorded input latency: {{ result.source_latency_categories|default(["not recorded"])|join(", ") }} · HISTORICAL replay.</p>
+<p>Input: {{ result.input_start }} through {{ result.input_end }}. Replay: {{ result.heldout_start }} through {{ result.heldout_end }}.</p>
+<p>Generated {{ result.generated_at }} · This window is held out from inference input, but model pretraining overlap is unknown.</p>
+<p class="my-3">Model mean absolute price error: <strong>${{ '%.3f'|format(result.mae) }}</strong> · Unchanged-price baseline: <strong>${{ '%.3f'|format(result.baseline_mae) }}</strong>. <strong>{{ 'Model error is lower on this replay only.' if result.mae < result.baseline_mae else 'Model does not beat the simple baseline on this replay.' }}</strong></p>
+<svg viewBox="0 0 710 240" class="w-full max-w-3xl bg-white border rounded" role="img" aria-label="Replay price comparison; exact values in the table below"><title>Actual, Kronos, and unchanged-price baseline in USD</title>
+<text x="4" y="18" font-size="12">USD {{ '%.2f'|format(chart.high) }}</text><text x="4" y="234" font-size="12">USD {{ '%.2f'|format(chart.low) }}</text>
+<polyline points="{{ chart.lines.actual }}" fill="none" stroke="#166534" stroke-width="3"/>
+<polyline points="{{ chart.lines.predicted }}" fill="none" stroke="#1d4ed8" stroke-width="3" stroke-dasharray="8 3"/>
+<polyline points="{{ chart.lines.baseline }}" fill="none" stroke="#475569" stroke-width="2" stroke-dasharray="2 4"/></svg>
+<p class="text-sm">Solid green: actual · Dashed blue: Kronos · Dotted gray: unchanged-price baseline. Dates increase left to right.</p>
+<div class="overflow-x-auto"><table class="w-full text-left text-sm mt-3"><thead><tr><th>Session (New York)</th><th>Actual USD</th><th>Kronos mean USD</th><th>Baseline USD</th><th>Sample min/max (not confidence)</th></tr></thead><tbody>
+{% for p in result.points %}<tr class="border-t"><td>{{ p.date }}</td><td>{{ '%.2f'|format(p.actual) }}</td><td>{{ '%.2f'|format(p.predicted) }}</td><td>{{ '%.2f'|format(p.baseline) }}</td><td>{{ '%.2f'|format(p.low) }} – {{ '%.2f'|format(p.high) }}</td></tr>{% endfor %}</tbody></table></div>
+<a class="inline-block underline mt-3" href="/kronos/results/{{ run_id }}">Download result, full input bars and provenance (JSON)</a>
+</section>{% endif %}
+<h2 class="mt-6 text-xl font-semibold">Recorded experiments</h2>
+<ul>{% for run in recent %}<li><a class="underline" href="/kronos?run_id={{ run.id }}">{{ run.entity }} · {{ run.ts }} UTC · experiment {{ run.id }}</a></li>{% else %}<li>No replay experiments recorded.</li>{% endfor %}</ul>
+{% endblock %}

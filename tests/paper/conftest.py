@@ -49,6 +49,7 @@ def instrument_with_bars(session: Session) -> Instrument:
                 source="fixture",
                 latency_category=LatencyCategory.HISTORICAL,
                 is_simulated=True,
+                is_adjusted=True,  # Synthetic series has no corporate actions.
                 ingested_at=datetime.now(UTC),
                 quality_flags=[],
             )

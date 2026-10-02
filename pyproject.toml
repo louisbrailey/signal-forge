@@ -534,3 +534,15 @@ forbidden_modules = [
     # predicted exactly this — "the next sibling cannot quietly reopen the hole".
     "signalforge.paper.options_eod",
 ]
+
+[[tool.importlinter.contracts]]
+name = "Kronos is never an input to deterministic signals, risk, paper or execution"
+type = "forbidden"
+source_modules = ["signalforge.research", "signalforge.risk", "signalforge.paper", "signalforge.execution", "signalforge.backtest"]
+forbidden_modules = ["signalforge.kronos"]
+
+[[tool.importlinter.contracts]]
+name = "Kronos cannot reach trading, credentials, providers or alerts"
+type = "forbidden"
+source_modules = ["signalforge.kronos"]
+forbidden_modules = ["signalforge.paper", "signalforge.execution", "signalforge.alerts", "signalforge.llm", "signalforge.data.adapters", "signalforge.research.scan"]

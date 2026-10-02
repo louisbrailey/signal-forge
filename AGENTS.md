@@ -1,6 +1,6 @@
 # Signal Forge working instructions
 
-Read: README.md, ARCHITECTURE.md, docs/decisions/ADR-execution-layer.md.
+Read: README.md, ARCHITECTURE.md, docs/decisions/0003-execution-layer.md.
 
 Preserve deterministic research and risk logic, paper-only execution boundaries, kill switches and operator arming. Read the execution ADR before touching execution. Never use live credentials or market-provider calls in CI. Large docs/research outputs are evidence; load only named results relevant to the question.
 

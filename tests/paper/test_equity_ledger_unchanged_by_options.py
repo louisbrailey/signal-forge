@@ -110,17 +110,18 @@ def test_paper_auto_simulate_is_byte_identical() -> None:
 # Behavioural goldens over the two functions that DID change
 # --------------------------------------------------------------------------- #
 
+# Correctness update: 5% cap -> one share; cash = 10000 - 471.26, costs embedded.
 ACCEPT_GOLDEN = {
-    "cash_after": "7642.40",
+    "cash_after": "9528.740000",
     "fill_price": "471.260000",
-    "shares": 5,
+    "shares": 1,
     "side": "long",
-    "spread_cost": "0.590000",
-    "slippage": "0.710000",
+    "spread_cost": "0.120000",
+    "slippage": "0.140000",
     "commission": "0.000000",
     "stop_level": 466.0,
     "target_level": 485.0,
-    "plan_fill_price": 471.2591,
+    "plan_fill_price": 471.26,
 }
 
 

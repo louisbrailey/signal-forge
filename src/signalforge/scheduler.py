@@ -810,21 +810,23 @@ def other_live_worker() -> str | None:
 
 
 def last_completed_session(now: datetime | None = None) -> date:
-    """The most recent U.S. session whose completed daily bars the provider
-    should already have published: today (ET) if it is a weekday and the
-    EOD cron time has passed, else the previous weekday. Exchange holidays
-    are NOT modelled — on a holiday this expects a session that never
-    happened, which shows as "1 session behind" until the next real close
-    (a conservative, visible error rather than a silent one)."""
+    """Latest exchange session past the configured EOD publication cutoff.
+
+    Holidays never manufacture an expected bar; early closes conservatively
+    retain the configured post-close publication cutoff.
+    """
     from zoneinfo import ZoneInfo
 
     n = (now or datetime.now(UTC)).astimezone(ZoneInfo("America/New_York"))
     d = n.date()
     if n.weekday() >= 5 or (n.hour, n.minute) < EOD_CRON:
         d -= timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d
+    from signalforge.data.calendar import sessions
+
+    available = sessions(d - timedelta(days=14), d)
+    if not available:
+        raise RuntimeError("no exchange session available for freshness calculation")
+    return available[-1]
 
 
 def _session_cutoff_utc(session_date: date) -> datetime:

@@ -167,9 +167,12 @@ def test_missing_candidate_is_404(seeded: TestClient) -> None:
 
 
 def test_paper_accept_from_the_evidence_page(seeded: TestClient) -> None:
-    from signalforge.db.models import Candidate, PaperTrade
+    from datetime import UTC, datetime, timedelta
+
+    from signalforge.data.calendar import rth_bounds_utc, sessions
+    from signalforge.db.models import Candidate, OHLCVDaily, PaperTrade, ScanRun
     from signalforge.db.session import session_scope
-    from signalforge.domain import QualityGate
+    from signalforge.domain import LatencyCategory, QualityGate
 
     with session_scope() as s:
         cid = (
@@ -180,6 +183,35 @@ def test_paper_accept_from_the_evidence_page(seeded: TestClient) -> None:
             )
             .one()
             .id
+        )
+        # A live manual acceptance needs current source-qualified completed data.
+        now = datetime.now(UTC)
+        cand = s.get(Candidate, cid)
+        run = s.get(ScanRun, cand.scan_run_id)
+        run.started_at = run.finished_at = cand.created_at = now
+        run.source = "fixture_accept"
+        market_date = [
+            d
+            for d in sessions(now.date() - timedelta(days=14), now.date())
+            if rth_bounds_utc(d)[1] <= now
+        ][-1]
+        s.add(
+            OHLCVDaily(
+                instrument_id=cand.instrument_id,
+                session_date=market_date,
+                open=100,
+                high=101,
+                low=99,
+                close=100,
+                adj_close=100,
+                volume=1000000,
+                source=run.source,
+                ingested_at=now,
+                latency_category=LatencyCategory.HISTORICAL,
+                is_simulated=True,
+                is_adjusted=True,
+                quality_flags=[],
+            )
         )
     r = seeded.post(
         f"/candidates/{cid}/accept",
