@@ -307,6 +307,241 @@ def binomial_test_exact(successes: int, trials: int, p0: float = 0.5) -> dict[st
 
 
 # ---------------------------------------------------------------------------
+# Eval-mode diagnostic (return-space, rank, quantile and volatility metrics)
+# ---------------------------------------------------------------------------
+
+
+def rank_average(values: Sequence[float]) -> list[float]:
+    """1-based ranks with ties given their average rank."""
+    x = np.asarray(values, dtype=float)
+    if x.ndim != 1 or x.size == 0 or not np.all(np.isfinite(x)):
+        raise ValueError("rank_average needs a non-empty finite 1-D array")
+    order = np.argsort(x, kind="mergesort")
+    ranks = np.empty(x.size)
+    i = 0
+    while i < x.size:
+        j = i
+        while j + 1 < x.size and x[order[j + 1]] == x[order[i]]:
+            j += 1
+        ranks[order[i : j + 1]] = (i + j) / 2 + 1
+        i = j + 1
+    return [float(r) for r in ranks]
+
+
+def spearman(x: Sequence[float], y: Sequence[float]) -> float | None:
+    """Spearman rank correlation (average ranks); ``None`` if either side is constant."""
+    if len(x) != len(y) or len(x) < 2:
+        raise ValueError("spearman needs two parallel arrays of length >= 2")
+    rx = np.asarray(rank_average(x))
+    ry = np.asarray(rank_average(y))
+    sx, sy = float(np.std(rx)), float(np.std(ry))
+    if sx == 0 or sy == 0:
+        return None
+    return float(np.mean((rx - rx.mean()) * (ry - ry.mean())) / (sx * sy))
+
+
+def log_return(start: float, end: float) -> float:
+    if not (math.isfinite(start) and math.isfinite(end)) or start <= 0 or end <= 0:
+        raise ValueError("log_return needs finite positive prices")
+    return math.log(end / start)
+
+
+def daily_log_returns(close_t: float, closes: Sequence[float]) -> list[float]:
+    """Daily log returns of ``closes``, the first taken from ``close_t``."""
+    series = np.asarray([close_t, *closes], dtype=float)
+    if series.size < 2 or not np.all(np.isfinite(series)) or np.any(series <= 0):
+        raise ValueError("daily_log_returns needs finite positive prices")
+    return [float(v) for v in np.diff(np.log(series))]
+
+
+def sample_std(values: Sequence[float]) -> float:
+    x = np.asarray(values, dtype=float)
+    if x.ndim != 1 or x.size < 2 or not np.all(np.isfinite(x)):
+        raise ValueError("sample_std needs at least two finite values")
+    return float(np.std(x, ddof=1))
+
+
+def predicted_daily_vol(close_t: float, paths: Sequence[Sequence[float]]) -> float:
+    """Sample std of predicted daily log returns pooled over every path and step."""
+    pooled: list[float] = []
+    for path in paths:
+        pooled.extend(daily_log_returns(close_t, path))
+    return sample_std(pooled)
+
+
+def trailing_vol(context_closes: Sequence[float], window: int = 20) -> float:
+    """Sample std of the last ``window`` daily log returns of the context."""
+    if window < 2 or len(context_closes) < window + 1:
+        raise ValueError("trailing_vol needs window+1 context closes")
+    tail = list(context_closes[-(window + 1) :])
+    return sample_std(daily_log_returns(tail[0], tail[1:]))
+
+
+def quantile_band(
+    values: Sequence[float], lower_q: float = 0.1, upper_q: float = 0.9
+) -> tuple[float, float]:
+    """``lower_q``/``upper_q`` quantiles (numpy linear interpolation) of sampled values."""
+    x = np.asarray(values, dtype=float)
+    if x.ndim != 1 or x.size == 0 or not np.all(np.isfinite(x)):
+        raise ValueError("quantile_band needs a non-empty finite 1-D array")
+    if not 0 <= lower_q < upper_q <= 1:
+        raise ValueError("quantile_band needs 0 <= lower_q < upper_q <= 1")
+    lo, hi = np.quantile(x, [lower_q, upper_q])
+    return float(lo), float(hi)
+
+
+def quantile_band_reference_coverage(n: int, lower_q: float = 0.1, upper_q: float = 0.9) -> float:
+    """Expected coverage of the interpolated band of ``n`` exchangeable draws.
+
+    Under linear interpolation the q-quantile sits at order-statistic position
+    ``1 + (n-1)q``, whose expected probability level is ``(1 + (n-1)q) / (n+1)``; the
+    band therefore covers ``(upper_q - lower_q)(n-1)/(n+1)`` when the ensemble is
+    perfectly calibrated, which is below the nominal ``upper_q - lower_q``.
+    """
+    if n < 1:
+        raise ValueError("n must be positive")
+    return (upper_q - lower_q) * (n - 1) / (n + 1)
+
+
+def diagnostic_window_metrics(
+    *,
+    context_closes: Sequence[float],
+    actual: Sequence[float],
+    paths: Sequence[Sequence[float]],
+) -> dict[str, Any]:
+    """Per-call return-space metrics of the pre-registered eval-mode diagnostic."""
+    horizon = len(actual)
+    if horizon < 2 or not paths or any(len(p) != horizon for p in paths):
+        raise ValueError("diagnostic_window_metrics needs parallel paths of the horizon length")
+    close_t = float(context_closes[-1])
+    ends = [float(p[-1]) for p in paths]
+    predicted_end = float(np.mean(ends))
+    r_hat = log_return(close_t, predicted_end)
+    r = log_return(close_t, float(actual[-1]))
+    q_lo, q_hi = quantile_band(ends)
+    return {
+        "horizon": horizon,
+        "n_paths": len(paths),
+        "close_t": close_t,
+        "predicted_end": predicted_end,
+        "actual_end": float(actual[-1]),
+        "r_hat": r_hat,
+        "r": r,
+        "abs_err_model": abs(r_hat - r),
+        "abs_err_unchanged": abs(r),
+        "direction_hit": int(_sign(r_hat) == _sign(r) != 0),
+        "r_sign": _sign(r),
+        "q10_end": q_lo,
+        "q90_end": q_hi,
+        "covered_10_90": int(q_lo <= float(actual[-1]) <= q_hi),
+        "vol_predicted": predicted_daily_vol(close_t, paths),
+        "vol_trailing20": trailing_vol(context_closes, 20),
+        "vol_realised": sample_std(daily_log_returns(close_t, actual)),
+    }
+
+
+def bootstrap_cluster_indices(
+    n_clusters: int, *, n_boot: int = 10_000, seed: int = 20261003, block: int = 1
+) -> np.ndarray:
+    """``(n_boot, n_clusters)`` resampled cluster indices.
+
+    ``block == 1`` is the ordinary cluster bootstrap. ``block > 1`` is a moving-block
+    bootstrap over consecutive clusters (clusters must be in time order): blocks of
+    ``block`` consecutive indices are drawn with replacement and truncated to
+    ``n_clusters``.
+    """
+    if n_clusters <= 0 or n_boot <= 0 or block <= 0 or block > n_clusters:
+        raise ValueError("bootstrap_cluster_indices needs positive sizes and block <= clusters")
+    rng = np.random.default_rng(seed)
+    if block == 1:
+        return np.asarray(rng.integers(0, n_clusters, size=(n_boot, n_clusters)))
+    n_blocks = math.ceil(n_clusters / block)
+    starts = rng.integers(0, n_clusters - block + 1, size=(n_boot, n_blocks))
+    idx = (starts[:, :, None] + np.arange(block)[None, None, :]).reshape(n_boot, -1)
+    return np.asarray(idx[:, :n_clusters])
+
+
+def bootstrap_summary(
+    estimate: float, draws: np.ndarray, *, null: float = 0.0, ci_level: float = 0.95
+) -> dict[str, Any]:
+    """Percentile CI and two-sided bootstrap p of ``estimate`` against ``null``.
+
+    ``p = 2 * min(share of draws <= null, share >= null)``, floored at ``1/len(draws)``
+    and capped at 1.
+    """
+    d = np.asarray(draws, dtype=float)
+    if d.ndim != 1 or d.size == 0 or not np.all(np.isfinite(d)):
+        raise ValueError("bootstrap_summary needs finite draws")
+    alpha = 1.0 - ci_level
+    lo, hi = np.quantile(d, [alpha / 2, 1 - alpha / 2])
+    p = 2.0 * min(float(np.mean(d <= null)), float(np.mean(d >= null)))
+    return {
+        "estimate": float(estimate),
+        "ci_level": ci_level,
+        "ci": [float(lo), float(hi)],
+        "p_two_sided": float(min(1.0, max(p, 1.0 / d.size))),
+        "n_boot": int(d.size),
+    }
+
+
+def cluster_bootstrap_log_ratio(
+    numerators: Sequence[float],
+    denominators: Sequence[float],
+    *,
+    n_boot: int = 10_000,
+    seed: int = 20261003,
+    ci_level: float = 0.95,
+    block: int = 1,
+) -> dict[str, Any]:
+    """Bootstrap of ``ln(sum(numerators) / sum(denominators))`` over clusters.
+
+    Each entry is one cluster's (origin's) summed numerator and denominator, e.g. summed
+    absolute errors of the model and of the baseline across symbols. The output carries
+    the log ratio, its percentile CI, the two-sided p against 0 and the same on the
+    ratio scale.
+    """
+    num = np.asarray(numerators, dtype=float)
+    den = np.asarray(denominators, dtype=float)
+    if num.shape != den.shape or num.ndim != 1 or num.size == 0:
+        raise ValueError("cluster_bootstrap_log_ratio needs parallel non-empty 1-D arrays")
+    if not (np.all(np.isfinite(num)) and np.all(np.isfinite(den))):
+        raise ValueError("cluster_bootstrap_log_ratio needs finite sums")
+    if np.any(num <= 0) or np.any(den <= 0):
+        raise ValueError("cluster_bootstrap_log_ratio needs positive cluster sums")
+    idx = bootstrap_cluster_indices(num.size, n_boot=n_boot, seed=seed, block=block)
+    draws = np.log(num[idx].sum(axis=1) / den[idx].sum(axis=1))
+    estimate = math.log(float(num.sum()) / float(den.sum()))
+    out = bootstrap_summary(estimate, draws, ci_level=ci_level)
+    out.update(
+        {
+            "clusters": int(num.size),
+            "seed": seed,
+            "block": block,
+            "log_ratio": out["estimate"],
+            "ratio": math.exp(out["estimate"]),
+            "ratio_ci": [math.exp(out["ci"][0]), math.exp(out["ci"][1])],
+        }
+    )
+    return out
+
+
+def rank_ic_summary(ics: Sequence[float]) -> dict[str, Any]:
+    """Mean, t-statistic (sample sd) and share positive of per-origin rank ICs."""
+    x = np.asarray(ics, dtype=float)
+    if x.ndim != 1 or x.size < 2 or not np.all(np.isfinite(x)):
+        raise ValueError("rank_ic_summary needs at least two finite ICs")
+    sd = float(np.std(x, ddof=1))
+    mean = float(np.mean(x))
+    return {
+        "n": int(x.size),
+        "mean": mean,
+        "sd": sd,
+        "t_stat": mean / (sd / math.sqrt(x.size)) if sd > 0 else None,
+        "share_positive": float(np.mean(x > 0)),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Provenance
 # ---------------------------------------------------------------------------
 
@@ -365,17 +600,31 @@ __all__ = [
     "baselines",
     "benjamini_hochberg_adjust",
     "binomial_test_exact",
+    "bootstrap_cluster_indices",
+    "bootstrap_summary",
+    "cluster_bootstrap_log_ratio",
     "cluster_bootstrap_mean",
+    "daily_log_returns",
+    "diagnostic_window_metrics",
     "directional_accuracy_end",
     "drift_baseline",
     "holm_adjust",
+    "log_return",
     "mae",
     "mape",
     "mean_band_width",
     "per_bar_hit_rate",
+    "predicted_daily_vol",
+    "quantile_band",
+    "quantile_band_reference_coverage",
+    "rank_average",
+    "rank_ic_summary",
+    "sample_std",
     "sha256_of_tree",
     "sign_flip_permutation_test",
     "sma_flat_baseline",
+    "spearman",
+    "trailing_vol",
     "unchanged_baseline",
     "window_metrics",
 ]

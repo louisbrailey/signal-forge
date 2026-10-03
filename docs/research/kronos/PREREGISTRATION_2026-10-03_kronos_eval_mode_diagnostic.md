@@ -178,5 +178,73 @@ it is a diagnostic of settings on essentially the same data.
 
 ## 10. Verbatim `plan` output
 
-Added in the commit that lands the diagnostic tooling, still before any inference
-(`plan` reads the DB `mode=ro` with plain SQL and loads no model).
+Added in the commit that lands the diagnostic tooling, still before any diagnostic
+inference (`plan` reads the DB `mode=ro` with plain SQL and loads no model). Command:
+`uv run python scripts/kronos_eval_diagnostic.py plan`. §1–§9 are unchanged from the
+first commit of this file.
+
+Implementation notes fixed with the tooling (no result seen): the per-path seeds are
+`42 + i`; the worker passes `verbose=False` to the upstream predictor (progress bar
+only, no numerical effect — the A0 integrity check in §4 tests this); each ledger record
+stores the git SHA, all paths, and the last 21 context closes.
+
+```
+Kronos eval-mode diagnostic plan (db=/Users/louisbrailey/signal-forge/data/signalforge.sqlite, read-only; no inference)
+Symbols: ['SPY', 'XLB', 'XLC', 'XLE', 'XLF', 'XLI', 'XLK', 'XLP', 'XLRE', 'XLU', 'XLV', 'XLY']; horizons (5, 20); lookback 128
+Arm A0: {"T": 1.0, "eval": false, "return_paths": true, "samples": 3, "top_p": 0.9}  # replication of pre-fix behaviour (train mode, T=1.0, top_p=0.9, 3 paths)
+Arm A1: {"T": 1.0, "eval": true, "return_paths": true, "samples": 3, "top_p": 0.9}  # A0 + eval mode on model and tokenizer
+Arm A2: {"T": 0.6, "eval": true, "return_paths": true, "samples": 10, "top_p": 0.9}  # PRIMARY: eval mode, T=0.6, top_p=0.9, 10 paths
+Origins (47): ['2025-09-30', '2025-10-07', '2025-10-14', '2025-10-21', '2025-10-28', '2025-11-04', '2025-11-11', '2025-11-18', '2025-11-25', '2025-12-03', '2025-12-10', '2025-12-17', '2025-12-24', '2026-01-02', '2026-01-09', '2026-01-16', '2026-01-26', '2026-02-02', '2026-02-09', '2026-02-17', '2026-02-24', '2026-03-03', '2026-03-10', '2026-03-17', '2026-03-24', '2026-03-31', '2026-04-08', '2026-04-15', '2026-04-22', '2026-04-29', '2026-05-06', '2026-05-13', '2026-05-20', '2026-05-28', '2026-06-04', '2026-06-11', '2026-06-18', '2026-06-26', '2026-07-06', '2026-07-13', '2026-07-20', '2026-07-27', '2026-08-03', '2026-08-10', '2026-08-17', '2026-08-24', '2026-08-31']
+  origin=2025-09-30 heldout_end h5=2025-10-07 h20=2025-10-28 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2025-10-07 heldout_end h5=2025-10-14 h20=2025-11-04 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2025-10-14 heldout_end h5=2025-10-21 h20=2025-11-11 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2025-10-21 heldout_end h5=2025-10-28 h20=2025-11-18 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2025-10-28 heldout_end h5=2025-11-04 h20=2025-11-25 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2025-11-04 heldout_end h5=2025-11-11 h20=2025-12-03 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2025-11-11 heldout_end h5=2025-11-18 h20=2025-12-10 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2025-11-18 heldout_end h5=2025-11-25 h20=2025-12-17 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2025-11-25 heldout_end h5=2025-12-03 h20=2025-12-24 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2025-12-03 heldout_end h5=2025-12-10 h20=2026-01-02 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2025-12-10 heldout_end h5=2025-12-17 h20=2026-01-09 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2025-12-17 heldout_end h5=2025-12-24 h20=2026-01-16 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2025-12-24 heldout_end h5=2026-01-02 h20=2026-01-26 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-01-02 heldout_end h5=2026-01-09 h20=2026-02-02 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-01-09 heldout_end h5=2026-01-16 h20=2026-02-09 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-01-16 heldout_end h5=2026-01-26 h20=2026-02-17 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-01-26 heldout_end h5=2026-02-02 h20=2026-02-24 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-02-02 heldout_end h5=2026-02-09 h20=2026-03-03 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-02-09 heldout_end h5=2026-02-17 h20=2026-03-10 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-02-17 heldout_end h5=2026-02-24 h20=2026-03-17 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-02-24 heldout_end h5=2026-03-03 h20=2026-03-24 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-03-03 heldout_end h5=2026-03-10 h20=2026-03-31 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-03-10 heldout_end h5=2026-03-17 h20=2026-04-08 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-03-17 heldout_end h5=2026-03-24 h20=2026-04-15 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-03-24 heldout_end h5=2026-03-31 h20=2026-04-22 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-03-31 heldout_end h5=2026-04-08 h20=2026-04-29 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-04-08 heldout_end h5=2026-04-15 h20=2026-05-06 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-04-15 heldout_end h5=2026-04-22 h20=2026-05-13 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-04-22 heldout_end h5=2026-04-29 h20=2026-05-20 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-04-29 heldout_end h5=2026-05-06 h20=2026-05-28 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-05-06 heldout_end h5=2026-05-13 h20=2026-06-04 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-05-13 heldout_end h5=2026-05-20 h20=2026-06-11 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-05-20 heldout_end h5=2026-05-28 h20=2026-06-18 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-05-28 heldout_end h5=2026-06-04 h20=2026-06-26 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-06-04 heldout_end h5=2026-06-11 h20=2026-07-06 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-06-11 heldout_end h5=2026-06-18 h20=2026-07-13 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-06-18 heldout_end h5=2026-06-26 h20=2026-07-20 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-06-26 heldout_end h5=2026-07-06 h20=2026-07-27 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-07-06 heldout_end h5=2026-07-13 h20=2026-08-03 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-07-13 heldout_end h5=2026-07-20 h20=2026-08-10 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-07-20 heldout_end h5=2026-07-27 h20=2026-08-17 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-07-27 heldout_end h5=2026-08-03 h20=2026-08-24 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-08-03 heldout_end h5=2026-08-10 h20=2026-08-31 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-08-10 heldout_end h5=2026-08-17 h20=2026-09-08 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-08-17 heldout_end h5=2026-08-24 h20=2026-09-15 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-08-24 heldout_end h5=2026-08-31 h20=2026-09-22 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+  origin=2026-08-31 heldout_end h5=2026-09-08 h20=2026-09-29 bars 133/148 SPY:ok XLB:ok XLC:ok XLE:ok XLF:ok XLI:ok XLK:ok XLP:ok XLRE:ok XLU:ok XLV:ok XLY:ok
+Windows per arm: 1128; arms: 3; total calls: 3384
+Bar-count problems: 0
+Projected runtime per arm at 3s/call: 0.9 h
+Projected runtime per arm at 10s/call: 3.1 h
+DB facts: {"max_session_date_massive": "2026-10-02", "mtime_utc": "2026-10-03T04:23:51.454179+00:00", "path": "/Users/louisbrailey/signal-forge/data/signalforge.sqlite", "size_bytes": 1393070080}
+```

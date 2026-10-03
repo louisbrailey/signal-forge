@@ -48,6 +48,38 @@ Subprocess input is capped at 64 KiB, combined output at 128 KiB, time at 90 sec
 and an OS lock permits one process at a time. Children are terminated/reaped on
 failure. Held-out OHLCV never reaches inference; only dates do.
 
+## Eval mode (bug fix, 2026-10-03)
+
+`from_pretrained` returns the model and tokenizer in **train mode**, and neither the
+upstream predictor nor the original worker called `.eval()`. Every replay before this
+fix therefore ran with dropout active (cached Kronos-small config: ffn 0.25, resid 0.25,
+attention 0.1, token 0.1) and with the s2 cross-attention causally masked
+(`is_causal = self.training` upstream). The worker now always puts the model and the
+tokenizer in eval mode for the dashboard path, verifies that the switch took effect, and
+reports the mode it ran in; the runtime rejects a result whose reported mode differs
+from the requested one.
+
+**Pre-fix replays were produced with dropout active.** That includes every `/kronos`
+replay stored in the audit log before this change, the release-report AAPL runs, and
+the whole 2026-10-02 skill study (`docs/research/kronos/2026-10-02/`). Their numbers are
+not comparable with post-fix replays. The result now carries
+`inference = {eval, T, top_p, samples}` and that block is part of the `id` digest, so
+post-fix ids differ from pre-fix ids for the same input.
+
+## Study-only inference mode
+
+`service.study_replay(session, symbol, horizon, as_of=..., mode=...)` accepts
+`mode = {"eval": bool, "T": float, "top_p": float, "samples": int, "return_paths": bool}`.
+All five keys are required with exact types; `T` is bounded to [0.1, 2.0], `top_p` to
+[0.1, 1.0], `samples` to 1–10 (path `i` is seeded `42 + i`). The mode is validated in the
+service, again in the runtime and again inside the worker. `return_paths` adds the raw
+close paths to the result. `eval: false` (train mode) exists only so a pre-registered
+diagnostic can replicate the pre-fix behaviour; it is reachable only through
+`study_replay`. `replay()` — the only function the web route imports — has no mode
+parameter and always runs the production default (eval mode, T 1.0, top_p 0.9, three
+samples). The 128 KiB output cap was not raised: 10 paths × 20 steps is a few KiB and
+the upstream progress bar is now disabled.
+
 The package neither imports TradePilot code nor decides, ranks, sizes, or executes
 trades. Hermetic tests exercise local synthetic fixtures and tiny child processes;
 they do not assert installed-model or dashboard validation.
