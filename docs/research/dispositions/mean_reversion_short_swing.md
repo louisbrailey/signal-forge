@@ -2,7 +2,7 @@
 
 **Verdict: STOP at Stage A. Does not pass.** No v0.2.0 is shipped, no sealed look is
 consumed, the strategy stays **`EXPERIMENTAL`** (`strategy_version.id = 4`), and its four
-sealed tests (ids 3, 8, 13, 18) are untouched. **Sealed looks consumed: 0. k stays 5.**
+sealed tests (ids 3, 8, 13, 18) are untouched. **Sealed looks consumed: 0.** Ledger (`strategy_sealed_test`, family `mean_reversion.short_swing`): previous looks recorded = 5 (snapshots 1, 2, 3, 4, 11); next new look index = 6. Unchanged by this stage.
 No `evaluate_promotion`, no `StrategySealedTest`, no `StrategyVersion` row.
 
 Source: `docs/research/designs/proposals/mean_reversion_short_swing--exits_risk.md`
@@ -76,7 +76,7 @@ the strategy's deficit is in the 93% of trades that were never affected by the g
 - **No gate, threshold or cost-model constant was changed.** No file under `src/` was
   modified; the variants were realised as a script-side wrapper around the public engine.
 - **Variant ledger for this angle: 2 of 2 spent (cap 2).** Both dead. No third variant.
-- **Sealed-look ledger:** k = 5 before, **k = 5 after**. `strategy_sealed_test` verified
+- **Sealed-look ledger:** previous looks = 5 before, **5 after** (next new look index stays 6). `strategy_sealed_test` verified
   at 22 rows before and after on the copy.
 
 ## 4. The dissenting recommendation, carried forward (§11)
