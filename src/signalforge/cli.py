@@ -868,6 +868,8 @@ def options_q_series_cmd(
     from signalforge.config import get_settings
     from signalforge.data.options_corporate_actions import derive_dividend_yield_series
     from signalforge.db.session import session_scope
+    from signalforge.scheduler import other_live_worker
+    from signalforge.worker_lock import worker_lock_holder
 
     s = get_settings()
     syms = [x.strip().upper() for x in symbols.split(",") if x.strip()] or list(
@@ -878,10 +880,25 @@ def options_q_series_cmd(
     if start > end:
         typer.secho(f"--since {start} is after --until {end}", fg=typer.colors.RED)
         raise typer.Exit(code=2)
-    # No network I/O inside this scope, so the write-intent transaction is held
-    # only for the derivation itself (docs/SQLITE_CONCURRENCY.md rule 4).
+    # The same refusal `options evaluate-promotion --confirm` makes, plus the
+    # heartbeat row for a worker on another host/container sharing this database:
+    # this command rewrites the series gate 0.g and the gate-5 cache key read.
+    holder = worker_lock_holder()
+    live = other_live_worker()
+    if holder or live:
+        why = f"the scheduler worker holds the write lock (holder: {holder})" if holder else live
+        typer.secho(
+            f"REFUSED: {why}. Deriving the q series opens write transactions against the "
+            "worker's database; stop the worker first (docs/SQLITE_CONCURRENCY.md). "
+            "Nothing was derived and no row was written.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2)
+    # No network I/O inside this scope, and each underlying commits in its own
+    # short write transaction with the lock-retry helper (per-unit rule,
+    # docs/SQLITE_CONCURRENCY.md) rather than one write lock for the whole pass.
     with session_scope(write=True) as session:
-        run = derive_dividend_yield_series(session, syms, start, end)
+        run = derive_dividend_yield_series(session, syms, start, end, commit_per_symbol=True)
         typer.secho(
             f"run #{run.id} [{run.status}] sessions_written={run.bars_written} "
             f"unchanged={run.bars_skipped} coverage {run.coverage_first}..{run.coverage_last}",

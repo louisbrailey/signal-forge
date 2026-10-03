@@ -94,7 +94,12 @@ from signalforge.data import calendar as equity_calendar
 from signalforge.data import options_calendar
 from signalforge.data.option_chain import ContractPrint, ContractRef, OptionChainSeries, Right
 from signalforge.data.options_backfill import OptionsCoverageSummary, coverage_summary
-from signalforge.data.options_corporate_actions import Q_SERIES_SOURCE, splits_between
+from signalforge.data.options_corporate_actions import (
+    Q_SERIES_SOURCE,
+    latest_q_series_run_id,
+    q_series_digest,
+    splits_between,
+)
 from signalforge.data.series import PriceSeries
 from signalforge.db.models import DataSnapshot, DividendYieldDaily, EntitlementCheck, IngestionRun
 from signalforge.db.models.market import OptionAggregateDaily, OptionContract
@@ -977,13 +982,16 @@ def _q_by_underlying(
     traded: dict[str, set[date]] = {}
     for t in trades:
         if lo <= t.entry_date <= hi:
-            traded.setdefault(t.underlying_symbol, set()).add(t.entry_date)
-    for sym in symbols:
+            traded.setdefault(t.underlying_symbol.upper(), set()).add(t.entry_date)
+    for raw in symbols:
+        # ONE normalised key for the query, the traded-session lookup and the
+        # record: a lower-case symbol must not find its rows yet miss its trades.
+        sym = raw.upper().strip()
         rows = list(
             session.execute(
                 select(DividendYieldDaily.session_date, DividendYieldDaily.q)
                 .where(
-                    DividendYieldDaily.symbol == sym.upper(),
+                    DividendYieldDaily.symbol == sym,
                     DividendYieldDaily.source == source,
                     DividendYieldDaily.session_date >= lo,
                     DividendYieldDaily.session_date <= hi,
@@ -1012,6 +1020,23 @@ def _q_by_underlying(
             "span_end": hi.isoformat(),
         }
     return out, defaulted
+
+
+def _q_series_provenance(
+    session: Session,
+    symbols: Sequence[str],
+    *,
+    window: OptionsWindow,
+    source: str = Q_SERIES_SOURCE,
+) -> tuple[str, int | None]:
+    """``(digest, latest derivation run id)`` for the series gate 0.g read.
+
+    The digest covers exactly the span ``_q_by_underlying`` summarises — the
+    pre-sealed span — so two evaluations on the same snapshot that priced on
+    different ``q`` series are distinguishable in the recorded evidence.
+    """
+    digest = q_series_digest(session, symbols, window.start, window.pre_sealed_end, source)
+    return digest, latest_q_series_run_id(session)
 
 
 def _folds(
@@ -1451,6 +1476,7 @@ def _availability(
     ]
 
     q_map, q_defaulted = _q_by_underlying(session, symbols, window=window, trades=trades)
+    q_digest, q_run_id = _q_series_provenance(session, symbols, window=window)
 
     cost_by_multiplier: dict[str, float] = {}
     for outcome in (dual.baseline, dual.stressed):
@@ -1511,6 +1537,8 @@ def _availability(
         q_by_underlying=q_map,
         q_defaulted_count=q_defaulted
         + sum(1 for t in trades if not t.q_source or t.q_source == "unsourced"),
+        q_series_digest=q_digest,
+        q_series_run_id=q_run_id,
         deliverable_refusal_count=counters.shares_per_contract_refusals,
         deliverable_refusals=(
             ({"count": counters.shares_per_contract_refusals, "scope": "pooled"},)

@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 
 import httpx
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -349,3 +350,112 @@ def test_build_q_lookup_matches_exact_sessions_only(session: Session) -> None:
     assert q("QQQ", date(2024, 10, 15)) is None  # no series at all
     assert build_q_lookup(session, ["SPY"], source="other")("SPY", date(2024, 10, 15)) is None
     assert build_q_lookup(session, [])("SPY", date(2024, 10, 15)) is None
+
+
+# --- `signalforge options q-series` (review item F) --------------------------- #
+def test_q_series_cli_refuses_while_a_live_worker_heartbeat_exists(session: Session) -> None:
+    from typer.testing import CliRunner
+
+    from signalforge.cli import app
+    from signalforge.db.models import IngestionRun, WorkerHeartbeat
+
+    ingest_dividends_and_splits(session, _adapter(), ["SPY"])
+    _seed_bars(session, "SPY", _SERIES_START, _SERIES_END, close=_CLOSE)
+    now = datetime.now(UTC)
+    session.add(
+        WorkerHeartbeat(
+            worker="scheduler",
+            host="some-other-host",
+            pid=1,
+            started_at=now - timedelta(minutes=5),
+            last_beat_at=now,
+        )
+    )
+    session.commit()
+
+    args = [
+        "options",
+        "q-series",
+        "--symbols",
+        "SPY",
+        "--since",
+        _SERIES_START.isoformat(),
+        "--until",
+        _SERIES_END.isoformat(),
+    ]
+    res = CliRunner().invoke(app, args)
+    assert res.exit_code == 2, res.output
+    assert "REFUSED" in res.output and "live scheduler heartbeat" in res.output
+    session.expire_all()
+    assert _count(session, DividendYieldDaily) == 0
+    q_runs = (
+        select(func.count())
+        .select_from(IngestionRun)
+        .where(IngestionRun.kind == "options_q_series")
+    )
+    assert session.scalar(q_runs) == 0
+
+    # a STALE heartbeat is not a live worker: the same command now runs
+    hb = session.scalar(select(WorkerHeartbeat))
+    assert hb is not None
+    hb.last_beat_at = now - timedelta(hours=1)
+    session.commit()
+    res = CliRunner().invoke(app, args)
+    assert res.exit_code == 0, res.output
+    session.expire_all()
+    assert _count(session, DividendYieldDaily) == len(calendar.sessions(_SERIES_START, _SERIES_END))
+    assert session.scalar(q_runs) == 1
+
+
+def test_q_series_cli_refuses_while_the_worker_lock_is_held(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typer.testing import CliRunner
+
+    import signalforge.worker_lock as wl
+    from signalforge.cli import app
+
+    monkeypatch.setattr(wl, "worker_lock_holder", lambda path=None: "12345")
+    res = CliRunner().invoke(app, ["options", "q-series", "--symbols", "SPY"])
+    assert res.exit_code == 2
+    assert "holds the write lock" in res.output
+    assert _count(session, DividendYieldDaily) == 0
+
+
+def test_per_symbol_commits_retry_a_locked_unit_and_keep_finished_ones(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each underlying is its own committed unit: a transient lock on the second
+    is retried whole, and the first is already durable when it happens."""
+    from sqlalchemy.exc import OperationalError
+
+    import signalforge.data.options_corporate_actions as oca
+    import signalforge.db.retry as retry
+    from signalforge.db.session import get_sessionmaker
+
+    ingest_dividends_and_splits(session, _adapter(), ["SPY"])
+    _seed_bars(session, "SPY", _SERIES_START, _SERIES_END, close=_CLOSE)
+    _seed_bars(session, "QQQ", _SERIES_START, _SERIES_END, close=_CLOSE)
+    session.commit()
+    monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
+
+    real = oca.get_daily_bars
+    seen: list[tuple[str, int]] = []
+
+    def flaky(sess: Session, sym: str, *a: object, **kw: object):  # type: ignore[no-untyped-def]
+        if sym == "QQQ" and not any(s == "QQQ" for s, _ in seen):
+            with get_sessionmaker()() as other:  # what a second connection can see NOW
+                seen.append((sym, _count(other, DividendYieldDaily)))
+            raise OperationalError("SELECT 1", {}, Exception("database is locked"))
+        return real(sess, sym, *a, **kw)
+
+    monkeypatch.setattr(oca, "get_daily_bars", flaky)
+    run = derive_dividend_yield_series(
+        session, ["SPY", "QQQ"], _SERIES_START, _SERIES_END, commit_per_symbol=True
+    )
+    n = len(calendar.sessions(_SERIES_START, _SERIES_END))
+    # SPY's rows were committed before QQQ's unit hit the lock
+    assert seen == [("QQQ", n)]
+    assert run.status == "ok" and run.symbols_ok == ["SPY", "QQQ"]
+    assert run.bars_written == n  # QQQ has no dividend history: no rows, never 0.0
+    assert not session.in_transaction()
