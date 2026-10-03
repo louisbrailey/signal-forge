@@ -179,3 +179,30 @@ reader can reproduce it from `scripts/regime_span_census.py`.
   `strategy_sealed_test` stays at its current count (22).
 - The candidate-level effect is observed at the next scheduled scan. It is not
   forced.
+
+## 9. Outcome (Phase 2 executed 2026-10-03 02:32 UTC)
+
+Run exactly as §4: `scripts/refresh_scan_oos_evidence.py --end 2026-10-02 --years 4
+--confirm` (Y = 4 by the §4 rule for end 2026-10-02), worker stopped for the write
+(launchd bootout → write → bootstrap; worker pid 25200 heartbeating 02:34 UTC).
+Log: `.toolkit-runs/20261003T023236.591925Z.log`. Dry run 01:35 UTC
+(`.toolkit-runs/20261003T013529.960004Z.log`) produced identical counts.
+
+Ledger check: `backtest_run` 45 → 48 (runs 46/47/48), `strategy_sealed_test`
+22 → 22. Statuses unchanged: v2 PAPER_APPROVED, v3 PAPER_APPROVED, v5 EXPERIMENTAL.
+Correction to §0: v5 was recorded here as PAPER_APPROVED; the live DB shows it
+EXPERIMENTAL (StrategyVersion 5). The 2026-10-02 audit is right; this record was wrong.
+
+OOS window 2022-09-23 → 2026-10-02, 60/40 split, source `massive`, 25-symbol universe:
+
+| Version | run | OOS n | regimes (trend/vol) | expectancy R [95% CI] | PF | 2-trend gate |
+|---|---|---|---|---|---|---|
+| v2 tc.short | 46 | 228 | bull 202 · neutral 25 · bear 1 | **0.213 [0.006, 0.423]** | 1.43 | expected PASS (25 neutral ≥ 10) |
+| v3 tc.medium | 47 | 205 | bull 183 · neutral 21 · bear 1 | 0.083 [−0.133, 0.304] | 1.13 | coverage PASS; CI low −0.133 vs floor −0.15 → marginal |
+| v5 rs.medium | 48 | 127 | bull 126 · neutral 1 | 0.152 [−0.083, 0.388] | 1.29 | **FAIL by construction** (1 neutral trade), as pre-registered |
+
+Against §6: v2 coverage as expected, expectancy positive with CI above zero. v3
+coverage as expected; expectancy turned positive on the longer window (was −0.049R
+on run 39) but the CI straddles zero. v5 fails coverage exactly as disclosed. No
+threshold, universe, window or config was changed. The candidate-level effect is
+observed at the next scheduled scan, not forced.
