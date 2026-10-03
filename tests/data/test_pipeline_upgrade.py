@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from signalforge.data.adapters import massive as massive_module
 from signalforge.data.adapters.base import AdapterError
 from signalforge.data.adapters.fixture import FixtureMarketDataAdapter
 from signalforge.data.adapters.massive import MassiveAdapter
@@ -16,6 +17,20 @@ from signalforge.data.discover import discover_history_depth
 from signalforge.data.ingest import ingest_daily_history
 from signalforge.data.validate import validate_daily
 from signalforge.db.models import IngestionRun
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleeping(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The adapter backs off (1.5/3/6/12 s) before retrying a retryable status.
+    That is right in production and ruinous offline: the retry tests below
+    inject 503/429 deliberately, and a real backoff would charge up to 22.5 s
+    per test for a rate limit that does not exist here.
+
+    Patch ``_sleep`` itself, NOT ``time.sleep``. The backoff is a chunked wait
+    driven by ``time.monotonic()`` (so the kill switch stays responsive), and
+    neutering ``time.sleep`` alone converts it into a busy-spin of exactly the
+    same duration -- slower, not faster."""
+    monkeypatch.setattr(massive_module.MassiveAdapter, "_sleep", lambda self, _s: None)
 
 
 # --------------------------- retry / backoff ------------------------------- #

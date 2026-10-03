@@ -22,7 +22,7 @@ Three properties are asserted here and nowhere else:
 from __future__ import annotations
 
 import inspect
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from freezegun import freeze_time
@@ -73,17 +73,24 @@ def _broker(session: Session, *, account_id: str = ACCOUNT_ID) -> PaperReference
     )
 
 
-def _armed(session: Session, strategy_version_id: int, *, account_id: str) -> ArmedStrategy:
-    """An armed row written directly — the ceremony has its own tests."""
+def _armed(
+    session: Session, strategy_version_id: int, *, account_id: str, at: datetime = NOW
+) -> ArmedStrategy:
+    """An armed row written directly — the ceremony has its own tests.
+
+    ``at`` anchors the arming window. Tests that drive ``execution_cycle_job``
+    run on the REAL clock (the job takes no ``now``), so they must arm relative
+    to the wall clock: an arming pinned to the fixed ``NOW`` expires for real
+    six days later and the cycle then — correctly — disarms it."""
     from signalforge.research.approval_scope import current_spec_json_hash
     from signalforge.settings_store import effective_research_config
 
     row = ArmedStrategy(
         strategy_version_id=strategy_version_id,
         structure_type="equity",
-        armed_at=NOW - timedelta(days=1),
+        armed_at=at - timedelta(days=1),
         armed_by="test",
-        expires_at=NOW + timedelta(days=6),
+        expires_at=at + timedelta(days=6),
         adapter_name=ADAPTER,
         broker_account_id_expected=account_id,
         max_notional_usd=1_000.0,
@@ -209,8 +216,10 @@ def test_the_cycle_proves_is_paper_every_cycle_through_the_factory(
 ) -> None:
     """§13 — re-taken EVERY cycle, never cached from arm time. Two cycles, two
     proofs, each one an ``execution_event`` a reviewer can read."""
+    from signalforge.db.types import utcnow
+
     _approve(session, strategy_version.id)
-    _armed(session, strategy_version.id, account_id=ACCOUNT_ID)
+    _armed(session, strategy_version.id, account_id=ACCOUNT_ID, at=utcnow())
     _feed_dead_man(session)
     session.commit()
 
