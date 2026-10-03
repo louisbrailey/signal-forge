@@ -1,0 +1,1776 @@
+{
+  "task": "stage_a_mr",
+  "design": "docs/research/designs/proposals/mean_reversion_short_swing--exits_risk.md",
+  "stage": "A",
+  "sealed_looks_spent": 0,
+  "db_rows_written": 0,
+  "database_url": "sqlite+pysqlite:///file:/private/tmp/claude-501/-Users-louisbrailey-signal-forge--claude-worktrees-heuristic-montalcini-a1dd0f/63b82da1-cc42-46c3-abd5-3e859c0bb150/scratchpad/mr_stage_a.sqlite?mode=ro&uri=true",
+  "span": {
+    "start": "2016-09-10",
+    "end": "2025-09-07"
+  },
+  "snapshot_order": [
+    "universe_24_ex_meta",
+    "universe_25_baseline",
+    "universe_25_baseline_legacy",
+    "universe_25_meta_continuity_corrected"
+  ],
+  "thresholds": {
+    "min_walkforward_folds": 4,
+    "min_oos_trades": 30,
+    "min_net_expectancy_r": 0.0,
+    "min_bootstrap_ci_low_r": 0.02,
+    "sensitivity_positive_fraction_min": 0.6,
+    "sensitivity_neighbour_fraction_min": 0.75,
+    "sensitivity_min_grid_trades": 15,
+    "min_regimes_covered": 3,
+    "min_trades_per_regime": 10,
+    "require_beat_benchmark_sharpe": true,
+    "require_data_validation_pass": true,
+    "require_leakage_check_pass": true,
+    "sealed_window_days": 365,
+    "sealed_min_trades": 10,
+    "sealed_min_expectancy_r": 0.0
+  },
+  "reproduction_check": {
+    "snapshot_id": 3,
+    "snapshot_key": "universe_24_ex_meta",
+    "all_pre_sealed": 984,
+    "oos": 309,
+    "oos_expectancy_r": -0.0837390534404627,
+    "expected": {
+      "all": 984,
+      "oos": 309,
+      "oos_expectancy_r": -0.0837
+    },
+    "matches_eval_34": true,
+    "wrapper_at_blend_0_is_identity": true,
+    "data_provenance": {
+      "sources": [
+        "massive"
+      ],
+      "bars": 53196,
+      "first": "2016-10-17",
+      "last": "2025-09-05"
+    }
+  },
+  "V1": {
+    "label": "V1",
+    "params": {
+      "stop_anchor_blend": 1.0
+    },
+    "snapshots": {
+      "universe_24_ex_meta": {
+        "unpaired_pre_sealed_delta": {
+          "difference_r": 0.004057206215539733,
+          "se": 0.03768297939514629,
+          "sigma": 0.1076668108695863,
+          "note": "raw-R, unpaired, NOT accounting-invariant: shown for context only; F1 is the paired fixed-denominator test above"
+        },
+        "snapshot_id": 3,
+        "snapshot_key": "universe_24_ex_meta",
+        "n_symbols": 24,
+        "symbols_with_data": 24,
+        "source": "massive",
+        "pre_sealed_end": "2025-09-07",
+        "sealed_window_start": "2025-09-08",
+        "v0_1_0": {
+          "all_pre_sealed": {
+            "n": 984,
+            "mean": -0.062062762467475524,
+            "sd": 0.8724640522201121,
+            "se": 0.02781313813402099
+          },
+          "oos": {
+            "n": 309,
+            "mean": -0.08373905344046272,
+            "sd": 0.8201700118069507,
+            "se": 0.046657841800844854
+          },
+          "artefacts": {
+            "profitable_stop_exits": 4,
+            "risk_lt_1atr": {
+              "n": 65,
+              "mean": -0.6709645434057502,
+              "sd": 1.7260643119790395,
+              "se": 0.21409192882022487
+            },
+            "risk_ge_1atr": {
+              "n": 919,
+              "mean": -0.018995715937564904,
+              "sd": 0.7611009513966811,
+              "se": 0.02510640377619576
+            }
+          }
+        },
+        "V1": {
+          "all_pre_sealed": {
+            "n": 975,
+            "mean": -0.05800555625193579,
+            "sd": 0.7938988450376187,
+            "se": 0.025425111272772968
+          },
+          "oos": {
+            "n": 311,
+            "mean": -0.08430815823429247,
+            "sd": 0.7966904693673038,
+            "se": 0.045176171904849474
+          },
+          "artefacts": {
+            "profitable_stop_exits": 0,
+            "risk_lt_1atr": {
+              "n": 0,
+              "mean": 0.0,
+              "sd": 0.0,
+              "se": 0.0
+            },
+            "risk_ge_1atr": {
+              "n": 975,
+              "mean": -0.05800555625193579,
+              "sd": 0.7938988450376187,
+              "se": 0.025425111272772968
+            }
+          }
+        },
+        "F1": {
+          "n": 962,
+          "mean": -0.016469954944280423,
+          "sd": 0.365602334063298,
+          "se": 0.011787492343627295,
+          "sigma": -1.3972399272169727,
+          "n_base": 984,
+          "n_variant": 975,
+          "n_matched": 962,
+          "n_base_unmatched": 22,
+          "n_variant_unmatched": 13,
+          "passed": false,
+          "bar": "paired mean > 0 and >= 2.0 SE"
+        },
+        "F2": {
+          "risk_ge_1atr": {
+            "n": 897,
+            "mean": -0.007824191321782432,
+            "sd": 0.25733691330911856,
+            "se": 0.00859222944629741,
+            "sigma": -0.9106124749908833,
+            "n_base": 984,
+            "n_variant": 975,
+            "n_matched": 962,
+            "n_base_unmatched": 22,
+            "n_variant_unmatched": 13
+          },
+          "risk_lt_1atr": {
+            "n": 65,
+            "mean": -0.13578149293475275,
+            "sd": 1.0317204919482048,
+            "se": 0.12796917738904318,
+            "sigma": -1.0610484157599849,
+            "n_base": 984,
+            "n_variant": 975,
+            "n_matched": 962,
+            "n_base_unmatched": 22,
+            "n_variant_unmatched": 13
+          },
+          "passed": true,
+          "bar": "paired difference on the risk >= 1 ATR subset must itself be >= 2 SE"
+        },
+        "F3": {
+          "baseline_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-10",
+              "n_trades": 257,
+              "expectancy_r": 0.0175,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-10",
+              "end": "2021-03-10",
+              "n_trades": 292,
+              "expectancy_r": -0.1949,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-10",
+              "end": "2023-06-09",
+              "n_trades": 181,
+              "expectancy_r": 0.0436,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-09",
+              "end": "2025-09-07",
+              "n_trades": 254,
+              "expectancy_r": -0.0651,
+              "positive_with_floor": false
+            }
+          ],
+          "variant_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-10",
+              "n_trades": 257,
+              "expectancy_r": 0.0312,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-10",
+              "end": "2021-03-10",
+              "n_trades": 285,
+              "expectancy_r": -0.1643,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-10",
+              "end": "2023-06-09",
+              "n_trades": 177,
+              "expectancy_r": -0.0212,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-09",
+              "end": "2025-09-07",
+              "n_trades": 256,
+              "expectancy_r": -0.0547,
+              "positive_with_floor": false
+            }
+          ],
+          "fold_deltas_r": [
+            0.013699999999999997,
+            0.03059999999999999,
+            -0.0648,
+            0.010400000000000006
+          ],
+          "variant_positive_folds": 1,
+          "gate1_would_pass": false,
+          "redistribution_pattern": false,
+          "passed": false,
+          "bar": ">= 2 of 4 folds positive with n >= 15; and NOT (fold 2 improves < 0.05R while folds 1 and 3 both deteriorate)"
+        },
+        "F4": {
+          "profitable_stop_exits": 0,
+          "risk_below_half_atr": 0,
+          "examples": [],
+          "passed": true,
+          "bar": "0 profitable 'stop' exits and 0 trades with realised risk < 0.5 ATR"
+        },
+        "elapsed_s": 5.2
+      },
+      "universe_25_baseline": {
+        "unpaired_pre_sealed_delta": {
+          "difference_r": 0.007463682645931384,
+          "se": 0.037238212688807455,
+          "sigma": 0.20043074323421312,
+          "note": "raw-R, unpaired, NOT accounting-invariant: shown for context only; F1 is the paired fixed-denominator test above"
+        },
+        "snapshot_id": 2,
+        "snapshot_key": "universe_25_baseline",
+        "n_symbols": 25,
+        "symbols_with_data": 25,
+        "source": "massive",
+        "pre_sealed_end": "2025-09-07",
+        "sealed_window_start": "2025-09-08",
+        "v0_1_0": {
+          "all_pre_sealed": {
+            "n": 999,
+            "mean": -0.06221210429416036,
+            "sd": 0.8684432185585588,
+            "se": 0.027476327491729704
+          },
+          "oos": {
+            "n": 320,
+            "mean": -0.07822444308230138,
+            "sd": 0.8118937253074154,
+            "se": 0.045386239007323054
+          },
+          "artefacts": {
+            "profitable_stop_exits": 4,
+            "risk_lt_1atr": {
+              "n": 66,
+              "mean": -0.6761268220112892,
+              "sd": 1.7132488135259836,
+              "se": 0.2108863508754861
+            },
+            "risk_ge_1atr": {
+              "n": 933,
+              "mean": -0.018784053523173756,
+              "sd": 0.7578355932304179,
+              "se": 0.024810423473480656
+            }
+          }
+        },
+        "V1": {
+          "all_pre_sealed": {
+            "n": 990,
+            "mean": -0.054748421648228976,
+            "sd": 0.7908340867121488,
+            "se": 0.02513435719934129
+          },
+          "oos": {
+            "n": 322,
+            "mean": -0.07365762810821719,
+            "sd": 0.7891019226999754,
+            "se": 0.04397493090220165
+          },
+          "artefacts": {
+            "profitable_stop_exits": 0,
+            "risk_lt_1atr": {
+              "n": 0,
+              "mean": 0.0,
+              "sd": 0.0,
+              "se": 0.0
+            },
+            "risk_ge_1atr": {
+              "n": 990,
+              "mean": -0.054748421648228976,
+              "sd": 0.7908340867121488,
+              "se": 0.02513435719934129
+            }
+          }
+        },
+        "F1": {
+          "n": 977,
+          "mean": -0.013464547162210362,
+          "sd": 0.36830680989161724,
+          "se": 0.011783178780035214,
+          "sigma": -1.142692257629492,
+          "n_base": 999,
+          "n_variant": 990,
+          "n_matched": 977,
+          "n_base_unmatched": 22,
+          "n_variant_unmatched": 13,
+          "passed": false,
+          "bar": "paired mean > 0 and >= 2.0 SE"
+        },
+        "F2": {
+          "risk_ge_1atr": {
+            "n": 911,
+            "mean": -0.0058458527602486595,
+            "sd": 0.26149249638900707,
+            "se": 0.008663632916414369,
+            "sigma": -0.6747576699807927,
+            "n_base": 999,
+            "n_variant": 990,
+            "n_matched": 977,
+            "n_base_unmatched": 22,
+            "n_variant_unmatched": 13
+          },
+          "risk_lt_1atr": {
+            "n": 66,
+            "mean": -0.11862561686201506,
+            "sd": 1.033197199317025,
+            "se": 0.12717778373960342,
+            "sigma": -0.9327542387819957,
+            "n_base": 999,
+            "n_variant": 990,
+            "n_matched": 977,
+            "n_base_unmatched": 22,
+            "n_variant_unmatched": 13
+          },
+          "passed": true,
+          "bar": "paired difference on the risk >= 1 ATR subset must itself be >= 2 SE"
+        },
+        "F3": {
+          "baseline_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-10",
+              "n_trades": 257,
+              "expectancy_r": 0.0175,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-10",
+              "end": "2021-03-10",
+              "n_trades": 292,
+              "expectancy_r": -0.1949,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-10",
+              "end": "2023-06-09",
+              "n_trades": 184,
+              "expectancy_r": 0.0379,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-09",
+              "end": "2025-09-07",
+              "n_trades": 266,
+              "expectancy_r": -0.0628,
+              "positive_with_floor": false
+            }
+          ],
+          "variant_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-10",
+              "n_trades": 257,
+              "expectancy_r": 0.0312,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-10",
+              "end": "2021-03-10",
+              "n_trades": 285,
+              "expectancy_r": -0.1643,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-10",
+              "end": "2023-06-09",
+              "n_trades": 180,
+              "expectancy_r": -0.0267,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-09",
+              "end": "2025-09-07",
+              "n_trades": 268,
+              "expectancy_r": -0.0395,
+              "positive_with_floor": false
+            }
+          ],
+          "fold_deltas_r": [
+            0.013699999999999997,
+            0.03059999999999999,
+            -0.0646,
+            0.023299999999999994
+          ],
+          "variant_positive_folds": 1,
+          "gate1_would_pass": false,
+          "redistribution_pattern": false,
+          "passed": false,
+          "bar": ">= 2 of 4 folds positive with n >= 15; and NOT (fold 2 improves < 0.05R while folds 1 and 3 both deteriorate)"
+        },
+        "F4": {
+          "profitable_stop_exits": 0,
+          "risk_below_half_atr": 0,
+          "examples": [],
+          "passed": true,
+          "bar": "0 profitable 'stop' exits and 0 trades with realised risk < 0.5 ATR"
+        },
+        "elapsed_s": 5.5
+      },
+      "universe_25_baseline_legacy": {
+        "unpaired_pre_sealed_delta": {
+          "difference_r": 0.007463682645931384,
+          "se": 0.037238212688807455,
+          "sigma": 0.20043074323421312,
+          "note": "raw-R, unpaired, NOT accounting-invariant: shown for context only; F1 is the paired fixed-denominator test above"
+        },
+        "snapshot_id": 1,
+        "snapshot_key": "universe_25_baseline_legacy",
+        "n_symbols": 25,
+        "symbols_with_data": 25,
+        "source": "massive",
+        "pre_sealed_end": "2025-09-06",
+        "sealed_window_start": "2025-09-07",
+        "v0_1_0": {
+          "all_pre_sealed": {
+            "n": 999,
+            "mean": -0.06221210429416036,
+            "sd": 0.8684432185585588,
+            "se": 0.027476327491729704
+          },
+          "oos": {
+            "n": 320,
+            "mean": -0.07822444308230138,
+            "sd": 0.8118937253074154,
+            "se": 0.045386239007323054
+          },
+          "artefacts": {
+            "profitable_stop_exits": 4,
+            "risk_lt_1atr": {
+              "n": 66,
+              "mean": -0.6761268220112892,
+              "sd": 1.7132488135259836,
+              "se": 0.2108863508754861
+            },
+            "risk_ge_1atr": {
+              "n": 933,
+              "mean": -0.018784053523173756,
+              "sd": 0.7578355932304179,
+              "se": 0.024810423473480656
+            }
+          }
+        },
+        "V1": {
+          "all_pre_sealed": {
+            "n": 990,
+            "mean": -0.054748421648228976,
+            "sd": 0.7908340867121488,
+            "se": 0.02513435719934129
+          },
+          "oos": {
+            "n": 322,
+            "mean": -0.07365762810821719,
+            "sd": 0.7891019226999754,
+            "se": 0.04397493090220165
+          },
+          "artefacts": {
+            "profitable_stop_exits": 0,
+            "risk_lt_1atr": {
+              "n": 0,
+              "mean": 0.0,
+              "sd": 0.0,
+              "se": 0.0
+            },
+            "risk_ge_1atr": {
+              "n": 990,
+              "mean": -0.054748421648228976,
+              "sd": 0.7908340867121488,
+              "se": 0.02513435719934129
+            }
+          }
+        },
+        "F1": {
+          "n": 977,
+          "mean": -0.013464547162210362,
+          "sd": 0.36830680989161724,
+          "se": 0.011783178780035214,
+          "sigma": -1.142692257629492,
+          "n_base": 999,
+          "n_variant": 990,
+          "n_matched": 977,
+          "n_base_unmatched": 22,
+          "n_variant_unmatched": 13,
+          "passed": false,
+          "bar": "paired mean > 0 and >= 2.0 SE"
+        },
+        "F2": {
+          "risk_ge_1atr": {
+            "n": 911,
+            "mean": -0.0058458527602486595,
+            "sd": 0.26149249638900707,
+            "se": 0.008663632916414369,
+            "sigma": -0.6747576699807927,
+            "n_base": 999,
+            "n_variant": 990,
+            "n_matched": 977,
+            "n_base_unmatched": 22,
+            "n_variant_unmatched": 13
+          },
+          "risk_lt_1atr": {
+            "n": 66,
+            "mean": -0.11862561686201506,
+            "sd": 1.033197199317025,
+            "se": 0.12717778373960342,
+            "sigma": -0.9327542387819957,
+            "n_base": 999,
+            "n_variant": 990,
+            "n_matched": 977,
+            "n_base_unmatched": 22,
+            "n_variant_unmatched": 13
+          },
+          "passed": true,
+          "bar": "paired difference on the risk >= 1 ATR subset must itself be >= 2 SE"
+        },
+        "F3": {
+          "baseline_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-09",
+              "n_trades": 257,
+              "expectancy_r": 0.0175,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-09",
+              "end": "2021-03-09",
+              "n_trades": 291,
+              "expectancy_r": -0.1959,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-09",
+              "end": "2023-06-08",
+              "n_trades": 185,
+              "expectancy_r": 0.0383,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-08",
+              "end": "2025-09-06",
+              "n_trades": 266,
+              "expectancy_r": -0.0628,
+              "positive_with_floor": false
+            }
+          ],
+          "variant_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-09",
+              "n_trades": 257,
+              "expectancy_r": 0.0312,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-09",
+              "end": "2021-03-09",
+              "n_trades": 284,
+              "expectancy_r": -0.1653,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-09",
+              "end": "2023-06-08",
+              "n_trades": 181,
+              "expectancy_r": -0.0258,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-08",
+              "end": "2025-09-06",
+              "n_trades": 268,
+              "expectancy_r": -0.0395,
+              "positive_with_floor": false
+            }
+          ],
+          "fold_deltas_r": [
+            0.013699999999999997,
+            0.03059999999999999,
+            -0.0641,
+            0.023299999999999994
+          ],
+          "variant_positive_folds": 1,
+          "gate1_would_pass": false,
+          "redistribution_pattern": false,
+          "passed": false,
+          "bar": ">= 2 of 4 folds positive with n >= 15; and NOT (fold 2 improves < 0.05R while folds 1 and 3 both deteriorate)"
+        },
+        "F4": {
+          "profitable_stop_exits": 0,
+          "risk_below_half_atr": 0,
+          "examples": [],
+          "passed": true,
+          "bar": "0 profitable 'stop' exits and 0 trades with realised risk < 0.5 ATR"
+        },
+        "elapsed_s": 5.1
+      },
+      "universe_25_meta_continuity_corrected": {
+        "unpaired_pre_sealed_delta": {
+          "difference_r": 0.006794014474717842,
+          "se": 0.036687059596735856,
+          "sigma": 0.18518830752307888,
+          "note": "raw-R, unpaired, NOT accounting-invariant: shown for context only; F1 is the paired fixed-denominator test above"
+        },
+        "snapshot_id": 4,
+        "snapshot_key": "universe_25_meta_continuity_corrected",
+        "n_symbols": 25,
+        "symbols_with_data": 25,
+        "source": [
+          "massive",
+          "continuity_bridge:1"
+        ],
+        "pre_sealed_end": "2025-09-07",
+        "sealed_window_start": "2025-09-08",
+        "v0_1_0": {
+          "all_pre_sealed": {
+            "n": 1031,
+            "mean": -0.06039551403087986,
+            "sd": 0.8681078687837261,
+            "se": 0.027036119674709272
+          },
+          "oos": {
+            "n": 323,
+            "mean": -0.08540482361907656,
+            "sd": 0.8117918225801908,
+            "se": 0.04516930528537116
+          },
+          "artefacts": {
+            "profitable_stop_exits": 4,
+            "risk_lt_1atr": {
+              "n": 67,
+              "mean": -0.6812952891983111,
+              "sd": 1.7007463710435646,
+              "se": 0.2077792391413948
+            },
+            "risk_ge_1atr": {
+              "n": 964,
+              "mean": -0.01724169148293599,
+              "sd": 0.7609957328345609,
+              "se": 0.024510022198406936
+            }
+          }
+        },
+        "V1": {
+          "all_pre_sealed": {
+            "n": 1021,
+            "mean": -0.053601499556162016,
+            "sd": 0.7924035176977832,
+            "se": 0.024798963179722792
+          },
+          "oos": {
+            "n": 325,
+            "mean": -0.07478997529509462,
+            "sd": 0.7894095041253303,
+            "se": 0.04378856068403816
+          },
+          "artefacts": {
+            "profitable_stop_exits": 0,
+            "risk_lt_1atr": {
+              "n": 0,
+              "mean": 0.0,
+              "sd": 0.0,
+              "se": 0.0
+            },
+            "risk_ge_1atr": {
+              "n": 1021,
+              "mean": -0.053601499556162016,
+              "sd": 0.7924035176977832,
+              "se": 0.024798963179722792
+            }
+          }
+        },
+        "F1": {
+          "n": 1007,
+          "mean": -0.012116458777260603,
+          "sd": 0.37220849696828096,
+          "se": 0.011729285242049546,
+          "sigma": -1.0330091328858675,
+          "n_base": 1031,
+          "n_variant": 1021,
+          "n_matched": 1007,
+          "n_base_unmatched": 24,
+          "n_variant_unmatched": 14,
+          "passed": false,
+          "bar": "paired mean > 0 and >= 2.0 SE"
+        },
+        "F2": {
+          "risk_ge_1atr": {
+            "n": 940,
+            "mean": -0.004061322319298303,
+            "sd": 0.27083945299922885,
+            "se": 0.008833808924091763,
+            "sigma": -0.4597475850108296,
+            "n_base": 1031,
+            "n_variant": 1021,
+            "n_matched": 1007,
+            "n_base_unmatched": 24,
+            "n_variant_unmatched": 14
+          },
+          "risk_lt_1atr": {
+            "n": 67,
+            "mean": -0.12512882102329886,
+            "sd": 1.0267208995203958,
+            "se": 0.12543392180341265,
+            "sigma": -0.9975676374004159,
+            "n_base": 1031,
+            "n_variant": 1021,
+            "n_matched": 1007,
+            "n_base_unmatched": 24,
+            "n_variant_unmatched": 14
+          },
+          "passed": true,
+          "bar": "paired difference on the risk >= 1 ATR subset must itself be >= 2 SE"
+        },
+        "F3": {
+          "baseline_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-10",
+              "n_trades": 269,
+              "expectancy_r": 0.0148,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-10",
+              "end": "2021-03-10",
+              "n_trades": 307,
+              "expectancy_r": -0.1734,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-10",
+              "end": "2023-06-09",
+              "n_trades": 189,
+              "expectancy_r": 0.0196,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-09",
+              "end": "2025-09-07",
+              "n_trades": 266,
+              "expectancy_r": -0.0628,
+              "positive_with_floor": false
+            }
+          ],
+          "variant_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-10",
+              "n_trades": 269,
+              "expectancy_r": 0.0283,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-10",
+              "end": "2021-03-10",
+              "n_trades": 300,
+              "expectancy_r": -0.15,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-10",
+              "end": "2023-06-09",
+              "n_trades": 184,
+              "expectancy_r": -0.0367,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-09",
+              "end": "2025-09-07",
+              "n_trades": 268,
+              "expectancy_r": -0.0395,
+              "positive_with_floor": false
+            }
+          ],
+          "fold_deltas_r": [
+            0.013499999999999998,
+            0.023400000000000004,
+            -0.0563,
+            0.023299999999999994
+          ],
+          "variant_positive_folds": 1,
+          "gate1_would_pass": false,
+          "redistribution_pattern": false,
+          "passed": false,
+          "bar": ">= 2 of 4 folds positive with n >= 15; and NOT (fold 2 improves < 0.05R while folds 1 and 3 both deteriorate)"
+        },
+        "F4": {
+          "profitable_stop_exits": 0,
+          "risk_below_half_atr": 0,
+          "examples": [],
+          "passed": true,
+          "bar": "0 profitable 'stop' exits and 0 trades with realised risk < 0.5 ATR"
+        },
+        "elapsed_s": 5.3
+      }
+    },
+    "F5": {
+      "same_sign_on_all": true,
+      "all_F1_to_F4_hold": false,
+      "snapshots_run": [
+        "universe_24_ex_meta",
+        "universe_25_baseline",
+        "universe_25_baseline_legacy",
+        "universe_25_meta_continuity_corrected"
+      ],
+      "passed": false
+    },
+    "verdict": {
+      "F1": false,
+      "F2": true,
+      "F3": false,
+      "F4": true,
+      "F5": false
+    },
+    "survives": false,
+    "stopping_rule": {
+      "step1_F1_on_first_two_snapshots": false,
+      "note": "F1-F4 were computed on all four snapshots for the record; the rule binds on step 1."
+    }
+  },
+  "V2": {
+    "label": "V2",
+    "params": {
+      "min_risk_atr": 1.0
+    },
+    "snapshots": {
+      "universe_24_ex_meta": {
+        "unpaired_pre_sealed_delta": {
+          "difference_r": 0.04862358631260162,
+          "se": 0.03741734408701289,
+          "sigma": 1.2994932563767476,
+          "note": "raw-R, unpaired, NOT accounting-invariant: shown for context only; F1 is the paired fixed-denominator test above"
+        },
+        "snapshot_id": 3,
+        "snapshot_key": "universe_24_ex_meta",
+        "n_symbols": 24,
+        "symbols_with_data": 24,
+        "source": "massive",
+        "pre_sealed_end": "2025-09-07",
+        "sealed_window_start": "2025-09-08",
+        "v0_1_0": {
+          "all_pre_sealed": {
+            "n": 984,
+            "mean": -0.062062762467475524,
+            "sd": 0.8724640522201121,
+            "se": 0.02781313813402099
+          },
+          "oos": {
+            "n": 309,
+            "mean": -0.08373905344046272,
+            "sd": 0.8201700118069507,
+            "se": 0.046657841800844854
+          },
+          "artefacts": {
+            "profitable_stop_exits": 4,
+            "risk_lt_1atr": {
+              "n": 65,
+              "mean": -0.6709645434057502,
+              "sd": 1.7260643119790395,
+              "se": 0.21409192882022487
+            },
+            "risk_ge_1atr": {
+              "n": 919,
+              "mean": -0.018995715937564904,
+              "sd": 0.7611009513966811,
+              "se": 0.02510640377619576
+            }
+          }
+        },
+        "V2": {
+          "all_pre_sealed": {
+            "n": 936,
+            "mean": -0.013439176154873899,
+            "sd": 0.7657622467720012,
+            "se": 0.025029722045276204
+          },
+          "oos": {
+            "n": 291,
+            "mean": -0.013555964006539696,
+            "sd": 0.7784110591117684,
+            "se": 0.045631264412854325
+          },
+          "artefacts": {
+            "profitable_stop_exits": 0,
+            "risk_lt_1atr": {
+              "n": 0,
+              "mean": 0.0,
+              "sd": 0.0,
+              "se": 0.0
+            },
+            "risk_ge_1atr": {
+              "n": 936,
+              "mean": -0.013439176154873899,
+              "sd": 0.7657622467720012,
+              "se": 0.025029722045276204
+            }
+          }
+        },
+        "F1": {
+          "n": 914,
+          "mean": 0.0,
+          "sd": 0.0,
+          "se": 0.0,
+          "sigma": 0.0,
+          "n_base": 984,
+          "n_variant": 936,
+          "n_matched": 914,
+          "n_base_unmatched": 70,
+          "n_variant_unmatched": 22,
+          "passed": false,
+          "bar": "paired mean > 0 and >= 2.0 SE"
+        },
+        "F2": {
+          "risk_ge_1atr": {
+            "n": 914,
+            "mean": 0.0,
+            "sd": 0.0,
+            "se": 0.0,
+            "sigma": 0.0,
+            "n_base": 984,
+            "n_variant": 936,
+            "n_matched": 914,
+            "n_base_unmatched": 70,
+            "n_variant_unmatched": 22
+          },
+          "risk_lt_1atr": {
+            "n": 0,
+            "mean": 0.0,
+            "sd": 0.0,
+            "se": 0.0,
+            "sigma": 0.0,
+            "n_base": 984,
+            "n_variant": 936,
+            "n_matched": 914,
+            "n_base_unmatched": 70,
+            "n_variant_unmatched": 22
+          },
+          "passed": true,
+          "bar": "paired difference on the risk >= 1 ATR subset must itself be >= 2 SE"
+        },
+        "F3": {
+          "baseline_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-10",
+              "n_trades": 257,
+              "expectancy_r": 0.0175,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-10",
+              "end": "2021-03-10",
+              "n_trades": 292,
+              "expectancy_r": -0.1949,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-10",
+              "end": "2023-06-09",
+              "n_trades": 181,
+              "expectancy_r": 0.0436,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-09",
+              "end": "2025-09-07",
+              "n_trades": 254,
+              "expectancy_r": -0.0651,
+              "positive_with_floor": false
+            }
+          ],
+          "variant_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-10",
+              "n_trades": 249,
+              "expectancy_r": 0.006,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-10",
+              "end": "2021-03-10",
+              "n_trades": 275,
+              "expectancy_r": -0.1099,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-10",
+              "end": "2023-06-09",
+              "n_trades": 176,
+              "expectancy_r": 0.0612,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-09",
+              "end": "2025-09-07",
+              "n_trades": 236,
+              "expectancy_r": 0.0228,
+              "positive_with_floor": true
+            }
+          ],
+          "fold_deltas_r": [
+            -0.011500000000000002,
+            0.08499999999999999,
+            0.017599999999999998,
+            0.0879
+          ],
+          "variant_positive_folds": 3,
+          "gate1_would_pass": true,
+          "redistribution_pattern": false,
+          "passed": true,
+          "bar": ">= 2 of 4 folds positive with n >= 15; and NOT (fold 2 improves < 0.05R while folds 1 and 3 both deteriorate)"
+        },
+        "F4": {
+          "profitable_stop_exits": 0,
+          "risk_below_half_atr": 0,
+          "examples": [],
+          "passed": true,
+          "bar": "0 profitable 'stop' exits and 0 trades with realised risk < 0.5 ATR"
+        },
+        "elapsed_s": 5.2
+      },
+      "universe_25_baseline": {
+        "unpaired_pre_sealed_delta": {
+          "difference_r": 0.04889891706104358,
+          "se": 0.03697246650875211,
+          "sigma": 1.3225765462379482,
+          "note": "raw-R, unpaired, NOT accounting-invariant: shown for context only; F1 is the paired fixed-denominator test above"
+        },
+        "snapshot_id": 2,
+        "snapshot_key": "universe_25_baseline",
+        "n_symbols": 25,
+        "symbols_with_data": 25,
+        "source": "massive",
+        "pre_sealed_end": "2025-09-07",
+        "sealed_window_start": "2025-09-08",
+        "v0_1_0": {
+          "all_pre_sealed": {
+            "n": 999,
+            "mean": -0.06221210429416036,
+            "sd": 0.8684432185585588,
+            "se": 0.027476327491729704
+          },
+          "oos": {
+            "n": 320,
+            "mean": -0.07822444308230138,
+            "sd": 0.8118937253074154,
+            "se": 0.045386239007323054
+          },
+          "artefacts": {
+            "profitable_stop_exits": 4,
+            "risk_lt_1atr": {
+              "n": 66,
+              "mean": -0.6761268220112892,
+              "sd": 1.7132488135259836,
+              "se": 0.2108863508754861
+            },
+            "risk_ge_1atr": {
+              "n": 933,
+              "mean": -0.018784053523173756,
+              "sd": 0.7578355932304179,
+              "se": 0.024810423473480656
+            }
+          }
+        },
+        "V2": {
+          "all_pre_sealed": {
+            "n": 950,
+            "mean": -0.013313187233116778,
+            "sd": 0.7625050635521148,
+            "se": 0.024738931005765293
+          },
+          "oos": {
+            "n": 301,
+            "mean": -0.0069420759726418575,
+            "sd": 0.7694484999672004,
+            "se": 0.04435027422979917
+          },
+          "artefacts": {
+            "profitable_stop_exits": 0,
+            "risk_lt_1atr": {
+              "n": 0,
+              "mean": 0.0,
+              "sd": 0.0,
+              "se": 0.0
+            },
+            "risk_ge_1atr": {
+              "n": 950,
+              "mean": -0.013313187233116778,
+              "sd": 0.7625050635521148,
+              "se": 0.024738931005765293
+            }
+          }
+        },
+        "F1": {
+          "n": 928,
+          "mean": 0.0,
+          "sd": 0.0,
+          "se": 0.0,
+          "sigma": 0.0,
+          "n_base": 999,
+          "n_variant": 950,
+          "n_matched": 928,
+          "n_base_unmatched": 71,
+          "n_variant_unmatched": 22,
+          "passed": false,
+          "bar": "paired mean > 0 and >= 2.0 SE"
+        },
+        "F2": {
+          "risk_ge_1atr": {
+            "n": 928,
+            "mean": 0.0,
+            "sd": 0.0,
+            "se": 0.0,
+            "sigma": 0.0,
+            "n_base": 999,
+            "n_variant": 950,
+            "n_matched": 928,
+            "n_base_unmatched": 71,
+            "n_variant_unmatched": 22
+          },
+          "risk_lt_1atr": {
+            "n": 0,
+            "mean": 0.0,
+            "sd": 0.0,
+            "se": 0.0,
+            "sigma": 0.0,
+            "n_base": 999,
+            "n_variant": 950,
+            "n_matched": 928,
+            "n_base_unmatched": 71,
+            "n_variant_unmatched": 22
+          },
+          "passed": true,
+          "bar": "paired difference on the risk >= 1 ATR subset must itself be >= 2 SE"
+        },
+        "F3": {
+          "baseline_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-10",
+              "n_trades": 257,
+              "expectancy_r": 0.0175,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-10",
+              "end": "2021-03-10",
+              "n_trades": 292,
+              "expectancy_r": -0.1949,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-10",
+              "end": "2023-06-09",
+              "n_trades": 184,
+              "expectancy_r": 0.0379,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-09",
+              "end": "2025-09-07",
+              "n_trades": 266,
+              "expectancy_r": -0.0628,
+              "positive_with_floor": false
+            }
+          ],
+          "variant_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-10",
+              "n_trades": 249,
+              "expectancy_r": 0.006,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-10",
+              "end": "2021-03-10",
+              "n_trades": 275,
+              "expectancy_r": -0.1099,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-10",
+              "end": "2023-06-09",
+              "n_trades": 179,
+              "expectancy_r": 0.0551,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-09",
+              "end": "2025-09-07",
+              "n_trades": 247,
+              "expectancy_r": 0.0252,
+              "positive_with_floor": true
+            }
+          ],
+          "fold_deltas_r": [
+            -0.011500000000000002,
+            0.08499999999999999,
+            0.0172,
+            0.088
+          ],
+          "variant_positive_folds": 3,
+          "gate1_would_pass": true,
+          "redistribution_pattern": false,
+          "passed": true,
+          "bar": ">= 2 of 4 folds positive with n >= 15; and NOT (fold 2 improves < 0.05R while folds 1 and 3 both deteriorate)"
+        },
+        "F4": {
+          "profitable_stop_exits": 0,
+          "risk_below_half_atr": 0,
+          "examples": [],
+          "passed": true,
+          "bar": "0 profitable 'stop' exits and 0 trades with realised risk < 0.5 ATR"
+        },
+        "elapsed_s": 5.1
+      },
+      "universe_25_baseline_legacy": {
+        "unpaired_pre_sealed_delta": {
+          "difference_r": 0.04889891706104358,
+          "se": 0.03697246650875211,
+          "sigma": 1.3225765462379482,
+          "note": "raw-R, unpaired, NOT accounting-invariant: shown for context only; F1 is the paired fixed-denominator test above"
+        },
+        "snapshot_id": 1,
+        "snapshot_key": "universe_25_baseline_legacy",
+        "n_symbols": 25,
+        "symbols_with_data": 25,
+        "source": "massive",
+        "pre_sealed_end": "2025-09-06",
+        "sealed_window_start": "2025-09-07",
+        "v0_1_0": {
+          "all_pre_sealed": {
+            "n": 999,
+            "mean": -0.06221210429416036,
+            "sd": 0.8684432185585588,
+            "se": 0.027476327491729704
+          },
+          "oos": {
+            "n": 320,
+            "mean": -0.07822444308230138,
+            "sd": 0.8118937253074154,
+            "se": 0.045386239007323054
+          },
+          "artefacts": {
+            "profitable_stop_exits": 4,
+            "risk_lt_1atr": {
+              "n": 66,
+              "mean": -0.6761268220112892,
+              "sd": 1.7132488135259836,
+              "se": 0.2108863508754861
+            },
+            "risk_ge_1atr": {
+              "n": 933,
+              "mean": -0.018784053523173756,
+              "sd": 0.7578355932304179,
+              "se": 0.024810423473480656
+            }
+          }
+        },
+        "V2": {
+          "all_pre_sealed": {
+            "n": 950,
+            "mean": -0.013313187233116778,
+            "sd": 0.7625050635521148,
+            "se": 0.024738931005765293
+          },
+          "oos": {
+            "n": 301,
+            "mean": -0.0069420759726418575,
+            "sd": 0.7694484999672004,
+            "se": 0.04435027422979917
+          },
+          "artefacts": {
+            "profitable_stop_exits": 0,
+            "risk_lt_1atr": {
+              "n": 0,
+              "mean": 0.0,
+              "sd": 0.0,
+              "se": 0.0
+            },
+            "risk_ge_1atr": {
+              "n": 950,
+              "mean": -0.013313187233116778,
+              "sd": 0.7625050635521148,
+              "se": 0.024738931005765293
+            }
+          }
+        },
+        "F1": {
+          "n": 928,
+          "mean": 0.0,
+          "sd": 0.0,
+          "se": 0.0,
+          "sigma": 0.0,
+          "n_base": 999,
+          "n_variant": 950,
+          "n_matched": 928,
+          "n_base_unmatched": 71,
+          "n_variant_unmatched": 22,
+          "passed": false,
+          "bar": "paired mean > 0 and >= 2.0 SE"
+        },
+        "F2": {
+          "risk_ge_1atr": {
+            "n": 928,
+            "mean": 0.0,
+            "sd": 0.0,
+            "se": 0.0,
+            "sigma": 0.0,
+            "n_base": 999,
+            "n_variant": 950,
+            "n_matched": 928,
+            "n_base_unmatched": 71,
+            "n_variant_unmatched": 22
+          },
+          "risk_lt_1atr": {
+            "n": 0,
+            "mean": 0.0,
+            "sd": 0.0,
+            "se": 0.0,
+            "sigma": 0.0,
+            "n_base": 999,
+            "n_variant": 950,
+            "n_matched": 928,
+            "n_base_unmatched": 71,
+            "n_variant_unmatched": 22
+          },
+          "passed": true,
+          "bar": "paired difference on the risk >= 1 ATR subset must itself be >= 2 SE"
+        },
+        "F3": {
+          "baseline_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-09",
+              "n_trades": 257,
+              "expectancy_r": 0.0175,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-09",
+              "end": "2021-03-09",
+              "n_trades": 291,
+              "expectancy_r": -0.1959,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-09",
+              "end": "2023-06-08",
+              "n_trades": 185,
+              "expectancy_r": 0.0383,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-08",
+              "end": "2025-09-06",
+              "n_trades": 266,
+              "expectancy_r": -0.0628,
+              "positive_with_floor": false
+            }
+          ],
+          "variant_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-09",
+              "n_trades": 249,
+              "expectancy_r": 0.006,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-09",
+              "end": "2021-03-09",
+              "n_trades": 274,
+              "expectancy_r": -0.1107,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-09",
+              "end": "2023-06-08",
+              "n_trades": 180,
+              "expectancy_r": 0.0553,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-08",
+              "end": "2025-09-06",
+              "n_trades": 247,
+              "expectancy_r": 0.0252,
+              "positive_with_floor": true
+            }
+          ],
+          "fold_deltas_r": [
+            -0.011500000000000002,
+            0.08519999999999998,
+            0.017,
+            0.088
+          ],
+          "variant_positive_folds": 3,
+          "gate1_would_pass": true,
+          "redistribution_pattern": false,
+          "passed": true,
+          "bar": ">= 2 of 4 folds positive with n >= 15; and NOT (fold 2 improves < 0.05R while folds 1 and 3 both deteriorate)"
+        },
+        "F4": {
+          "profitable_stop_exits": 0,
+          "risk_below_half_atr": 0,
+          "examples": [],
+          "passed": true,
+          "bar": "0 profitable 'stop' exits and 0 trades with realised risk < 0.5 ATR"
+        },
+        "elapsed_s": 5.1
+      },
+      "universe_25_meta_continuity_corrected": {
+        "unpaired_pre_sealed_delta": {
+          "difference_r": 0.048425079246078515,
+          "se": 0.03644434167501994,
+          "sigma": 1.328740677438839,
+          "note": "raw-R, unpaired, NOT accounting-invariant: shown for context only; F1 is the paired fixed-denominator test above"
+        },
+        "snapshot_id": 4,
+        "snapshot_key": "universe_25_meta_continuity_corrected",
+        "n_symbols": 25,
+        "symbols_with_data": 25,
+        "source": [
+          "massive",
+          "continuity_bridge:1"
+        ],
+        "pre_sealed_end": "2025-09-07",
+        "sealed_window_start": "2025-09-08",
+        "v0_1_0": {
+          "all_pre_sealed": {
+            "n": 1031,
+            "mean": -0.06039551403087986,
+            "sd": 0.8681078687837261,
+            "se": 0.027036119674709272
+          },
+          "oos": {
+            "n": 323,
+            "mean": -0.08540482361907656,
+            "sd": 0.8117918225801908,
+            "se": 0.04516930528537116
+          },
+          "artefacts": {
+            "profitable_stop_exits": 4,
+            "risk_lt_1atr": {
+              "n": 67,
+              "mean": -0.6812952891983111,
+              "sd": 1.7007463710435646,
+              "se": 0.2077792391413948
+            },
+            "risk_ge_1atr": {
+              "n": 964,
+              "mean": -0.01724169148293599,
+              "sd": 0.7609957328345609,
+              "se": 0.024510022198406936
+            }
+          }
+        },
+        "V2": {
+          "all_pre_sealed": {
+            "n": 981,
+            "mean": -0.011970434784801342,
+            "sd": 0.7654350043421361,
+            "se": 0.024438458892908802
+          },
+          "oos": {
+            "n": 304,
+            "mean": -0.015274674705231861,
+            "sd": 0.7704976092427502,
+            "se": 0.044191068617484716
+          },
+          "artefacts": {
+            "profitable_stop_exits": 0,
+            "risk_lt_1atr": {
+              "n": 0,
+              "mean": 0.0,
+              "sd": 0.0,
+              "se": 0.0
+            },
+            "risk_ge_1atr": {
+              "n": 981,
+              "mean": -0.011970434784801342,
+              "sd": 0.7654350043421361,
+              "se": 0.024438458892908802
+            }
+          }
+        },
+        "F1": {
+          "n": 959,
+          "mean": 0.0,
+          "sd": 0.0,
+          "se": 0.0,
+          "sigma": 0.0,
+          "n_base": 1031,
+          "n_variant": 981,
+          "n_matched": 959,
+          "n_base_unmatched": 72,
+          "n_variant_unmatched": 22,
+          "passed": false,
+          "bar": "paired mean > 0 and >= 2.0 SE"
+        },
+        "F2": {
+          "risk_ge_1atr": {
+            "n": 959,
+            "mean": 0.0,
+            "sd": 0.0,
+            "se": 0.0,
+            "sigma": 0.0,
+            "n_base": 1031,
+            "n_variant": 981,
+            "n_matched": 959,
+            "n_base_unmatched": 72,
+            "n_variant_unmatched": 22
+          },
+          "risk_lt_1atr": {
+            "n": 0,
+            "mean": 0.0,
+            "sd": 0.0,
+            "se": 0.0,
+            "sigma": 0.0,
+            "n_base": 1031,
+            "n_variant": 981,
+            "n_matched": 959,
+            "n_base_unmatched": 72,
+            "n_variant_unmatched": 22
+          },
+          "passed": true,
+          "bar": "paired difference on the risk >= 1 ATR subset must itself be >= 2 SE"
+        },
+        "F3": {
+          "baseline_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-10",
+              "n_trades": 269,
+              "expectancy_r": 0.0148,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-10",
+              "end": "2021-03-10",
+              "n_trades": 307,
+              "expectancy_r": -0.1734,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-10",
+              "end": "2023-06-09",
+              "n_trades": 189,
+              "expectancy_r": 0.0196,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-09",
+              "end": "2025-09-07",
+              "n_trades": 266,
+              "expectancy_r": -0.0628,
+              "positive_with_floor": false
+            }
+          ],
+          "variant_folds": [
+            {
+              "fold": 1,
+              "start": "2016-09-10",
+              "end": "2018-12-10",
+              "n_trades": 260,
+              "expectancy_r": 0.0077,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 2,
+              "start": "2018-12-10",
+              "end": "2021-03-10",
+              "n_trades": 290,
+              "expectancy_r": -0.0916,
+              "positive_with_floor": false
+            },
+            {
+              "fold": 3,
+              "start": "2021-03-10",
+              "end": "2023-06-09",
+              "n_trades": 184,
+              "expectancy_r": 0.0357,
+              "positive_with_floor": true
+            },
+            {
+              "fold": 4,
+              "start": "2023-06-09",
+              "end": "2025-09-07",
+              "n_trades": 247,
+              "expectancy_r": 0.0252,
+              "positive_with_floor": true
+            }
+          ],
+          "fold_deltas_r": [
+            -0.0071,
+            0.0818,
+            0.016100000000000003,
+            0.088
+          ],
+          "variant_positive_folds": 3,
+          "gate1_would_pass": true,
+          "redistribution_pattern": false,
+          "passed": true,
+          "bar": ">= 2 of 4 folds positive with n >= 15; and NOT (fold 2 improves < 0.05R while folds 1 and 3 both deteriorate)"
+        },
+        "F4": {
+          "profitable_stop_exits": 0,
+          "risk_below_half_atr": 0,
+          "examples": [],
+          "passed": true,
+          "bar": "0 profitable 'stop' exits and 0 trades with realised risk < 0.5 ATR"
+        },
+        "elapsed_s": 5.2
+      }
+    },
+    "F5": {
+      "same_sign_on_all": true,
+      "all_F1_to_F4_hold": false,
+      "snapshots_run": [
+        "universe_24_ex_meta",
+        "universe_25_baseline",
+        "universe_25_baseline_legacy",
+        "universe_25_meta_continuity_corrected"
+      ],
+      "passed": false
+    },
+    "verdict": {
+      "F1": false,
+      "F2": true,
+      "F3": true,
+      "F4": true,
+      "F5": false
+    },
+    "survives": false
+  },
+  "verdict": {
+    "V1": {
+      "F1": false,
+      "F2": true,
+      "F3": false,
+      "F4": true,
+      "F5": false
+    },
+    "V2": {
+      "F1": false,
+      "F2": true,
+      "F3": true,
+      "F4": true,
+      "F5": false
+    },
+    "survivor": null,
+    "decision": "STOP \u2014 both variants dead; write \u00a711 null disposition",
+    "sealed_looks_spent_by_stage_a": 0
+  },
+  "sealed_test_rows_on_copy": {
+    "before": 22,
+    "after": 22
+  }
+}
