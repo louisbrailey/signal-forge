@@ -9,6 +9,7 @@ optional breadth figure supplied by the scanner (share of the universe above its
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
@@ -60,9 +61,18 @@ NEUTRAL = RegimeState(Trend.NEUTRAL, Vol.LOW, date(1970, 1, 1))
 
 
 def regime_from_proxy(
-    proxy: PriceSeries, t: int, *, breadth_pct: float | None = None
+    proxy: PriceSeries,
+    t: int,
+    *,
+    breadth_pct: float | None = None,
+    _vol20: Sequence[float] | None = None,
 ) -> RegimeState:
-    """Point-in-time: uses only ``proxy`` bars at indices <= ``t``."""
+    """Point-in-time: uses only ``proxy`` bars at indices <= ``t``.
+
+    ``_vol20`` is ``regime_lookup``'s cache of ``realized_vol(proxy, i, 20)`` for
+    every index. Each entry is the same call on the same bars, so the result is
+    identical; it only stops a full-series lookup recomputing ~50 trailing vols
+    per session."""
     as_of = proxy.dates[t]
     sma50 = sma(proxy, t, 50)
     sma200 = sma(proxy, t, 200)
@@ -76,8 +86,11 @@ def regime_from_proxy(
         elif sma50 < sma200 and not rising:
             trend = Trend.BEAR
 
-    rv = realized_vol(proxy, t, 20)
-    hist = [realized_vol(proxy, i, 20) for i in range(max(20, t - 252), t + 1, 5)]
+    def vol20(i: int) -> float:
+        return _vol20[i] if _vol20 is not None else realized_vol(proxy, i, 20)
+
+    rv = vol20(t)
+    hist = [vol20(i) for i in range(max(20, t - 252), t + 1, 5)]
     hist = [h for h in hist if h == h]
     vol = Vol.LOW
     if rv == rv and hist:
@@ -98,4 +111,5 @@ def regime_from_proxy(
 
 def regime_lookup(proxy: PriceSeries) -> dict[date, RegimeState]:
     """A per-session regime map for the backtest engine (t-relative, no look-ahead)."""
-    return {proxy.dates[t]: regime_from_proxy(proxy, t) for t in range(len(proxy))}
+    vol20 = [realized_vol(proxy, i, 20) for i in range(len(proxy))]
+    return {proxy.dates[t]: regime_from_proxy(proxy, t, _vol20=vol20) for t in range(len(proxy))}

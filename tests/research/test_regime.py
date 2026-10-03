@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from signalforge.data.series import PriceSeries
-from signalforge.research.regime import Trend, regime_from_proxy
+from signalforge.research.regime import Trend, Vol, regime_from_proxy, regime_lookup
 
 
 def _series(fn) -> PriceSeries:  # type: ignore[no-untyped-def]
@@ -44,3 +44,18 @@ def test_no_lookahead_in_regime() -> None:
         full = regime_from_proxy(proxy, t)
         assert truncated.trend == full.trend
         assert truncated.vol == full.vol
+
+
+def test_regime_lookup_equals_the_per_session_classification() -> None:
+    """``regime_lookup`` caches each session's 20-day vol instead of letting every
+    session recompute ~50 trailing ones. The cache must be invisible: every
+    state, including vol and trend flips on a choppy path, is exactly what
+    ``regime_from_proxy`` returns for that session alone."""
+    import math
+
+    proxy = _series(lambda i: 100.0 * (1.0004**i) * (1.0 + 0.03 * math.sin(i / 9.0)))
+    lookup = regime_lookup(proxy)
+    assert list(lookup) == list(proxy.dates)
+    for t, d in enumerate(proxy.dates):
+        assert lookup[d] == regime_from_proxy(proxy, t)
+    assert {s.vol for s in lookup.values()} == {Vol.LOW, Vol.HIGH}  # both branches exercised
