@@ -47,8 +47,11 @@ jobs:
       - name: detect-secrets
         run: make secrets
 
+      # -n auto: one pytest-xdist worker per runner vCPU. Every test already runs
+      # in its own tmp data dir + SQLite file (tests/conftest.py), so workers
+      # share no state; pytest-cov combines the per-worker coverage data.
       - name: Pytest (with coverage)
-        run: uv run pytest --cov-report=xml
+        run: uv run pytest -n auto --cov-report=xml
 
       - name: Safety invariants must pass
         run: uv run pytest -m safety -q

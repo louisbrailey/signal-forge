@@ -5,9 +5,24 @@ from datetime import date
 import httpx
 import pytest
 
+from signalforge.data.adapters import massive as massive_module
 from signalforge.data.adapters.base import AdapterError, FeedType, LatencyCategory
 from signalforge.data.adapters.massive import MassiveAdapter
 from signalforge.killswitch import KillSwitchEngaged, get_kill_switch
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleeping(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The adapter backs off (1.5/3/6/12 s) before retrying a retryable status.
+    That is right in production and ruinous offline: ``test_errors[429|500]``
+    would wait the full 22.5 s for a rate limit that does not exist here.
+
+    Patch ``_sleep`` itself, NOT ``time.sleep``. The backoff is a chunked wait
+    driven by ``time.monotonic()`` (so the kill switch stays responsive), and
+    neutering ``time.sleep`` alone converts it into a busy-spin of exactly the
+    same duration -- slower, not faster."""
+    monkeypatch.setattr(massive_module.MassiveAdapter, "_sleep", lambda self, _s: None)
+
 
 START = date(2024, 1, 2)
 PAYLOAD = {
