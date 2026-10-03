@@ -94,9 +94,14 @@ from signalforge.data import calendar as equity_calendar
 from signalforge.data import options_calendar
 from signalforge.data.option_chain import ContractPrint, ContractRef, OptionChainSeries, Right
 from signalforge.data.options_backfill import OptionsCoverageSummary, coverage_summary
-from signalforge.data.options_corporate_actions import splits_between, trailing_dividend_yield
+from signalforge.data.options_corporate_actions import (
+    Q_SERIES_SOURCE,
+    latest_q_series_run_id,
+    q_series_digest,
+    splits_between,
+)
 from signalforge.data.series import PriceSeries
-from signalforge.db.models import DataSnapshot, EntitlementCheck, IngestionRun
+from signalforge.db.models import DataSnapshot, DividendYieldDaily, EntitlementCheck, IngestionRun
 from signalforge.db.models.market import OptionAggregateDaily, OptionContract
 from signalforge.domain import Horizon
 from signalforge.observability import get_logger
@@ -952,36 +957,86 @@ def _q_by_underlying(
     session: Session,
     symbols: Sequence[str],
     *,
-    as_of: date,
-    closes: Mapping[str, float],
-    source: str,
+    window: OptionsWindow,
+    trades: Sequence[OptionTrade],
+    source: str = Q_SERIES_SOURCE,
 ) -> tuple[dict[str, dict[str, Any]], int]:
-    """``(value, source, as_of)`` per underlying — a defaulted ``q`` is NOT a value.
+    """Summarise the derived ``q`` series per underlying over the PRE-SEALED span.
 
-    Gate 0.g distinguishes a recorded, sourced ``q = 0.0`` from an unset one that
-    fell through the pricer's default.  ``trailing_dividend_yield`` returns ``None``
-    rather than 0.0 when there is no dividend history, and that ``None`` is
-    recorded as an absent record, so the distinction survives to the gate.
+    Gate 0.g distinguishes a recorded, sourced ``q`` from one that fell through
+    the pricer's 0.0 default, so the record is a ``(value, source, as_of)``
+    triple plus coverage, never a bare float.  Everything here is read at or
+    before ``window.pre_sealed_end``: the previous single ``as_of`` at
+    ``window.end`` read a SEALED-window date, which an assembler that runs
+    before the sealed test may not do.
+
+    An underlying counts as DEFAULTED when the series has no row on the
+    pre-sealed span, or when any pre-sealed entry it took has no row on its
+    signal session — the only two ways a priced structure can have rested on an
+    unsourced ``q``.  ``derive_dividend_yield_series`` writes no row where there
+    is no dividend history, so an absent row stays absent here too.
     """
     out: dict[str, dict[str, Any]] = {}
     defaulted = 0
-    for sym in symbols:
-        ref = closes.get(sym, 0.0)
-        dy = (
-            trailing_dividend_yield(session, sym, as_of, reference_close=ref, source=source)
-            if ref > 0
-            else None
+    lo, hi = window.start, window.pre_sealed_end
+    traded: dict[str, set[date]] = {}
+    for t in trades:
+        if lo <= t.entry_date <= hi:
+            traded.setdefault(t.underlying_symbol.upper(), set()).add(t.entry_date)
+    for raw in symbols:
+        # ONE normalised key for the query, the traded-session lookup and the
+        # record: a lower-case symbol must not find its rows yet miss its trades.
+        sym = raw.upper().strip()
+        rows = list(
+            session.execute(
+                select(DividendYieldDaily.session_date, DividendYieldDaily.q)
+                .where(
+                    DividendYieldDaily.symbol == sym,
+                    DividendYieldDaily.source == source,
+                    DividendYieldDaily.session_date >= lo,
+                    DividendYieldDaily.session_date <= hi,
+                )
+                .order_by(DividendYieldDaily.session_date)
+            )
         )
-        if dy is None:
+        sessions_traded = traded.get(sym, set())
+        if not rows:
             defaulted += 1
             continue
+        covered = {d for d, _ in rows}
+        uncovered = sorted(sessions_traded - covered)
+        if uncovered:
+            defaulted += 1
+        last_date, last_q = rows[-1]
         out[sym] = {
-            "value": dy.q,
-            "source": dy.source,
-            "as_of": dy.window_end.isoformat(),
-            "payments": dy.payments,
+            "value": float(last_q),
+            "source": source,
+            "as_of": last_date.isoformat(),
+            "first_session": rows[0][0].isoformat(),
+            "last_session": last_date.isoformat(),
+            "sessions_covered": len(rows),
+            "sessions_traded": len(sessions_traded),
+            "sessions_traded_uncovered": [d.isoformat() for d in uncovered],
+            "span_end": hi.isoformat(),
         }
     return out, defaulted
+
+
+def _q_series_provenance(
+    session: Session,
+    symbols: Sequence[str],
+    *,
+    window: OptionsWindow,
+    source: str = Q_SERIES_SOURCE,
+) -> tuple[str, int | None]:
+    """``(digest, latest derivation run id)`` for the series gate 0.g read.
+
+    The digest covers exactly the span ``_q_by_underlying`` summarises — the
+    pre-sealed span — so two evaluations on the same snapshot that priced on
+    different ``q`` series are distinguishable in the recorded evidence.
+    """
+    digest = q_series_digest(session, symbols, window.start, window.pre_sealed_end, source)
+    return digest, latest_q_series_run_id(session)
 
 
 def _folds(
@@ -1146,20 +1201,6 @@ def assemble_options_evidence(
     # leaking into the gating path, and gate 4b checks the count for exactly that.
     oos_stressed = [t for t in stressed_trades if (t.underlying_symbol, t.entry_date) in oos_keys]
 
-    closes = {r.symbol: 0.0 for r in runs}
-    for r in runs:
-        if r.coverage.last_bar is not None:
-            series = PriceSeries.load(
-                session,
-                r.symbol,
-                r.coverage.last_bar,
-                r.coverage.last_bar,
-                source=source,
-                adjusted=UNDERLYING_ADJUSTED,
-            )
-            if len(series):
-                closes[r.symbol] = float(series.close[-1])
-
     # D5a §3: the width is a constant of the version, so the declared half of gate 0.5
     # takes no argument; the observed half is recovered from the trades by the gate.
     identity = strategy.structure_identity()
@@ -1176,7 +1217,6 @@ def assemble_options_evidence(
         ev=ev,
         source=source,
         symbols=symbols,
-        closes=closes,
         dte_targets=dte_targets,
         identity=identity,
         limits_source=limits_source,
@@ -1409,7 +1449,6 @@ def _availability(
     ev: OptionsEvaluationConfig,
     source: str,
     symbols: Sequence[str],
-    closes: Mapping[str, float],
     dte_targets: Sequence[int],
     identity: StructureIdentity,
     limits_source: str,
@@ -1436,9 +1475,8 @@ def _availability(
         1.0 - (t.unmarked_sessions / t.bars_held) for t in trades if t.bars_held > 0
     ]
 
-    q_map, q_defaulted = _q_by_underlying(
-        session, symbols, as_of=window.end, closes=closes, source=source
-    )
+    q_map, q_defaulted = _q_by_underlying(session, symbols, window=window, trades=trades)
+    q_digest, q_run_id = _q_series_provenance(session, symbols, window=window)
 
     cost_by_multiplier: dict[str, float] = {}
     for outcome in (dual.baseline, dual.stressed):
@@ -1499,6 +1537,8 @@ def _availability(
         q_by_underlying=q_map,
         q_defaulted_count=q_defaulted
         + sum(1 for t in trades if not t.q_source or t.q_source == "unsourced"),
+        q_series_digest=q_digest,
+        q_series_run_id=q_run_id,
         deliverable_refusal_count=counters.shares_per_contract_refusals,
         deliverable_refusals=(
             ({"count": counters.shares_per_contract_refusals, "scope": "pooled"},)

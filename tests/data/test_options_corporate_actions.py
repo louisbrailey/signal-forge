@@ -14,19 +14,31 @@ one-directional bias rather than noise:
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from signalforge.data import calendar
 from signalforge.data.adapters.massive_options import MassiveOptionsAdapter
 from signalforge.data.options_corporate_actions import (
+    build_q_lookup,
+    derive_dividend_yield_series,
     ingest_dividends_and_splits,
     splits_between,
     trailing_dividend_yield,
 )
-from signalforge.db.models import DividendEvent, SplitEvent
+from signalforge.db.models import (
+    DividendEvent,
+    DividendYieldDaily,
+    IngestionRun,
+    Instrument,
+    OHLCVDaily,
+    SplitEvent,
+)
+from signalforge.domain import LatencyCategory
 
 _DIVS = [
     {
@@ -175,3 +187,275 @@ def test_splits_between_names_the_event_a_cycle_crosses(session: Session) -> Non
     # the interval is half-open on the left: a split ON the start is not crossed
     assert splits_between(session, "SPY", date(2024, 6, 10), date(2024, 7, 19)) == []
     assert len(splits_between(session, "SPY", date(2024, 6, 9), date(2024, 6, 10))) == 1
+
+
+# --- the derived q series ----------------------------------------------------- #
+_SERIES_START = date(2024, 9, 16)
+_SERIES_END = date(2024, 12, 27)
+_CLOSE = 500.0
+
+
+def _seed_bars(session: Session, symbol: str, start: date, end: date, *, close: float) -> None:
+    inst = Instrument(symbol=symbol, name=symbol, instrument_type="etf", exchange="ARCX")
+    session.add(inst)
+    session.flush()
+    for d in calendar.sessions(start, end):
+        session.add(
+            OHLCVDaily(
+                instrument_id=inst.id,
+                session_date=d,
+                open=close,
+                high=close,
+                low=close,
+                close=close,
+                adj_close=close,
+                volume=1_000_000,
+                source="massive",
+                latency_category=LatencyCategory.HISTORICAL,
+                ingested_at=datetime.now(UTC),
+            )
+        )
+    session.flush()
+
+
+def _series(session: Session, symbol: str) -> dict[date, DividendYieldDaily]:
+    rows = session.scalars(
+        select(DividendYieldDaily).where(DividendYieldDaily.symbol == symbol)
+    ).all()
+    return {r.session_date: r for r in rows}
+
+
+def test_derived_series_is_point_in_time_per_session(session: Session) -> None:
+    """``q(S)`` sums ex-dates in ``(S - 365d, S]`` only: the 2024-09-20 and
+    2024-12-20 payments enter the series ON their ex-dates, never before."""
+    ingest_dividends_and_splits(session, _adapter(), ["SPY"])
+    _seed_bars(session, "SPY", _SERIES_START, _SERIES_END, close=_CLOSE)
+
+    run = derive_dividend_yield_series(session, ["SPY"], _SERIES_START, _SERIES_END)
+    rows = _series(session, "SPY")
+
+    assert run.kind == "options_q_series"
+    assert run.status == "ok"
+    assert run.symbols_ok == ["SPY"]
+    assert set(rows) == set(calendar.sessions(_SERIES_START, _SERIES_END))
+    # the session BEFORE the September ex-date sees two payments ...
+    before = rows[date(2024, 9, 19)]
+    assert before.payments == 2 and before.q == (1.6 + 1.7) / _CLOSE
+    # ... the ex-date session itself sees three
+    on = rows[date(2024, 9, 20)]
+    assert on.payments == 3 and on.q == (1.6 + 1.7 + 1.8) / _CLOSE
+    # and the December payment is invisible until 2024-12-20
+    assert rows[date(2024, 12, 19)].payments == 3
+    assert rows[date(2024, 12, 20)].payments == 4
+    assert rows[date(2024, 12, 20)].q == (1.6 + 1.7 + 1.8 + 1.9) / _CLOSE
+    for r in rows.values():
+        assert r.source == "vendor_dividends"
+        assert r.reference_close == _CLOSE
+        assert r.derived_from_run_id == run.id
+        assert r.window_start == r.session_date - timedelta(days=365)
+    # every row agrees with the one-shot helper on the same session
+    y = trailing_dividend_yield(session, "SPY", date(2024, 10, 15), reference_close=_CLOSE)
+    assert y is not None and rows[date(2024, 10, 15)].q == y.q
+    assert run.bars_written == len(rows)
+    assert run.coverage_first == _SERIES_START and run.coverage_last == _SERIES_END
+
+
+def test_derived_series_writes_no_row_without_dividend_history(session: Session) -> None:
+    """Never a 0.0 row: a session with nothing in its trailing window is ABSENT."""
+    _seed_bars(session, "SPY", date(2023, 1, 3), date(2023, 1, 31), close=_CLOSE)
+    run = derive_dividend_yield_series(session, ["SPY"], date(2023, 1, 3), date(2023, 1, 31))
+    assert run.status == "ok"
+    assert _count(session, DividendYieldDaily) == 0
+    assert run.bars_written == 0
+    assert run.gaps_json["SPY"]["sessions_without_history"] == len(
+        calendar.sessions(date(2023, 1, 3), date(2023, 1, 31))
+    )
+
+    # with history only from 2024-03-15, the sessions before it stay absent
+    ingest_dividends_and_splits(session, _adapter(), ["SPY"])
+    _seed_bars(session, "QQQ", date(2024, 3, 11), date(2024, 3, 19), close=_CLOSE)
+    # QQQ has bars but no dividends at all -> nothing, and no error
+    run2 = derive_dividend_yield_series(session, ["QQQ"], date(2024, 3, 11), date(2024, 3, 19))
+    assert run2.status == "ok" and _count(session, DividendYieldDaily) == 0
+    # SPY needs bars in that range too
+    spy = session.scalar(select(Instrument).where(Instrument.symbol == "SPY"))
+    assert spy is not None
+    for d in calendar.sessions(date(2024, 3, 11), date(2024, 3, 19)):
+        session.add(
+            OHLCVDaily(
+                instrument_id=spy.id,
+                session_date=d,
+                open=_CLOSE,
+                high=_CLOSE,
+                low=_CLOSE,
+                close=_CLOSE,
+                volume=1.0,
+                source="massive",
+                latency_category=LatencyCategory.HISTORICAL,
+                ingested_at=datetime.now(UTC),
+            )
+        )
+    session.flush()
+    derive_dividend_yield_series(session, ["SPY"], date(2024, 3, 11), date(2024, 3, 19))
+    rows = _series(session, "SPY")
+    assert min(rows) == date(2024, 3, 15)  # first ex-date; nothing earlier
+    assert all(r.q > 0 for r in rows.values())
+
+
+def test_derived_series_is_idempotent_and_records_a_run_per_derivation(
+    session: Session,
+) -> None:
+    ingest_dividends_and_splits(session, _adapter(), ["SPY"])
+    _seed_bars(session, "SPY", _SERIES_START, _SERIES_END, close=_CLOSE)
+    run1 = derive_dividend_yield_series(session, ["SPY"], _SERIES_START, _SERIES_END)
+    n = _count(session, DividendYieldDaily)
+    run2 = derive_dividend_yield_series(session, ["SPY"], _SERIES_START, _SERIES_END)
+
+    assert run2.id != run1.id
+    assert _count(session, DividendYieldDaily) == n
+    assert run2.bars_written == 0 and run2.bars_skipped == n
+    # unchanged rows keep their original provenance
+    assert {r.derived_from_run_id for r in _series(session, "SPY").values()} == {run1.id}
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(IngestionRun)
+            .where(IngestionRun.kind == "options_q_series")
+        )
+        == 2
+    )
+
+
+def test_derived_series_reports_a_symbol_without_bars_as_failed(session: Session) -> None:
+    ingest_dividends_and_splits(session, _adapter(), ["SPY"])
+    run = derive_dividend_yield_series(session, ["SPY"], _SERIES_START, _SERIES_END)
+    assert run.status == "failed"
+    assert "no massive daily bars" in run.symbols_failed["SPY"]
+    assert _count(session, DividendYieldDaily) == 0
+
+
+def test_build_q_lookup_matches_exact_sessions_only(session: Session) -> None:
+    """Off-series is ``None`` — a non-entry for the strategy, never a carried or
+    interpolated value and never 0.0."""
+    ingest_dividends_and_splits(session, _adapter(), ["SPY"])
+    _seed_bars(session, "SPY", _SERIES_START, _SERIES_END, close=_CLOSE)
+    derive_dividend_yield_series(session, ["SPY"], _SERIES_START, _SERIES_END)
+
+    q = build_q_lookup(session, ["spy", "QQQ"])
+    assert q("SPY", date(2024, 10, 15)) == (1.6 + 1.7 + 1.8) / _CLOSE
+    assert q("spy", date(2024, 10, 15)) == q("SPY", date(2024, 10, 15))
+    assert q("SPY", date(2024, 10, 12)) is None  # a Saturday: not a session, no row
+    assert q("SPY", date(2024, 9, 13)) is None  # before the derived range
+    assert q("SPY", date(2025, 1, 2)) is None  # after it
+    assert q("QQQ", date(2024, 10, 15)) is None  # no series at all
+    assert build_q_lookup(session, ["SPY"], source="other")("SPY", date(2024, 10, 15)) is None
+    assert build_q_lookup(session, [])("SPY", date(2024, 10, 15)) is None
+
+
+# --- `signalforge options q-series` (review item F) --------------------------- #
+def test_q_series_cli_refuses_while_a_live_worker_heartbeat_exists(session: Session) -> None:
+    from typer.testing import CliRunner
+
+    from signalforge.cli import app
+    from signalforge.db.models import IngestionRun, WorkerHeartbeat
+
+    ingest_dividends_and_splits(session, _adapter(), ["SPY"])
+    _seed_bars(session, "SPY", _SERIES_START, _SERIES_END, close=_CLOSE)
+    now = datetime.now(UTC)
+    session.add(
+        WorkerHeartbeat(
+            worker="scheduler",
+            host="some-other-host",
+            pid=1,
+            started_at=now - timedelta(minutes=5),
+            last_beat_at=now,
+        )
+    )
+    session.commit()
+
+    args = [
+        "options",
+        "q-series",
+        "--symbols",
+        "SPY",
+        "--since",
+        _SERIES_START.isoformat(),
+        "--until",
+        _SERIES_END.isoformat(),
+    ]
+    res = CliRunner().invoke(app, args)
+    assert res.exit_code == 2, res.output
+    assert "REFUSED" in res.output and "live scheduler heartbeat" in res.output
+    session.expire_all()
+    assert _count(session, DividendYieldDaily) == 0
+    q_runs = (
+        select(func.count())
+        .select_from(IngestionRun)
+        .where(IngestionRun.kind == "options_q_series")
+    )
+    assert session.scalar(q_runs) == 0
+
+    # a STALE heartbeat is not a live worker: the same command now runs
+    hb = session.scalar(select(WorkerHeartbeat))
+    assert hb is not None
+    hb.last_beat_at = now - timedelta(hours=1)
+    session.commit()
+    res = CliRunner().invoke(app, args)
+    assert res.exit_code == 0, res.output
+    session.expire_all()
+    assert _count(session, DividendYieldDaily) == len(calendar.sessions(_SERIES_START, _SERIES_END))
+    assert session.scalar(q_runs) == 1
+
+
+def test_q_series_cli_refuses_while_the_worker_lock_is_held(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typer.testing import CliRunner
+
+    import signalforge.worker_lock as wl
+    from signalforge.cli import app
+
+    monkeypatch.setattr(wl, "worker_lock_holder", lambda path=None: "12345")
+    res = CliRunner().invoke(app, ["options", "q-series", "--symbols", "SPY"])
+    assert res.exit_code == 2
+    assert "holds the write lock" in res.output
+    assert _count(session, DividendYieldDaily) == 0
+
+
+def test_per_symbol_commits_retry_a_locked_unit_and_keep_finished_ones(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each underlying is its own committed unit: a transient lock on the second
+    is retried whole, and the first is already durable when it happens."""
+    from sqlalchemy.exc import OperationalError
+
+    import signalforge.data.options_corporate_actions as oca
+    import signalforge.db.retry as retry
+    from signalforge.db.session import get_sessionmaker
+
+    ingest_dividends_and_splits(session, _adapter(), ["SPY"])
+    _seed_bars(session, "SPY", _SERIES_START, _SERIES_END, close=_CLOSE)
+    _seed_bars(session, "QQQ", _SERIES_START, _SERIES_END, close=_CLOSE)
+    session.commit()
+    monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
+
+    real = oca.get_daily_bars
+    seen: list[tuple[str, int]] = []
+
+    def flaky(sess: Session, sym: str, *a: object, **kw: object):  # type: ignore[no-untyped-def]
+        if sym == "QQQ" and not any(s == "QQQ" for s, _ in seen):
+            with get_sessionmaker()() as other:  # what a second connection can see NOW
+                seen.append((sym, _count(other, DividendYieldDaily)))
+            raise OperationalError("SELECT 1", {}, Exception("database is locked"))
+        return real(sess, sym, *a, **kw)
+
+    monkeypatch.setattr(oca, "get_daily_bars", flaky)
+    run = derive_dividend_yield_series(
+        session, ["SPY", "QQQ"], _SERIES_START, _SERIES_END, commit_per_symbol=True
+    )
+    n = len(calendar.sessions(_SERIES_START, _SERIES_END))
+    # SPY's rows were committed before QQQ's unit hit the lock
+    assert seen == [("QQQ", n)]
+    assert run.status == "ok" and run.symbols_ok == ["SPY", "QQQ"]
+    assert run.bars_written == n  # QQQ has no dividend history: no rows, never 0.0
+    assert not session.in_transaction()

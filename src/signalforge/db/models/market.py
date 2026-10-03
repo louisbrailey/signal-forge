@@ -191,6 +191,41 @@ class DividendEvent(Base, IntPK, CreatedAt):
     ingested_at: Mapped[datetime] = mapped_column(UTCDateTime)
 
 
+class DividendYieldDaily(Base, IntPK, CreatedAt):
+    """One point-in-time trailing-twelve-month dividend yield ``q`` per
+    (underlying, session).
+
+    Derived, never fetched: ``q(S) = sum(cash dividends with ex-date in
+    (S - 365d, S]) / close(S)`` over stored ``DividendEvent`` rows and the
+    stored ``massive`` daily close.  A session with NO dividend history in its
+    window gets NO row — never a 0.0 row — because ``q = 0`` is the assumption
+    decision 11 and gate 0.g exist to refuse, not a measurement.  The
+    short-vertical strategy's ``q_lookup`` reads this table by exact session
+    match and treats a missing row as a non-entry.
+
+    ``derived_from_run_id`` ties every row to the ``options_q_series``
+    ``IngestionRun`` that wrote it, so a recorded ``q`` is traceable to the
+    exact derivation that produced it (gate 8 provenance).
+    """
+
+    __tablename__ = "dividend_yield_daily"
+    __table_args__ = (
+        UniqueConstraint("symbol", "session_date", "source"),
+        Index("ix_dividend_yield_daily_symbol_session", "symbol", "session_date"),
+    )
+
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    session_date: Mapped[date] = mapped_column(index=True)
+    q: Mapped[float] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(40), default="vendor_dividends", index=True)
+    payments: Mapped[int] = mapped_column(Integer)  # dividends summed in the window
+    window_start: Mapped[date] = mapped_column()  # exclusive lower bound of the ex-date window
+    reference_close: Mapped[float] = mapped_column(Float)
+    derived_from_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ingestion_run.id", ondelete="SET NULL"), default=None
+    )
+
+
 class SplitEvent(Base, IntPK, CreatedAt):
     """One EXECUTED share split for an underlying, as published by the vendor.
 

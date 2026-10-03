@@ -66,3 +66,42 @@ def test_options_io1_migration_is_additive_on_a_fresh_database(db_url: str) -> N
     command.downgrade(cfg, "base")
     assert set(inspect(engine).get_table_names()) == {"alembic_version"}
     engine.dispose()
+
+
+def test_dividend_yield_daily_migration_is_additive_and_round_trips(db_url: str) -> None:
+    """d2f7a1c4e9b6 adds ONE table. Its provenance FK is SET NULL, never CASCADE:
+    deleting an ingestion_run row may not delete the reference data it wrote."""
+    cfg = alembic_config(db_url)
+    command.upgrade(cfg, "head")
+    engine = create_engine(db_url)
+    insp = inspect(engine)
+
+    assert "dividend_yield_daily" in insp.get_table_names()
+    cols = {c["name"]: c for c in insp.get_columns("dividend_yield_daily")}
+    assert {
+        "symbol",
+        "session_date",
+        "q",
+        "source",
+        "payments",
+        "window_start",
+        "reference_close",
+        "derived_from_run_id",
+        "created_at",
+    } <= set(cols)
+    assert cols["q"]["nullable"] is False
+    assert cols["derived_from_run_id"]["nullable"] is True
+    assert {
+        tuple(uc["column_names"]) for uc in insp.get_unique_constraints("dividend_yield_daily")
+    } == {("symbol", "session_date", "source")}
+    fks = insp.get_foreign_keys("dividend_yield_daily")
+    assert [(fk["referred_table"], fk["constrained_columns"]) for fk in fks] == [
+        ("ingestion_run", ["derived_from_run_id"])
+    ]
+    assert (fks[0].get("options") or {}).get("ondelete", "").upper() == "SET NULL"
+
+    command.downgrade(cfg, "c1e5a9f37b24")  # pragma: allowlist secret
+    assert "dividend_yield_daily" not in set(inspect(engine).get_table_names())
+    command.downgrade(cfg, "base")
+    assert set(inspect(engine).get_table_names()) == {"alembic_version"}
+    engine.dispose()
