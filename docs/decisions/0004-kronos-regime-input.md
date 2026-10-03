@@ -1,16 +1,46 @@
-# ADR 0004 — Kronos as a tighten-only regime input (PROPOSED)
+# ADR 0004 — Kronos as a tighten-only regime input (NOT PROCEEDING)
 
-- **Status:** **Proposed. NOT accepted. Nothing in this ADR is implemented, enabled,
-  or authorised.** It exists so the shape of the decision is visible before any evidence
-  is collected, and so that the evidence (`docs/research/kronos/PREREGISTRATION_
-  2026-10-03_kronos_skill.md`) is judged against a design fixed in advance rather than
-  a design written to fit the results. Acceptance requires gates G1–G10 (below) and an
-  explicit operator decision recorded in this file.
-- **Deciders:** Louis Brailey (operator). No decision has been taken.
+- **Status:** **Closed — not proceeding (2026-10-03).** This proposal is withdrawn.
+  Nothing in it was implemented, enabled or authorised, and nothing is awaiting
+  engineering work. The import-linter contracts keeping Kronos off the decision path
+  stay exactly as they are. See "Decision record" below. The original text is kept
+  unchanged beneath it as the record of what was proposed.
+- **Deciders:** Louis Brailey (operator). Decision: not proceeding, 2026-10-03.
 - **Related:** `docs/decisions/0003-execution-layer.md` (style and boundary discipline),
   `src/signalforge/kronos/README.md`, import-linter contracts "Kronos is never an input
   to deterministic signals, risk, paper or execution" and "Kronos cannot reach trading,
   credentials, providers or alerts" (`pyproject.toml`), ARCHITECTURE.md S3.
+
+
+## Decision record — not proceeding (2026-10-03)
+
+**Decision.** The operator closes this proposal. Kronos is not integrated as a regime
+input or in any other decision-path role under this ADR.
+
+**Evidence.** The pre-registered forecast-skill study
+(`docs/research/kronos/PREREGISTRATION_2026-10-03_kronos_skill.md`) was executed as
+written: 160/160 windows, no failed calls, pilot calls retained. Report and data:
+`docs/research/kronos/2026-10-02/`.
+
+| Gate | Outcome |
+|---|---|
+| G1 pre-registration before inference | met |
+| G2 skill (Tier A SPY, 12 origins) | **not met** — MAE ratio vs drift 1.04 (h=20), 1.25 (h=5); vs unchanged 1.34, 1.26; no Holm-adjusted p < 0.05 |
+| G3 direction | **not met** — h=20 8/12, BH p = 0.77 |
+| G4 calibration | not rejected at h=5 (5/12); h=20 coverage 3/12 against a 50% nominal band |
+| G5 Tier B pooled (11 sector ETFs) | **not met** — ratio vs drift 1.22 (h=20), 1.26 (h=5, CI [1.09, 1.43], i.e. worse than drift) |
+| G6–G10 | not started; not reachable without G2–G5 |
+
+**Scope of the evidence.** The study addressed G1–G5 only, for one configuration
+(Kronos-small, 128-bar context, 3 sampled paths, daily US-equity bars). It could not
+have authorised this ADR even had it passed: a tighten-only filter still changes which
+trades occur and needs its own validation (G6, G7).
+
+**What this does not close.** Kronos remains available as the isolated research
+dashboard and offline study tool. Investigating *why* this configuration shows no
+skill (context length, sample count, model size, return-space metrics) is separate
+research with its own pre-registration. Any future integration proposal is a **new
+ADR** with new evidence; this one is not reopened or amended into acceptance.
 
 ## Context
 
