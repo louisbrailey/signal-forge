@@ -849,6 +849,56 @@ def options_corp_actions_cmd(
     typer.echo("Reference data only. Research signal only — no order was placed.")
 
 
+@options_app.command("q-series")
+def options_q_series_cmd(
+    symbols: Annotated[
+        str, typer.Option(help="Comma-separated; default: configured underlyings.")
+    ] = "",
+    since: Annotated[str, typer.Option(help="YYYY-MM-DD; first session to derive.")] = "",
+    until: Annotated[str, typer.Option(help="YYYY-MM-DD; last session (default: today).")] = "",
+) -> None:
+    """Derive the per-(underlying, session) trailing dividend yield ``q`` series.
+
+    Pure arithmetic over the stored ``dividend_event`` rows and the stored daily
+    close — run ``options corp-actions`` first. A session with no dividend
+    history in its trailing window gets NO row (never 0.0), and the
+    short-vertical strategy takes no entry on a session without a row.
+    """
+    ensure_not_engaged()
+    from signalforge.config import get_settings
+    from signalforge.data.options_corporate_actions import derive_dividend_yield_series
+    from signalforge.db.session import session_scope
+
+    s = get_settings()
+    syms = [x.strip().upper() for x in symbols.split(",") if x.strip()] or list(
+        s.research.options.underlyings
+    )
+    end = date.fromisoformat(until) if until else date.today()
+    start = date.fromisoformat(since) if since else end - timedelta(days=365 * 8)
+    if start > end:
+        typer.secho(f"--since {start} is after --until {end}", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+    # No network I/O inside this scope, so the write-intent transaction is held
+    # only for the derivation itself (docs/SQLITE_CONCURRENCY.md rule 4).
+    with session_scope(write=True) as session:
+        run = derive_dividend_yield_series(session, syms, start, end)
+        typer.secho(
+            f"run #{run.id} [{run.status}] sessions_written={run.bars_written} "
+            f"unchanged={run.bars_skipped} coverage {run.coverage_first}..{run.coverage_last}",
+            fg=typer.colors.GREEN if run.status == "ok" else typer.colors.YELLOW,
+        )
+        for sym, d in (run.gaps_json or {}).items():
+            typer.echo(
+                f"  {sym}: {d.get('sessions_written', 0)} written, "
+                f"{d.get('sessions_unchanged', 0)} unchanged, "
+                f"{d.get('sessions_without_history', 0)} sessions without dividend history "
+                f"({d.get('first_session')}..{d.get('last_session')})"
+            )
+        for k, v in (run.symbols_failed or {}).items():
+            typer.secho(f"  FAIL {k}: {v}", fg=typer.colors.RED)
+    typer.echo("Reference data only. Research signal only — no order was placed.")
+
+
 @options_app.command("simulate")
 def options_simulate_cmd(
     strategy: Annotated[
@@ -959,6 +1009,7 @@ def options_evaluate_promotion_cmd(
 
     from sqlalchemy import select
 
+    from signalforge.data.options_corporate_actions import Q_SERIES_SOURCE, build_q_lookup
     from signalforge.db.models import DataSnapshot
     from signalforge.db.session import session_scope, set_write_intent
     from signalforge.research.options_evidence import (
@@ -969,11 +1020,14 @@ def options_evaluate_promotion_cmd(
         preregistration_path,
     )
     from signalforge.research.options_gates import OptionsGateThresholds, OptionsWindow
-    from signalforge.research.options_strategies import default_options_strategies
+    from signalforge.research.options_strategies import (
+        OptionsShortVertical,
+        default_options_strategies,
+    )
     from signalforge.worker_lock import worker_lock_holder
 
-    strat = next((s for s in default_options_strategies() if s.key == strategy), None)
-    if strat is None:
+    base = next((s for s in default_options_strategies() if s.key == strategy), None)
+    if base is None:
         known = [s.key for s in default_options_strategies()]
         typer.secho(f"unknown options strategy {strategy!r}; known: {known}", fg=typer.colors.RED)
         raise typer.Exit(code=2)
@@ -1073,11 +1127,25 @@ def options_evaluate_promotion_cmd(
         snap = session.scalar(select(DataSnapshot).where(DataSnapshot.key == snapshot_key))
         assert snap is not None  # re-read in this scope; existence checked above
 
+        # Decision 11 / gate 0.g: the ladder instance and every grid point price
+        # with the SAME per-(underlying, session) dividend series, read from the
+        # derived ``dividend_yield_daily`` table (``options q-series``). A session
+        # without a row is a non-entry — never q = 0.0.
+        strat = OptionsShortVertical(
+            base.params,
+            selection_cost_model=base.selection_cost_model,
+            q_lookup=build_q_lookup(session, list(snap.symbols_json)),
+            q_source=Q_SERIES_SOURCE,
+            risk_free_rate=base.risk_free_rate,
+            r_source=base.r_source,
+            proxy_regimes=base.proxy_regimes,
+        )
+
         if grid:
             from dataclasses import replace as _dc_replace
 
             from signalforge.research.options_sensitivity import run_options_sensitivity
-            from signalforge.research.options_strategies import VERSION, OptionsShortVertical
+            from signalforge.research.options_strategies import VERSION
 
             base_params = strat.params
 
