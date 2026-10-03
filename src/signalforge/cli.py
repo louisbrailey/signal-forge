@@ -2022,6 +2022,33 @@ def paper_mtm() -> None:
     )
 
 
+@paper_app.command("correct-legacy")
+def paper_correct_legacy(
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Print exactly what would change; write nothing.")
+    ] = False,
+    confirm: Annotated[
+        bool, typer.Option("--confirm", help="Write the corrections (append-only).")
+    ] = False,
+) -> None:
+    """Correct legacy paper-ledger defects with append-only trade_correction rows:
+    exits recorded on or before the entry bar are reversed and re-resolved on
+    later bars, and double-counted legacy entry costs are credited back.
+    paper_trade rows are never modified. Stop the worker first; review
+    --dry-run before --confirm. Research signal only — no order was placed."""
+    if dry_run == confirm:
+        typer.secho("pass exactly one of --dry-run or --confirm", fg=typer.colors.RED)
+        raise typer.Exit(2)
+    from signalforge.db.session import session_scope
+    from signalforge.paper.legacy_corrections import correct_legacy
+
+    with session_scope(write=True) as session:
+        rep = correct_legacy(session, confirm=confirm)
+    for line in rep.lines():
+        typer.echo(line)
+    typer.echo("SIMULATED paper ledger only. Research signal only — no order was placed.")
+
+
 @options_paper_app.command("status")
 def options_paper_status(
     account: Annotated[
@@ -2924,6 +2951,52 @@ def universe_enrich_caps_cmd(
     )
     typer.echo(
         "Current-value market cap only (NOT point-in-time). "
+        "Research signal only — no order was placed."
+    )
+
+
+@universe_app.command("sectors")
+def universe_sectors_cmd(
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Derive and store sectors (without it: read-only status)."),
+    ] = False,
+    only_missing: Annotated[
+        bool, typer.Option("--only-missing", help="Leave instruments that already have a sector.")
+    ] = False,
+    max_requests: Annotated[
+        int, typer.Option(help="Reference requests this run (resumable).")
+    ] = 500,
+    spacing: Annotated[float, typer.Option(help="Seconds between requests.")] = 0.5,
+) -> None:
+    """Populate instrument.sector from provider reference data (SIC code ->
+    stable sector label; ETFs -> sector-SPDR sector or ETF:<symbol>) so the paper
+    ledger's per-sector cap can operate. Unknown stays blank and is capped as
+    the single UNKNOWN bucket. Never alerts or trades."""
+    import json as _json
+
+    from signalforge.db.session import session_scope
+    from signalforge.universe.sectors import refresh_sectors, sector_status
+
+    if not refresh:
+        with session_scope() as session:
+            typer.echo(_json.dumps(sector_status(session), indent=2))
+        typer.echo("read-only status — pass --refresh to derive and store sectors")
+        return
+    ensure_not_engaged()
+    from signalforge.universe.bulk import GroupedDailyClient
+
+    client = GroupedDailyClient(spacing_s=spacing)
+    with session_scope(write=True) as session:
+        rep = refresh_sectors(session, client, max_requests=max_requests, only_missing=only_missing)
+    typer.echo(_json.dumps(rep.to_dict(), indent=2))
+    typer.secho(
+        f"sectors: {rep.updated} updated, {rep.unknown} still unknown (capped as UNKNOWN), "
+        f"{rep.skipped_budget} awaiting a reference request — re-run to continue",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo(
+        "SIC-derived labels are approximate (not GICS). "
         "Research signal only — no order was placed."
     )
 

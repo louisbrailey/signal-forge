@@ -132,7 +132,13 @@ def test_initial_position_cap_and_repeat_acceptance_share_same_symbol_budget(
     session, passing_candidate, account
 ):
     res = accept(session, passing_candidate)
-    assert res.shares == 4  # 5% * 10000 / 100.06
+    # Symbol ceiling 10% (operator decision 2026-10-03): 10% * 10000 = 1000;
+    # floor(1000 / 100.06) = 9. Looser caps: risk/share = 100.06 - 95.95 = 4.11,
+    # so candidate risk 50 / 4.11 -> 12 and per-trade 0.5% = 50 -> 12; sector
+    # 20% = 2000 / 100.06 -> 19.
+    assert res.shares == 9
+    # Second acceptance: the symbol already holds 9 * 100.00 (marked) = 900 of
+    # its 1000 budget; the remaining 100 cannot fund one share at 100.06.
     before = account.cash
     bar(session, passing_candidate, ON)  # current valid mark: rejection must be concentration
     with pytest.raises(ValueError, match="limits"):
@@ -157,10 +163,10 @@ def test_stricter_effective_override_wins(session, passing_candidate, key, value
 
 
 def test_current_equity_not_initial_cash_or_candidate_context(session, passing_candidate, account):
-    account.cash = Decimal("2000")
+    account.cash = Decimal("1000")
     passing_candidate.portfolio_context_json = {"account_equity": 1000000}
     with pytest.raises(ValueError, match="limits"):
-        accept(session, passing_candidate)  # 5% of 2000 cannot fund a share at 100.06
+        accept(session, passing_candidate)  # 10% of 1000 = 100 cannot fund a share at 100.06
 
 
 def test_cash_and_reserved_collateral_limit_size(session, passing_candidate, account):
@@ -178,9 +184,14 @@ def test_reserved_collateral_is_not_spendable(session, passing_candidate, accoun
     assert account.cash == Decimal("10000")
 
 
-@pytest.mark.parametrize("sector,expected", [("Tech", 0), (None, 4)])
+@pytest.mark.parametrize("sector,expected", [("Tech", 0), (None, 9)])
 def test_sector_cap_aggregates_known_sector(session, passing_candidate, account, sector, expected):
-    # Equity = 10000; Tech already owns 1950 of its 2000 cap.
+    # Equity = 8050 cash + 1950 held = 10000; Tech already owns 1950 of its 2000 cap,
+    # so a Tech candidate at 100.06 gets floor(50 / 100.06) = 0 shares.
+    # A holding with NO sector is in the UNKNOWN bucket, not in Tech, so the Tech
+    # candidate keeps its own budget and the symbol ceiling binds:
+    # 10% * 10000 = 1000 -> floor(1000 / 100.06) = 9 (sector would allow 19,
+    # candidate/per-trade risk 50 / 4.11 -> 12, gross (6000 - 1950) / 100.06 -> 40).
     holding(session, account, passing_candidate, qty=195, price=10, sector=sector, stop=10)
     account.cash = Decimal("8050")
     if expected:
@@ -390,8 +401,9 @@ def test_loose_config_is_narrowed_without_mutation_and_reduction_is_frozen(
     assert res.shares == 1  # 0.5% risk ceiling, not the persisted 10%
     evidence = session.get(PaperTrade, res.paper_trade_id).plan_json["risk_decision"]
     assert evidence["effective_limits"]["per_trade_risk_pct"] == 0.5
-    assert evidence["effective_limits"]["max_daily_portfolio_risk_pct"] == 1.5
-    assert evidence["effective_limits"]["max_position_concentration_pct"] == 5
+    # Operator decision 2026-10-03, paper only: ceilings 3.0% open risk, 10% symbol.
+    assert evidence["effective_limits"]["max_daily_portfolio_risk_pct"] == 3.0
+    assert evidence["effective_limits"]["max_position_concentration_pct"] == 10
     assert evidence["effective_limits"]["max_correlated_exposure_pct"] == 20
     assert evidence["reduced"] is True
     assert "per_trade_risk" in evidence["binding_caps"]
@@ -400,10 +412,41 @@ def test_loose_config_is_narrowed_without_mutation_and_reduction_is_frozen(
     assert effective_research_config(session).model_dump(mode="json") == before
 
 
-def test_loose_aggregate_risk_config_cannot_exceed_one_point_five_percent(
+def test_loose_aggregate_risk_config_cannot_exceed_three_percent(
     session, passing_candidate, account
 ):
+    """The open-risk CEILING is 3.0% (operator decision 2026-10-03, was 1.5%).
+
+    Equity = 9000 cash + 10 * 100 held = 10000 -> ceiling 300.00. The held
+    position's adverse stop fill is 70 * (1 - 0.00055) = 69.9615 -> 69.96, so its
+    open risk is (100 - 69.96) * 10 = 300.40 > 300.00: no budget is left, however
+    loose the configured 10% is."""
     set_setting(session, "research_overrides", {"risk": {"max_daily_portfolio_risk_pct": 10}})
+    holding(session, account, passing_candidate, qty=10, price=100, stop=70, sector="Other")
+    account.cash = Decimal("9000")
+    with pytest.raises(ValueError, match="limits"):
+        accept(session, passing_candidate)
+
+
+def test_open_risk_between_old_and_new_ceiling_is_now_allowed_when_configured(
+    session, passing_candidate, account
+):
+    """Same book, held risk (100 - 84.95) * 10 = 150.50 — over the old 1.5%
+    ceiling (150), under the new 3.0% one (300). With the limit CONFIGURED at
+    10% the ceiling governs: budget 300 - 150.50 = 149.50 -> floor(149.50 / 4.11)
+    = 36 shares by open risk; the symbol ceiling (1000 / 100.06 -> 9) binds."""
+    set_setting(session, "research_overrides", {"risk": {"max_daily_portfolio_risk_pct": 10}})
+    holding(session, account, passing_candidate, qty=10, price=100, stop=85, sector="Other")
+    account.cash = Decimal("9000")
+    res = accept(session, passing_candidate)
+    assert res.shares == 9
+    caps = session.get(PaperTrade, res.paper_trade_id).plan_json["risk_decision"]["share_caps"]
+    assert caps["open_risk"] == 36
+
+
+def test_configured_open_risk_still_narrows_below_the_ceiling(session, passing_candidate, account):
+    """Raising the ceiling does not raise the CONFIGURED limit: with the shipped
+    default (1.5%) the same 150.50 of held risk exceeds 150.00 and blocks."""
     holding(session, account, passing_candidate, qty=10, price=100, stop=85, sector="Other")
     account.cash = Decimal("9000")
     with pytest.raises(ValueError, match="limits"):

@@ -69,3 +69,42 @@
     <span class="text-xs text-slate-400">freshness: n/a</span>
   {% endif %}
 {% endmacro %}
+
+{% macro paper_books(paper) %}
+{# One row per equity paper book (one book per PAPER_APPROVED strategy version)
+   and the combined exposure per symbol ACROSS books. SIMULATED. #}
+<div class="mt-3 overflow-x-auto" id="paper-books">
+  <table class="min-w-full text-sm">
+    <thead class="text-left text-slate-500"><tr><th class="py-1 pr-4">Book</th><th class="pr-4">Account</th>
+      <th class="pr-4">Equity</th><th class="pr-4">Return</th><th class="pr-4">Cash</th><th class="pr-4">Open</th>
+      <th class="pr-4">Closed</th><th class="pr-4">Unrl P&amp;L</th><th class="pr-4">Rlzd P&amp;L</th></tr></thead>
+    <tbody>
+    {% for b in paper.books %}
+    <tr class="border-t border-slate-100"><td class="py-1 pr-4 font-medium">{{ b.book }}</td>
+      <td class="pr-4"><code>{{ b.account }}</code></td>
+      <td class="pr-4">${{ '%.2f' | format(b.equity_estimate) }}</td>
+      <td class="pr-4">{{ '%+.2f' | format(b.return_pct) }}%</td>
+      <td class="pr-4">${{ '%.2f' | format(b.cash) }}</td>
+      <td class="pr-4">{{ b.n_open }}</td><td class="pr-4">{{ b.n_closed }}</td>
+      <td class="pr-4">{{ '%+.2f' | format(b.unrealized_pnl) }}</td>
+      <td class="pr-4">{{ '%+.2f' | format(b.realized_pnl) }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="mt-1 text-xs text-slate-500">Each PAPER_APPROVED strategy version trades its own book; risk caps and the daily auto-simulation cap apply per book.</p>
+<div class="mt-3 overflow-x-auto" id="paper-symbol-exposure">
+  <table class="min-w-full text-sm">
+    <thead class="text-left text-slate-500"><tr><th class="py-1 pr-4">Symbol (all books combined)</th><th class="pr-4">Qty</th>
+      <th class="pr-4">Market value</th><th class="pr-4">% of combined equity</th><th class="pr-4">Held by</th></tr></thead>
+    <tbody>
+    {% for e in paper.symbol_exposure %}
+    <tr class="border-t border-slate-100"><td class="py-1 pr-4 font-medium">{{ e.symbol }}</td>
+      <td class="pr-4">{{ e.qty }}</td><td class="pr-4">${{ '%.2f' | format(e.market_value) }}</td>
+      <td class="pr-4">{{ '%.2f' | format(e.pct_of_combined_equity) }}%</td>
+      <td class="pr-4">{{ e.books | join(', ') }}</td></tr>
+    {% else %}<tr><td colspan="5" class="py-2 text-slate-500">No open paper exposure in any book.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endmacro %}
