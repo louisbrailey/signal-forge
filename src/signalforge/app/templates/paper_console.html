@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Paper Operations · Signal Forge{% endblock %}
+{% block content %}
+<section hx-get="/paper-console" hx-trigger="every 30s" hx-select="#paper-state" hx-target="#paper-state" hx-swap="outerHTML">
+<div id="paper-state">
+<h1 class="text-2xl font-bold">Paper Operations</h1>
+<p class="mt-2">Research signal only — no order was placed.</p>
+<p class="text-sm text-slate-600">Refreshes every 30 seconds. Market inputs remain END-OF-DAY or DELAYED; this is not streaming execution.</p>
+<p class="mt-4 font-semibold {{ 'text-green-800' if worker_healthy else 'text-red-800' }}">Worker: {{ 'heartbeat current' if worker_healthy else 'stale or unavailable — inspect Ops' }}</p>
+{% if worker %}<p class="text-sm">Last heartbeat {{ worker.last_beat_at }} UTC · {{ worker.detail }}</p>{% endif %}
+<p>Automatic equity paper acceptance: <strong>{{ 'ON' if automatic else 'OFF' }}</strong> · Daily acceptance cap: {{ daily_cap }}. Only approved, in-scope signals passing all gates are eligible.</p>
+{% if invalid_history %}<p role="alert" class="my-4 bg-red-50 border border-red-400 text-red-900 p-3">Historical accounting warning: {{ invalid_history }} position(s) have a recorded exit before entry. Historical P&amp;L below includes legacy records and is not validated performance. Original audit records are preserved.</p>{% endif %}
+{% if account.exists %}
+<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 my-5">
+{% for label,value in [('Cash', account.cash),('Estimated equity',account.equity_estimate),('Realized P&L',account.realized_pnl),('Unrealized P&L',account.unrealized_pnl)] %}
+<div class="bg-white border rounded p-3"><div class="text-sm">{{ label }}</div><strong>${{ '%.2f'|format(value) }}</strong></div>
+{% endfor %}</div>
+<p>Accepted paper decisions: {{ accepted }} · Open positions: {{ open_count }}. Marks are estimates; inspect data freshness in <a class="underline" href="/ops">Ops</a>. Historical ledger records retain their original fill assumptions.</p>
+{% else %}<p>No paper account exists.</p>{% endif %}
+<h2 class="text-xl font-semibold mt-6">Recent scans</h2>
+<div class="overflow-x-auto"><table class="w-full text-sm text-left"><thead><tr><th>Time (UTC)</th><th>Horizon</th><th>Source</th><th>Qualified</th><th>No trade</th><th>Excluded</th></tr></thead><tbody>
+{% for s in scans %}<tr class="border-t"><td>{{ s.started_at }}</td><td>{{ s.horizon.value }}</td><td>{{ s.source }}</td><td>{{ s.candidate_count }}</td><td>{{ s.no_trade_count }}</td><td>{{ s.excluded_count }}</td></tr>
+{% else %}<tr><td colspan="6">No scans recorded.</td></tr>{% endfor %}</tbody></table></div>
+<p class="my-3">NO TRADE — insufficient evidence or poor risk/reward is a normal outcome. See <a href="/scanner" class="underline">Scanner</a> for exact gate failures.</p>
+<h2 class="text-xl font-semibold mt-6">Recorded decisions</h2>
+<div class="overflow-x-auto"><table class="w-full text-sm text-left"><thead><tr><th>Time (UTC)</th><th>Symbol</th><th>Decision</th><th>Actor</th><th>Evidence</th></tr></thead><tbody>
+{% for trade,symbol in decisions %}<tr class="border-t"><td>{{ trade.created_at }}</td><td>{{ symbol }}</td><td>{{ trade.decision.value }}</td><td>{{ trade.actor }}</td><td><a class="underline" href="/candidates/{{ trade.candidate_id }}">Candidate {{ trade.candidate_id }}</a></td></tr>
+{% else %}<tr><td colspan="5">No paper decisions recorded.</td></tr>{% endfor %}</tbody></table></div>
+<p class="mt-4 text-xs">Read at {{ refreshed_at }}. <a href="/journal" class="underline">Journal</a> · <a href="/portfolio" class="underline">Positions</a> · <a href="/kronos" class="underline">Kronos research</a></p>
+</div></section>
+{% endblock %}

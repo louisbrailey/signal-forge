@@ -126,5 +126,5 @@ def test_status_json_carries_the_whole_snapshot(db_url: str) -> None:
         "equity_net_delta_notional",
         "combined_net_delta_notional",
     }
-    assert snap["limits"]["per_structure_max_loss_dollars"] == 250.0
+    assert snap["limits"]["per_structure_max_loss_dollars"] == 900.0  # OP-1
     assert any("SEPARATE populations" in d for d in snap["disclosures"])

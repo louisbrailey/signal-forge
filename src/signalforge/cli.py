@@ -3672,8 +3672,12 @@ def run_scheduler() -> None:
         raise typer.Exit(code=1)
 
     started = _dt.now(_UTC)
-    record_heartbeat(None, started_at=started, detail="starting: catch-up check")
-    run_catch_up()
+    from signalforge.worker_health import startup_heartbeat
+
+    with startup_heartbeat(
+        lambda: record_heartbeat(None, started_at=started, detail="starting: catch-up running")
+    ):
+        run_catch_up()
     # D6 ADR §2: the execution job spec is resolved HERE and nowhere else.
     # signalforge.scheduler must not import signalforge.execution (signalforge.app
     # imports the scheduler, and S15b reports indirect chains), and

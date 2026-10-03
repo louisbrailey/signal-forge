@@ -42,6 +42,17 @@ fixture data every candidate is `NO TRADE`** — the intended result: no baselin
 strategy has positive out-of-sample expectancy net of costs, so none is promoted
 and none alerts.
 
+## Paper operations and Kronos research
+
+See [Paper Operations](docs/PAPER_OPERATIONS.md) for current startup and monitoring,
+and the [October 2 verification report](reports/PAPER_RELEASE_2026-10-02.md) for
+observed trades, Kronos comparisons, checks and remaining limitations.
+The authenticated `/paper-console` shows actual simulated decisions and account
+state with automatic refresh. `/kronos` offers offline historical replay from
+stored Massive bars, baseline comparisons, saved experiments, and JSON export.
+Kronos never changes trade decisions. Legacy paper-accounting limitations are
+explicitly disclosed in the operations guide and dashboard.
+
 ## Requirements
 
 - macOS / Linux

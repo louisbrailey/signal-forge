@@ -66,10 +66,18 @@ def test_adding_an_options_key_to_the_scope_fields_WOULD_move_the_hash() -> None
 
 def test_the_refusal_only_limits_carry_decision_4s_numbers() -> None:
     """Decision 4 of DECISIONS_2026-09-12_options_execution.md, as evaluation
-    grid CENTRES. The operator may change any of them before arming."""
+    grid CENTRES, with the two max-loss caps as the operator re-set them under
+    OP-1 (2026-09-23, DECISIONS_2026-09-12_wave3.md addendum 3): $900 / $3,600,
+    i.e. 3.6% / 14.4% of the $25,000 options account. Collateral is NOT OP-1's."""
     limits = OptionsRiskLimits()
-    assert limits.per_structure_max_loss_dollars == 250.0
-    assert limits.total_open_max_loss_dollars == 1_000.0
+    assert limits.per_structure_max_loss_dollars == 900.0
+    assert limits.total_open_max_loss_dollars == 3_600.0
+    assert limits.per_structure_max_loss_dollars / limits.paper_account_initial_cash == 0.036
+    assert limits.total_open_max_loss_dollars / limits.paper_account_initial_cash == 0.144
+    # the book still caps at floor(3600 / 900) = 4 full-cap structures, so the
+    # structure-count limit (5) stays dead configuration, as it was at 1000 / 250
+    assert limits.total_open_max_loss_dollars // limits.per_structure_max_loss_dollars == 4
+    assert limits.max_open_structures == 5
     assert limits.collateral_cap_dollars == 5_000.0
     assert limits.max_net_delta_notional_dollars == 10_000.0
     assert limits.max_net_vega_dollars_per_vol_pt == 50.0

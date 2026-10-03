@@ -3,7 +3,7 @@
   "entry_points": [
     "README.md",
     "ARCHITECTURE.md",
-    "docs/decisions/ADR-execution-layer.md"
+    "docs/decisions/0003-execution-layer.md"
   ],
   "commands": {
     "setup": "uv sync --frozen --extra llm",

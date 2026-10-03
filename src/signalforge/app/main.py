@@ -99,6 +99,10 @@ def create_app() -> FastAPI:
     install_redirect_handler(app)
     app.include_router(auth_router.router)
     app.include_router(dashboard_router.router)
+    from signalforge.app.routers import kronos, paper_console
+
+    app.include_router(paper_console.router)
+    app.include_router(kronos.router)
 
     # ---- health (public) -------------------------------------------------
     @app.get("/healthz")

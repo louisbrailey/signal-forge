@@ -560,3 +560,27 @@ look 1 for `v0.1.1`, and `v0.1.0` was never evaluated. **v0.1.0 is withdrawn, no
 under D5 §10's `k_effective` accounting a variant that was never evaluated and is superseded
 before the first look is not a spent variant. The §10 budget is untouched: **1 variant, hard cap
 2, still available.**
+
+---
+
+## Appendix (2026-09-23): pointer to Amendment 2. Moves nothing in this document.
+
+The operator confirmed **OP-1** on 2026-09-23 (per-structure $900, aggregate $3,600;
+`DECISIONS_2026-09-12_wave3.md` addendum 3). The width and credit-floor band were re-derived at
+k = 0 in
+
+> **`docs/research/options_designs/D5a_amendment_2_raised_cap_and_viable_width.md`**, which
+> applies to `options_short_vertical.medium_swing` **v0.1.2**.
+
+Do not act on the following numbers from this document without reading Amendment 2 first:
+
+| Superseded here | See |
+|---|---|
+| §3.3 `width_usd = $2.00`, `R_hard = $201.60` vs the $250 cap | Amendment 2 §3.1 ($8.00, $801.60 vs $900) |
+| §2.3/§2.4's attainable region `(0, 0.155]` and band 0.05 / 0.10 / 0.13 (still true **at $2**) | Amendment 2 §4 (0.0938–0.1813; 0.140 / 0.150 / 0.155) |
+| §3.5's aggregate arithmetic at $1,000 | Amendment 2 §3.3 (still 4 concurrent at $3,600) |
+| §4 F14's "expected null" disposition, and its "$254–$842" (credit-net R, not `R_hard`) | Amendment 2 §3.2 (F14′: 7 of 9 cells viable) |
+| §6.3's OAT `width_usd = (1.00, 2.00)` | Amendment 2 §6.3 (2.00, 8.00) |
+| §7 OP-1 and OP-4 | closed by the operator; see Amendment 2 §0.2 and §7 |
+
+Everything else in this document is unchanged and still binding.

@@ -13,26 +13,31 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from signalforge.data.calendar import rth_bounds_utc, sessions
 from signalforge.data.repository import get_daily_bars
 from signalforge.db.models import (
     AppSetting,
+    AuditLog,
     Candidate,
     Instrument,
     OHLCVDaily,
+    OptionsPosition,
     PaperAccount,
     PaperFill,
     PaperOrder,
     PaperPosition,
     PaperTrade,
+    ScanRun,
 )
 from signalforge.db.types import utcnow
-from signalforge.domain import Direction, PaperDecision, PositionSide, QualityGate
+from signalforge.domain import Direction, Horizon, PaperDecision, PositionSide, QualityGate
 from signalforge.killswitch import ensure_not_engaged
 from signalforge.observability import get_logger
 from signalforge.paper.equity_guard import NotAnEquityPosition, assert_equity_instrument
+from signalforge.settings_store import effective_research_config
 
 __all__ = [
     "Decision",
@@ -129,6 +134,252 @@ def record_decision(
     return trade.id
 
 
+def _completed_market_date(now: datetime) -> date:
+    completed = [
+        d
+        for d in sessions(now.date() - timedelta(days=14), now.date())
+        if (bounds := rth_bounds_utc(d)) is not None and bounds[1] <= now
+    ]
+    if not completed:
+        raise ValueError("no completed market session")
+    return completed[-1]
+
+
+def _mark_quality_ok(bar: OHLCVDaily) -> bool:
+    return (
+        not bar.quality_flags
+        and bar.is_adjusted
+        and (not bar.is_simulated or bar.source.startswith("fixture"))
+        and _finite_decimal(bar.close, "mark") > 0
+    )
+
+
+def _exit_slippage(session: Session, pos: PaperPosition) -> float:
+    trade = session.scalar(
+        select(PaperTrade).where(PaperTrade.position_id == pos.id).order_by(PaperTrade.id)
+    )
+    evidence = trade.plan_json.get("risk_decision", {}) if trade else {}
+    return max(3.0, float(evidence.get("exit_slippage_bps", 3.0)))
+
+
+def _acceptance_freshness(session: Session, cand: Candidate, now: datetime) -> dict[str, object]:
+    """Live daily acceptance requires a fresh scan and the last completed XNYS bar.
+
+    Scan age uses the effective horizon budget. Source-specific market dates,
+    not a frozen PASSED/fresh flag or a fetch-success timestamp, authorize entry.
+    Intraday acceptance needs a separate intraday execution-price model.
+    """
+    run = session.get(ScanRun, cand.scan_run_id)
+    if run is None or not run.source or run.finished_at is None:
+        raise AutoSimulateForbidden("freshness: missing completed, source-qualified scan")
+    if run.started_at > run.finished_at:
+        raise AutoSimulateForbidden("freshness: invalid scan timestamp chronology")
+    if cand.horizon is Horizon.INTRADAY:
+        raise AutoSimulateForbidden("freshness: daily ledger cannot validate intraday execution")
+    budget = timedelta(
+        minutes=effective_research_config(session).data_quality.freshness_budget_minutes[
+            cand.horizon
+        ]
+    )
+    for timestamp in (run.started_at, run.finished_at, cand.created_at):
+        if timestamp > now or now - timestamp > budget:
+            raise AutoSimulateForbidden("freshness: future or stale candidate/scan timestamp")
+    market_date = _completed_market_date(now)
+    inst = session.get(Instrument, cand.instrument_id)
+    assert inst is not None
+    bars = get_daily_bars(session, inst.symbol, market_date, market_date, source=run.source)
+    bounds = rth_bounds_utc(market_date)
+    assert bounds is not None
+    if len(bars) != 1 or not bounds[1] <= bars[0].ingested_at <= now:
+        raise AutoSimulateForbidden("freshness: missing current source-qualified completed bar")
+    if not _mark_quality_ok(bars[0]):
+        raise AutoSimulateForbidden("freshness: flagged, unadjusted or simulated source bar")
+    return {
+        "mode": "current",
+        "checked_at": now.isoformat(),
+        "source": run.source,
+        "market_date": market_date.isoformat(),
+        "scan_run_id": run.id,
+        "scan_age_budget_seconds": budget.total_seconds(),
+    }
+
+
+def _position_bars(
+    session: Session, pos: PaperPosition, symbol: str, start: date, end: date
+) -> list[OHLCVDaily]:
+    """Use frozen acceptance provenance; ambiguous legacy data fails closed."""
+    trade = session.scalar(
+        select(PaperTrade)
+        .where(PaperTrade.position_id == pos.id, PaperTrade.decision == PaperDecision.ACCEPTED)
+        .order_by(PaperTrade.id)
+    )
+    source = None
+    if trade is not None:
+        source = (trade.signal_snapshot_json.get("scan") or {}).get("source") or None
+    bars = get_daily_bars(session, symbol, start, end, source=source)
+    if len({bar.session_date for bar in bars}) != len(bars):
+        raise ValueError("ambiguous paper mark sources; explicit provenance required")
+    return bars
+
+
+def _finite_decimal(value: object, label: str) -> Decimal:
+    try:
+        result = Decimal(str(value))
+    except ArithmeticError as exc:
+        raise ValueError(f"invalid {label}") from exc
+    if not result.is_finite():
+        raise ValueError(f"nonfinite {label}")
+    return result
+
+
+def _safe_shares(
+    session: Session,
+    acct: PaperAccount,
+    inst: Instrument,
+    price: Decimal,
+    stop: Decimal,
+    candidate_risk: Decimal,
+    on: date,
+    valuation_at: datetime,
+    exit_slippage_bps: float,
+) -> tuple[int, dict[str, object]]:
+    """Recheck account exposure under a write lock, never scan-time estimates.
+
+    The no-op update serializes SQLite writers too. The caller owns the
+    transaction; immutable historical trades are never updated.
+    """
+    session.flush()
+    session.execute(
+        update(PaperAccount).where(PaperAccount.id == acct.id).values(cash=PaperAccount.cash)
+    )
+    session.refresh(acct)
+    cash = _finite_decimal(acct.cash, "cash")
+    reserved = _finite_decimal(acct.collateral_reserved, "reserved collateral")
+    if cash < 0 or reserved < 0 or reserved > cash:
+        raise ValueError("invalid paper account buying power")
+    if (
+        session.scalar(
+            select(OptionsPosition.id).where(
+                OptionsPosition.account_id == acct.id, OptionsPosition.closed_at.is_(None)
+            )
+        )
+        is not None
+    ):
+        raise ValueError("cannot safely size equity in an account with open options")
+    positions = list(
+        session.scalars(
+            select(PaperPosition)
+            .where(PaperPosition.account_id == acct.id, PaperPosition.closed_at.is_(None))
+            .execution_options(populate_existing=True)
+        )
+    )
+    gross = Decimal(0)
+    open_risk = Decimal(0)
+    symbol_value = Decimal(0)
+    sector_value = Decimal(0)
+    sector = (inst.sector or "").strip().casefold()
+    market_date = _completed_market_date(valuation_at)
+    for pos in positions:
+        held = session.get(Instrument, pos.instrument_id)
+        if held is None or pos.side is not PositionSide.LONG or pos.qty <= 0:
+            raise ValueError("unsupported existing paper exposure")
+        assert_equity_instrument(held, "accept_candidate")
+        bars = _position_bars(session, pos, held.symbol, market_date, market_date)
+        if pos.opened_at.date() > on:
+            raise ValueError("account contains positions opened after valuation date")
+        if not bars or not _mark_quality_ok(bars[-1]):
+            raise ValueError("paper account limits: missing current, clean adjusted exposure mark")
+        if bars[-1].ingested_at > valuation_at:
+            raise ValueError("paper account limits: future exposure mark")
+        mark = _finite_decimal(bars[-1].close, "mark")
+        held_stop = _finite_decimal(pos.stop_level, "existing stop")
+        if mark <= 0 or held_stop <= 0:
+            raise ValueError("invalid existing paper exposure")
+        value = mark * pos.qty
+        gross += value
+        open_risk += (
+            max(
+                Decimal(0),
+                mark
+                - _money(
+                    float(held_stop)
+                    * (1 - _slippage_frac(_exit_slippage(session, pos), _NOMINAL_SPREAD_BPS))
+                ),
+            )
+            * pos.qty
+        )
+        if pos.instrument_id == inst.id:
+            symbol_value += value
+        if sector and (held.sector or "").strip().casefold() == sector:
+            sector_value += value
+    equity = cash + gross
+    limits = effective_research_config(session).risk
+
+    def cap(pct: float) -> Decimal:
+        return equity * _finite_decimal(pct, "risk limit") / 100
+
+    # Budget the adverse rounded stop fill too (gaps can still exceed stop risk).
+    risk_per_share = price - _money(
+        float(stop) * (1 - _slippage_frac(exit_slippage_bps, _NOMINAL_SPREAD_BPS))
+    )
+    effective_limits = {
+        "per_trade_risk_pct": min(0.5, limits.per_trade_risk_pct),
+        "max_daily_portfolio_risk_pct": min(1.5, limits.max_daily_portfolio_risk_pct),
+        "max_position_concentration_pct": min(5.0, limits.max_position_concentration_pct),
+        "max_portfolio_exposure_pct": min(100.0, limits.max_portfolio_exposure_pct),
+        "max_correlated_exposure_pct": min(20.0, limits.max_correlated_exposure_pct),
+    }
+    budgets = {
+        "candidate_risk": (candidate_risk, risk_per_share),
+        "per_trade_risk": (cap(effective_limits["per_trade_risk_pct"]), risk_per_share),
+        "open_risk": (
+            cap(effective_limits["max_daily_portfolio_risk_pct"]) - open_risk,
+            risk_per_share,
+        ),
+        "cash": (cash - reserved, price),
+        "symbol": (cap(effective_limits["max_position_concentration_pct"]) - symbol_value, price),
+        "gross": (cap(effective_limits["max_portfolio_exposure_pct"]) - gross, price),
+    }
+    if sector and sector not in {"unknown", "unknown_sector"}:
+        budgets["sector"] = (
+            cap(effective_limits["max_correlated_exposure_pct"]) - sector_value,
+            price,
+        )
+    share_caps = {
+        name: int(budget // unit) if budget > 0 else 0 for name, (budget, unit) in budgets.items()
+    }
+    shares = min(share_caps.values())
+    if shares < 1:
+        raise ValueError("paper account risk/cash/concentration limits allow no whole share")
+    return shares, {
+        "policy": "conservative-long-only-v1",
+        "equity": str(equity),
+        "cash": str(cash),
+        "reserved_collateral": str(reserved),
+        "gross_before": str(gross),
+        "open_risk_before": str(open_risk),
+        "symbol_before": str(symbol_value),
+        "sector_before": str(sector_value),
+        "sector": sector or None,
+        "configured_limits": limits.model_dump(mode="json"),
+        "effective_limits": effective_limits,
+        "candidate_risk_dollars": str(candidate_risk),
+        "risk_per_share": str(risk_per_share),
+        "exit_slippage_bps": exit_slippage_bps,
+        "accepted_risk_dollars": str(risk_per_share * shares),
+        "share_caps": share_caps,
+        "shares": shares,
+        "reduced": shares < share_caps["candidate_risk"],
+        "reductions": [
+            name for name, count in share_caps.items() if count < share_caps["candidate_risk"]
+        ],
+        "binding_caps": [name for name, count in share_caps.items() if count == shares],
+        "limit_overrides_narrowed": [
+            key for key, value in effective_limits.items() if value < getattr(limits, key)
+        ],
+    }
+
+
 def accept_candidate(
     session: Session,
     candidate_id: int,
@@ -162,25 +413,50 @@ def accept_candidate(
     inst = session.get(Instrument, cand.instrument_id)
     assert inst is not None
     acct = _account(session, account_name)
+    if actor == "auto_simulate":
+        # Direct calls cannot bypass the automatic strategy/scope/freshness guard.
+        assert_auto_simulate_allowed(session, cand)
+        if as_of is not None:
+            raise AutoSimulateForbidden("automatic acceptance cannot backdate its fill")
+    acceptance_context = (
+        _acceptance_freshness(session, cand, utcnow())
+        if as_of is None
+        else {"mode": "historical_replay", "as_of": as_of.isoformat()}
+    )
 
+    assert_equity_instrument(inst, "accept_candidate")
+    if cand.direction is not Direction.LONG:
+        raise ValueError("paper acceptance is long-only")
     entry_ref = (cand.entry_zone_low + cand.entry_zone_high) / 2.0
-    stop = cand.invalidation_level
-    per_share_risk = abs(entry_ref - stop)
-    if per_share_risk <= 0:
-        raise ValueError("candidate has a zero-width risk (entry == stop)")
-
-    shares = round((cand.risk_dollars or 0.0) / per_share_risk) if cand.risk_dollars else 0
-    if shares < 1:
-        # fall back to a nominal 0.5% of equity if the candidate carried no sizing
-        shares = max(1, int((float(acct.cash) * 0.005) // per_share_risk))
-
-    side = PositionSide.LONG if cand.direction is Direction.LONG else PositionSide.SHORT
-    d = 1 if side is PositionSide.LONG else -1
-    slip = _slippage_frac(slippage_bps if slippage_bps is not None else 3.0, _NOMINAL_SPREAD_BPS)
-    fill_price = entry_ref * (1 + d * slip)
+    stop = _finite_decimal(cand.invalidation_level, "stop")
+    entry = _finite_decimal(entry_ref, "entry")
+    risk_budget = _finite_decimal(cand.risk_dollars, "candidate risk")
+    slip_bps = _finite_decimal(slippage_bps if slippage_bps is not None else 3.0, "slippage")
+    if entry <= 0 or stop <= 0 or stop >= entry:
+        raise ValueError("long entry must be positive and above a positive stop")
+    if risk_budget <= 0 or slip_bps < 0:
+        raise ValueError("candidate risk must be positive and slippage nonnegative")
+    side = PositionSide.LONG
+    slip = _slippage_frac(float(slip_bps), _NOMINAL_SPREAD_BPS)
+    # Size, debit and report the SAME cents-denominated execution price.
+    fill_price = float(_money(entry_ref * (1 + slip)))
+    if Decimal(str(fill_price)) <= stop:
+        raise ValueError("rounded fill must be above stop")
+    shares, risk_decision = _safe_shares(
+        session,
+        acct,
+        inst,
+        Decimal(str(fill_price)),
+        stop,
+        risk_budget,
+        as_of or utcnow().date(),
+        _as_dt(as_of) + timedelta(days=1, microseconds=-1) if as_of else utcnow(),
+        max(3.0, float(slip_bps)),
+    )
 
     spread_cost = _money(abs(entry_ref) * shares * (_NOMINAL_SPREAD_BPS / 10_000.0) / 2.0)
-    slippage_cost = _money(abs(entry_ref) * shares * slip - float(spread_cost))
+    # Include cents rounding in attribution so components reconcile to cash.
+    slippage_cost = _money((fill_price - entry_ref) * shares) - spread_cost
     if slippage_cost < 0:
         slippage_cost = Decimal("0")
     commission = Decimal("0")
@@ -188,6 +464,7 @@ def accept_candidate(
     total_cost = spread_cost + slippage_cost + commission
 
     now = utcnow()
+    execution_at = _as_dt(as_of) if as_of is not None else now
     order = PaperOrder(
         account_id=acct.id,
         candidate_id=cand.id,
@@ -195,7 +472,7 @@ def accept_candidate(
         side=side,
         qty=shares,
         order_type="market",
-        submitted_at=now,
+        submitted_at=execution_at,
         assumptions_json={
             "reference_price": round(entry_ref, 4),
             "spread_bps": _NOMINAL_SPREAD_BPS,
@@ -213,7 +490,7 @@ def accept_candidate(
         spread_cost=spread_cost,
         slippage=slippage_cost,
         commission=commission,
-        filled_at=now,
+        filled_at=execution_at,
     )
     session.add(fill)
 
@@ -225,16 +502,16 @@ def accept_candidate(
         side=side,
         qty=shares,
         avg_price=_money(fill_price),
-        stop_level=stop,
+        stop_level=float(stop),
         target_level=cand.target_level,
-        time_stop_date=_time_stop_date(as_of or date.today(), cand.time_stop_days),
-        opened_at=now,
+        time_stop_date=_time_stop_date(as_of or now.date(), cand.time_stop_days),
+        opened_at=execution_at,
     )
     session.add(position)
     session.flush()
 
-    # Cash: longs tie up notional; shorts tie up costs only (proceeds held as credit).
-    acct.cash = acct.cash - (notional + total_cost if side is PositionSide.LONG else total_cost)
+    # Spread/slippage are embedded in the fill; these fields are attribution.
+    acct.cash = acct.cash - notional - commission
 
     trade = PaperTrade(
         account_id=acct.id,
@@ -243,13 +520,17 @@ def accept_candidate(
         decision=PaperDecision.ACCEPTED,
         signal_snapshot_json=_candidate_snapshot(session, cand)
         | {"decision": {"actor": actor, "note": note, "automatic": actor == "auto_simulate"}},
-        plan_json=_plan(cand) | {"shares": shares, "fill_price": round(fill_price, 4)},
+        plan_json=_plan(cand)
+        | {
+            "shares": shares,
+            "fill_price": round(fill_price, 4),
+            "acceptance_context": acceptance_context,
+            "risk_decision": risk_decision,
+        },
         why_qualified="; ".join(cand.reasons_qualify),
         why_might_fail="; ".join(cand.reasons_fail),
         # The same ``actor`` that is frozen into the snapshot JSON, also written
         # to the indexed column an order-authorisation predicate reads (D6 §5.3).
-        # Nothing else about this path changes: the same order, fill, position,
-        # cash movement, and snapshot payload are produced as before.
         actor=actor,
         created_at=now,
     )
@@ -296,12 +577,18 @@ def mark_to_market(
     (it is protective); only *opening* new positions is blocked.
     """
     acct = _account(session, account_name)
-    on = as_of or date.today()
+    # Serialize closing with acceptance and refresh stale identity-map cash.
+    session.flush()
+    session.execute(
+        update(PaperAccount).where(PaperAccount.id == acct.id).values(cash=PaperAccount.cash)
+    )
+    session.refresh(acct)
+    on = as_of or utcnow().date()
     open_positions = list(
         session.scalars(
-            select(PaperPosition).where(
-                PaperPosition.account_id == acct.id, PaperPosition.closed_at.is_(None)
-            )
+            select(PaperPosition)
+            .where(PaperPosition.account_id == acct.id, PaperPosition.closed_at.is_(None))
+            .execution_options(populate_existing=True)
         )
     )
     realized = 0.0
@@ -314,16 +601,52 @@ def mark_to_market(
         # ``assert_auto_simulate_allowed`` already applies, applied at the second
         # place it matters. Provably a no-op against current data.
         assert_equity_instrument(inst, "mark_to_market")
-        bars = get_daily_bars(session, inst.symbol, on - _lookback(), on)
+        bars = _position_bars(
+            session, pos, inst.symbol, pos.opened_at.date() + timedelta(days=1), on
+        )
+        bars = [
+            bar
+            for bar in bars
+            if (bounds := rth_bounds_utc(bar.session_date)) is not None
+            and (as_of is not None or bounds[1] <= utcnow())
+        ]
         if not bars:
             continue
+        # Do not skip suspect history: an unknown earlier stop cannot be
+        # reconstructed from a later clean bar. Refuse before changing cash.
+        for bar in bars:
+            if not _mark_quality_ok(bar):
+                raise ValueError("untrusted source bar in paper exit history")
+            o, h, low, close, volume = (
+                _finite_decimal(value, "exit OHLCV")
+                for value in (bar.open, bar.high, bar.low, bar.close, bar.volume)
+            )
+            if not (0 < low <= min(o, close) <= max(o, close) <= h and volume >= 0):
+                raise ValueError("inconsistent OHLCV in paper exit history")
         last = bars[-1]
         d = 1 if pos.side is PositionSide.LONG else -1
-        exit_reason = _exit_reason(pos, last, on)
+        # Daily OHLC cannot order entry-day events. Use only subsequent bars,
+        # chronologically, so missed polling days cannot hide an earlier exit.
+        exit_reason = None
+        for bar in bars:
+            exit_reason = _exit_reason(pos, bar, bar.session_date)
+            if exit_reason:
+                last = bar
+                break
         if exit_reason:
             exit_px = _exit_price(pos, last, exit_reason)
+            if exit_reason == "stop":
+                exit_px = (
+                    min(exit_px, float(last.open)) if d == 1 else max(exit_px, float(last.open))
+                )
+            exit_slippage = _exit_slippage(session, pos)
+            exit_px = float(
+                _money(exit_px * (1 - d * _slippage_frac(exit_slippage, _NOMINAL_SPREAD_BPS)))
+            )
             pnl = d * (exit_px - float(pos.avg_price)) * pos.qty
-            pos.closed_at = _as_dt(on)
+            bounds = rth_bounds_utc(last.session_date)
+            assert bounds is not None
+            pos.closed_at = bounds[1]
             pos.realized_pnl = _money(pnl)
             # Cash model: a long tied up notional on open, so it gets exit proceeds
             # back; a short only paid costs on open, so it gets the realised P&L.
@@ -331,11 +654,30 @@ def mark_to_market(
                 acct.cash = acct.cash + _money(exit_px * pos.qty)
             else:
                 acct.cash = acct.cash + _money(pnl)
+            session.add(
+                AuditLog(
+                    ts=utcnow(),
+                    actor="paper.ledger",
+                    action="paper.position_closed",
+                    entity=f"paper_position:{pos.id}",
+                    before_json={},
+                    after_json={
+                        "source": last.source,
+                        "market_date": last.session_date.isoformat(),
+                        "exit_reason": exit_reason,
+                        "fill_price": exit_px,
+                        "slippage_bps": exit_slippage,
+                        "spread_bps": _NOMINAL_SPREAD_BPS,
+                        "time_semantics": "daily bar close; intrabar fill time unknown",
+                    },
+                )
+            )
             realized += pnl
             closed += 1
             _log.info("paper.close", symbol=inst.symbol, reason=exit_reason, pnl=round(pnl, 2))
         else:
             unrealized += d * (float(last.close) - float(pos.avg_price)) * pos.qty
+    session.flush()  # A repeated call in this transaction must not close/credit twice.
     return MarkToMarketResult(
         checked=len(open_positions),
         closed=closed,
@@ -551,3 +893,4 @@ def assert_auto_simulate_allowed(session: Session, cand: Candidate) -> None:
         universe=frozenset(x.upper() for x in (run.universe_json or ())),
     ):
         raise AutoSimulateForbidden("scan scope does not match the strategy's approved scope")
+    _acceptance_freshness(session, cand, utcnow())

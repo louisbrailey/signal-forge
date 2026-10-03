@@ -25,6 +25,7 @@ import inspect
 from datetime import datetime, timedelta
 
 import pytest
+from freezegun import freeze_time
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -209,6 +210,7 @@ def test_the_factory_is_called_with_the_cycles_own_session(db_url: str) -> None:
     assert seen[0].is_active
 
 
+@freeze_time(NOW)
 def test_the_cycle_proves_is_paper_every_cycle_through_the_factory(
     session: Session, strategy_version: object, limits_row: object
 ) -> None:

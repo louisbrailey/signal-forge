@@ -1,14 +1,28 @@
 """O3 — short vertical (credit) spread, regime-filtered.  D5's pre-registration,
-as amended by D5a.
+as amended by D5a and D5a Amendment 2.
 
 **Every parameter, threshold, axis and rule in this file was fixed in
 ``docs/research/options_designs/D5_first_strategy_preregistration.md`` and its
-amendment ``D5a_amendment_1_reachable_credit_floor_and_fixed_R.md`` before any
-option price, IV, greek, credit, return or P&L was inspected (R1).**  Nothing
-here may be re-tuned in response to a result; a behavioural change ships as a new
-version and costs a fresh sealed look (R3).
+amendments ``D5a_amendment_1_reachable_credit_floor_and_fixed_R.md`` and
+``D5a_amendment_2_raised_cap_and_viable_width.md`` before any option price, IV,
+greek, credit, return or P&L was inspected (R1).**  Nothing here may be re-tuned
+in response to a result; a behavioural change ships as a new version and costs a
+fresh sealed look (R3).
 
-**v0.1.1 supersedes v0.1.0 at k = 0.**  ``count_sealed_looks`` keys on
+**v0.1.2 supersedes v0.1.1 at k = 0 (D5a Amendment 2, 2026-09-23).**  The
+operator confirmed OP-1: the per-structure cap rises from $250 to **$900** and the
+aggregate from $1,000 to **$3,600**.  Under the new cap the widest width placeable
+on the $1.00 ladder is ``floor((900 - 1.60) / 100) = $8``, hard max loss
+``8 x 100 + 1.60 = $801.60`` (10.9% margin).  At $8 the target-win outcome
+``0.5C - F`` is positive in 7 of the 9 Stage A cells F14 tabulated (every cell
+except SPY and QQQ at sigma 0.30), where at $2 it was negative in all 9.  The
+wider width moves the attainable adverse credit-to-width ratio to
+**0.0938 - 0.1813** (positive in all 30 cells), so the credit-floor band is
+re-derived by D5a's own quantile rule: baseline **0.150**, axis
+``(0.150, 0.155)``, OAT loosening **0.140**.  The text below the next paragraph
+is the v0.1.1 history, kept legible rather than rewritten.
+
+**v0.1.1 superseded v0.1.0 at k = 0.**  ``count_sealed_looks`` keys on
 ``Strategy.name`` and no row in ``strategy`` begins ``options``, so no sealed look
 has been spent on this family and v0.1.0 was never evaluated.  D5a repairs three
 arithmetic defects that made v0.1.0 unevaluable and ratifies the horizon:
@@ -33,13 +47,16 @@ arithmetic defects that made v0.1.0 unevaluable and ratifies the horizon:
   deferral-extended force-close bound — so POSITION is arithmetically impossible
   for every cell of the grid, not merely a worse fit.
 
-**F14, pre-registered before the first look (D5a §4).**  At the $250 cap and this
-frozen cost model, *no* width is simultaneously cap-compliant and cost-viable: the
-target-win outcome ``0.5C - F`` is negative in every Stage A cell at $2.00, and the
-minimum cost-viable widths imply max losses of $254 (IWM) to $842 (SPY).  The
-expected disposition is D5 §10's **null option**, and only the operator raising
-``options_per_structure_max_loss`` (decision 4's reserved right, OP-1) can change
-that — never a post-result adjustment, which D4 §2.8a forbids by name.
+**F14, pre-registered before the first look (D5a §4) — resolved in part by OP-1.**
+At the $250 cap and this frozen cost model, *no* width was simultaneously
+cap-compliant and cost-viable: the target-win outcome ``0.5C - F`` was negative in
+every Stage A cell at $2.00, and the minimum cost-viable widths implied max losses
+of $254 (IWM) to $842 (SPY) on the credit-net R (hard bounds $301.60 to
+$1,001.60).  The operator raised the cap to $900 before any look (OP-1, 2026-09-23),
+which admits $8.00 and makes 7 of those 9 cells cost-viable; SPY and QQQ at sigma
+0.30 still need $10 / $9 (hard bounds $1,001.60 / $901.60) and stay above the cap
+(D5a Amendment 2 §3).  Raising it again after a gate result is forbidden by D4
+§2.8a by name.
 
 The claim, stated so it can be killed: index and large-cap equity options are
 sold, on average and across most regimes, at an implied volatility above the
@@ -82,7 +99,11 @@ print ratio still rises with IV, but the 3%-of-print charge rises faster, so the
 *adverse* ratio FALLS with IV: the floor now excludes rich cycles and admits quiet
 ones.  No compensating filter is added — that would be a new lever chosen without
 evidence — and the floor stays on the adverse credit, because moving it to the
-print credit would be a loosening (R4).
+print credit would be a loosening (R4).  At v0.1.2's $8 width the charge, which
+scales as ``1/W``, is a quarter of its $2 size, so the inversion is partly undone:
+the adverse ratio now RISES with IV on IWM (0.094 at sigma 0.12 to 0.181 at 0.60),
+is flat at ~0.15 on SPY/QQQ through sigma 0.35 and falls only above 0.40
+(Amendment 2 §4.1).  It stays recorded per entry and per non-entry for gate 8.
 """
 
 from __future__ import annotations
@@ -114,10 +135,12 @@ from signalforge.research.registry import StrategySpec, StrategyStatus
 from signalforge.research.strategies.base import lagged_regime
 
 #: R3: any behavioural change ships as a new version and costs a fresh sealed
-#: look.  0.1.1 is D5a's amendment of the never-evaluated 0.1.0; because
-#: ``count_sealed_looks`` reports k = 0 for this family, the amendment costs no
-#: look and D5 §10's variant budget (1, hard cap 2) is untouched.
-VERSION = "0.1.1"
+#: look.  0.1.1 was D5a's amendment of the never-evaluated 0.1.0; 0.1.2 is D5a
+#: Amendment 2's re-derivation of the width and the credit-floor band under the
+#: operator's raised $900 cap (OP-1).  Neither 0.1.0 nor 0.1.1 was ever evaluated,
+#: so ``count_sealed_looks`` still reports k = 0 for this family, the amendment
+#: costs no look and D5 §10's variant budget (1, hard cap 2) is untouched.
+VERSION = "0.1.2"
 
 #: D5 §2.1.  ``count_sealed_looks`` keys on this, so the options family starts at
 #: k = 0 by construction and can never be conflated with an equity family.
@@ -134,13 +157,15 @@ R_SOURCE = "config_constant:OptionsEvaluationConfig.risk_free_rate=0.04"
 #: underlying happens to have a coarse strike ladder.
 PIN_BAND_PCT = 0.005
 
-#: Decision 4's per-structure max-loss cap, verbatim, and the arithmetic gate 0.i
-#: applies to it (D5a §3.3).  ``R_hard = width_usd * M + entry_costs`` is the bound
-#: no credit can breach, because the strategy refuses ``net_credit <= 0`` outright.
-#: At the declared width that is ``2.00 * 100 + 1.60 = $201.60``, a 19.4% margin.
-#: **The cap is the OPERATOR's (decision 4) and may be raised only BEFORE a gate
-#: result** — D4 §2.8a names raising it afterwards as the forbidden move.
-OPTIONS_PER_STRUCTURE_MAX_LOSS = 250.0
+#: The per-structure max-loss cap gate 0.i applies (D5a §3.3): decision 4's $250,
+#: raised to **$900** by the operator's OP-1 confirmation on 2026-09-23, before any
+#: look (``DECISIONS_2026-09-12_wave3.md`` addendum 3).  ``R_hard = width_usd * M +
+#: entry_costs`` is the bound no credit can breach, because the strategy refuses
+#: ``net_credit <= 0`` outright.  At the declared width that is ``8.00 * 100 + 1.60
+#: = $801.60``, a 10.9% margin.  **The cap is the OPERATOR's and may be raised only
+#: BEFORE a gate result** — D4 §2.8a names raising it afterwards as the forbidden
+#: move.  Must equal ``OptionsGateThresholds.options_per_structure_max_loss``.
+OPTIONS_PER_STRUCTURE_MAX_LOSS = 900.0
 
 #: D5a §3.3, asserted as market structure exactly as ``tick_grid`` is: SPY, QQQ and
 #: IWM monthly third-Friday chains list $1.00 strike increments through the traded
@@ -175,7 +200,8 @@ QLookup = Callable[[str, date], float | None]
 
 @dataclass(frozen=True, slots=True)
 class ShortVerticalParams:
-    """D5 §4.1 as amended by D5a §6.1 — the frozen ``v0.1.1`` spec, field for field.
+    """D5 §4.1 as amended by D5a §6.1 and Amendment 2 §6 — the frozen ``v0.1.2``
+    spec, field for field.
 
     These live in a params dataclass interpolated into the spec's TEXT fields,
     exactly as ``TrendParams`` does, and must **never** become ``StrategySpec``
@@ -193,13 +219,15 @@ class ShortVerticalParams:
     stop_multiple: float = 2.0  # AXIS 3 — D5a §6.2: promoted from FIXED
     dte_target: int = 35  # AXIS 4
     profit_target_pct: float = 0.50  # AXIS 5
-    min_credit_to_width: float = 0.10  # AXIS 6 — D5a §2.4 (was 0.25, unreachable)
+    #: AXIS 6 — Amendment 2 §4 (v0.1.1: 0.10, which is near-inert at $8: 29/30).
+    min_credit_to_width: float = 0.150
     #: D5a §3: dollars of STRIKE DISTANCE per contract, fixed for the version, so
-    #: ``R_scale = width_usd * 100 = $200.00`` is identical on every underlying and
+    #: ``R_scale = width_usd * 100 = $800.00`` is identical on every underlying and
     #: gate 0.5's ``single_scale``/``scale_matches`` pass by construction.  It is
     #: deliberately NOT a grid axis: a width axis would put two R scales into one
     #: gate-5 statistic, which is the pooling gate 0.5's own evidence forbids.
-    width_usd: float = 2.00  # FIXED per version (was width_pct = 0.010 of U)
+    #: Amendment 2 §3: the widest $1.00-ladder width inside the $900 cap.
+    width_usd: float = 8.00  # FIXED per version (v0.1.1: 2.00; v0.1.0: width_pct)
     time_stop_dte: int = 7  # FIXED
     dte_window_lo: int = 28  # FIXED — derived guard around dte_target
     dte_window_hi: int = 45  # FIXED
@@ -250,41 +278,54 @@ class ShortVerticalParams:
 #: its own baseline cell.  The freed slot goes to ``stop_multiple``, which D5 §4.2
 #: itself named as the seventh parameter that deserved an axis; its stated reason
 #: for exclusion (``3.0 x 0.30 = 0.90`` of width, near-degenerate) no longer holds
-#: at the amended floor, where ``3.0 x 0.155 = 0.465 < 1`` everywhere.
+#: at the amended floor, where ``3.0 x 0.155 = 0.465 < 1`` everywhere at $2 and
+#: ``3.0 x 0.1813 = 0.544 < 1`` everywhere at v0.1.2's $8 (Amendment 2 §4.3).
 #:
 #: Each axis's second value is the HARDER side, per D5 §4.2's rule: 3.0 leaves more
-#: tail per trade than 1.5, and 0.13 thins the population more than 0.05.
+#: tail per trade than 1.5, and 0.155 thins the population more than 0.140.
 SENSITIVITY_GRID: Mapping[str, tuple[float | int, ...]] = {
     "short_delta_target": (0.12, 0.20, 0.30),
     "max_short_delta": (0.28, 0.35),
     "stop_multiple": (2.0, 3.0),
     "dte_target": (21, 35),
     "profit_target_pct": (0.50, 0.75),
-    "min_credit_to_width": (0.10, 0.13),
+    "min_credit_to_width": (0.150, 0.155),
 }
 
-#: D5a §2.3/§2.4, recorded so the derivation is checkable and the amendment cannot
-#: be silently reverted: the attainable adverse credit-to-width ratio over the
-#: declared design space (Stage A price levels x IV 0.12-0.60, 35 DTE, baseline
-#: delta and width) runs -0.2250 to +0.1550.  **The reachable region is (0, 0.155].**
-#: D5's floor (0.25) misses it by at least 61%, its harder grid value (0.30) by 94%,
-#: its OAT loosening value (0.20) by 29% — which is why v0.1.0 entered nothing.
-#: The three amended values are the p25 / median / p75 of the POSITIVE attainable
-#: ratios, each rounded DOWN to 0.01 (rounding up moves toward the unreachable side,
-#: which is the whole defect being repaired).
-ATTAINABLE_ADVERSE_RATIO_MAX = 0.155
-CREDIT_TO_WIDTH_QUANTILES: Mapping[str, float] = {"p25": 0.05, "median": 0.10, "p75": 0.13}
+#: Amendment 2 §4 (re-deriving D5a §2.3/§2.4 at the v0.1.2 width), recorded so the
+#: derivation is checkable and cannot be silently reverted: the attainable adverse
+#: credit-to-width ratio over the declared design space (Stage A price levels x IV
+#: 0.12-0.60, 35 DTE, baseline delta, ``width_usd = 8.00``) runs **0.0938 to
+#: 0.1813** and is positive in all 30 cells (at $2 it ran -0.2250 to +0.1550).
+#: The band values are the p25 / median / p75 of the POSITIVE attainable ratios
+#: (0.14375 / 0.15188 / 0.15625), rounded DOWN — to 0.005 rather than D5a's 0.01,
+#: because 0.01 collapses the median and p75 onto the same 0.15 and leaves a
+#: one-valued axis (Amendment 2 §4.2).  D5a's v0.1.1 values were 0.05 / 0.10 / 0.13
+#: with a maximum of 0.155.
+ATTAINABLE_ADVERSE_RATIO_MAX = 0.1813
+CREDIT_TO_WIDTH_QUANTILES: Mapping[str, float] = {"p25": 0.140, "median": 0.150, "p75": 0.155}
+
+#: Amendment 2 §4.4.  With an $8 width and a $0.05 tick above $3.00, the adverse
+#: credit is quantised in $5.00 steps per contract, so the ratio lives on a lattice
+#: of 0.00625 — and 0.150 = $120 / $800 lies exactly ON it.  ``(sell - buy) * 100 /
+#: 800`` then evaluates to 0.1499999999999999 on one Stage A cell and
+#: 0.15000000000000002 on two others, so a bare ``>=`` would make the entry
+#: decision depend on float rounding.  The floor is compared with this slack, which
+#: restores the pre-registered EXACT-arithmetic ``>=`` and cannot admit a ratio
+#: that is genuinely a lattice step (>= 0.00125) below the floor.
+_RATIO_EPS = 1e-9
 
 #: D5 §4.4.  Every parameter that is NOT a grid axis is enumerated here, so that
 #: under R5 "abandoned variant" stays definable as "a pre-registered cell that was
 #: not reported".  A parameter in neither list would be invisible to both
 #: mechanisms, which is exactly what R5 exists to prevent.
 OAT_PARAMETERS: Mapping[str, tuple[float | int, ...]] = {
-    # D5a §6.3.  The cap-compliant width alternative.  Reported, NEVER offered as a
-    # selectable grid cell: a "best cell" reading could otherwise select it, and the
-    # §2.3 table predicts in advance that $1.00 is cost-destroyed on SPY/QQQ (adverse
-    # ratio -0.05 at U = 660, sigma 0.15) and marginal even on IWM.
-    "width_usd": (1.00, 2.00),
+    # Amendment 2 §6.3 (was D5a §6.3's (1.00, 2.00)).  The superseded v0.1.1 width
+    # is the narrower alternative.  Reported, NEVER offered as a selectable grid
+    # cell: a "best cell" reading could otherwise select it, and F14 predicts in
+    # advance that $2.00 is cost-destroyed on every Stage A cell (target win
+    # negative in all 9), so it is the pre-registered control for the width change.
+    "width_usd": (2.00, 8.00),
     "stop_multiple": (1.5,),  # the TIGHTER direction; the grid carries 3.0
     "time_stop_dte": (5, 7, 14),
     "dte_window_lo": (24, 28, 31),
@@ -298,10 +339,11 @@ OAT_PARAMETERS: Mapping[str, tuple[float | int, ...]] = {
     # Reported one-at-a-time rather than offered as a selectable grid cell:
     # 0.25 is the EASIER direction on the profit target (less tail per trade) and
     # 0.05 is map §3.2's named failure mode on the credit floor (loosening it to
-    # reach for credit).  The grid carries the harder side of each.  0.05 is the
-    # derived p25 of the attainable region; D5 §4.4's 0.20 is outside it entirely.
+    # reach for credit).  The grid carries the harder side of each.  0.140 is the
+    # derived p25 of the attainable region at $8 (Amendment 2 §4.2; D5a's $2 p25 was
+    # 0.05); D5 §4.4's 0.20 is outside it entirely.
     "profit_target_pct": (0.25,),
-    "min_credit_to_width": (0.05,),
+    "min_credit_to_width": (0.140,),
 }
 
 #: D5 §4.2: 45 DTE is excluded **by derivation, not preference**.  Third-Friday
@@ -427,7 +469,7 @@ class OptionsShortVertical:
         requires ``width`` and ``M`` to be declared constants so the version has
         one fixed R scale, and gate 0.5 fails ``single_scale`` the moment two
         widths appear in one trade list.  ``width_pct x U`` produced one width per
-        underlying; ``width_usd`` produces ``$200.00`` on every underlying, so
+        underlying; ``width_usd`` produces one scale (``$800.00`` at v0.1.2) everywhere, so
         ``single_scale`` and ``scale_matches`` pass by construction rather than by
         luck of which symbols happened to be evaluated.
         """
@@ -825,7 +867,7 @@ class OptionsShortVertical:
         The underlying's close no longer enters the target at all (D5a §3): the
         width is a
         declared dollar constant of the version, not a fraction of the underlying,
-        so the same $2.00 distance is sought on a $240 underlying and a $660 one.
+        so the same $8.00 distance is sought on a $240 underlying and a $660 one.
         The caller then refuses anything that is not that distance exactly.
         """
         target = (
@@ -885,4 +927,4 @@ class OptionsShortVertical:
         net_credit = (sell.price - buy.price) * m
         if net_credit <= 0.0:
             return False
-        return net_credit / (width * m) >= p.min_credit_to_width
+        return net_credit / (width * m) >= p.min_credit_to_width - _RATIO_EPS

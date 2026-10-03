@@ -1,20 +1,21 @@
-"""O3 — the D5/D5a v0.1.1 short vertical, on SYNTHETIC chains only (I-O5, W3a).
+"""O3 — the D5/D5a/Amendment-2 v0.1.2 short vertical, on SYNTHETIC chains only.
 
 No real option price, IV, greek, credit, return or P&L is read anywhere here.
 Every chain is priced from Black-Scholes at a chosen sigma, so the strategy's
 inverted IV comes back as that sigma exactly and the delta it selects on is
 arithmetic the reader can check.
 
-The last three sections are the **amendment's own arithmetic**, reproduced as
-tests so that D5a cannot be silently reverted:
+The last sections are the **amendments' own arithmetic**, reproduced as tests so
+that neither D5a nor Amendment 2 can be silently reverted:
 
 * §2 — the credit-to-width bound: the ceiling is the short delta, the adverse
-  charge eats it, the attainable region is ``(0, 0.155]``, and every floor D5
-  pre-registered (0.20 / 0.25 / 0.30) sits outside it while the amended band
-  (0.05 / 0.10 / 0.13) sits inside it and trades.
-* §3 — one R scale per version: the same ``$200.00`` on every underlying, so
-  gate 0.5 passes and gate 0.i's $250 per-structure cap clears with a margin no
-  parameter setting can breach.
+  charge eats it.  D5a's $2.00 table (attainable region ``(0, 0.155]``) is kept
+  as history and still follows from the code; Amendment 2's $8.00 table
+  (0.0938 - 0.1813, positive everywhere) is what the v0.1.2 band 0.140 / 0.150 /
+  0.155 is read off.  Every floor D5 pre-registered (0.20 / 0.25 / 0.30) is still
+  outside the attainable region at both widths.
+* §3 — one R scale per version (``$800.00`` everywhere), the OP-1 $900 cap, the
+  width ceiling it implies ($8), F14 at both widths, and the $3,600 aggregate.
 * §5 — OQ-1: the holding period is bounded by the time stop, and POSITION is
   arithmetically impossible.
 """
@@ -22,6 +23,7 @@ tests so that D5a cannot be silently reverted:
 from __future__ import annotations
 
 import math
+import statistics
 from datetime import date
 from itertools import pairwise
 
@@ -33,17 +35,21 @@ from signalforge.backtest.options_engine import (
     StructureType,
     run_options_backtest,
 )
+from signalforge.config.research import OptionsRiskLimits
 from signalforge.data import calendar, options_calendar
 from signalforge.data.option_chain import ContractPrint, ContractRef, OptionChainSeries, Right
 from signalforge.data.series import PriceSeries
 from signalforge.domain import Horizon
 from signalforge.options import blackscholes as bs
-from signalforge.research.options_gates import gate_0_5_structure
+from signalforge.research.options_gates import OptionsGateThresholds, gate_0_5_structure
 from signalforge.research.options_strategies import (
     ATTAINABLE_ADVERSE_RATIO_MAX,
     CREDIT_TO_WIDTH_QUANTILES,
+    DECLARED_STRIKE_INCREMENT,
+    OAT_PARAMETERS,
     OPTIONS_PER_STRUCTURE_MAX_LOSS,
     PREREGISTERED_COST_MODEL,
+    SENSITIVITY_GRID,
     OptionsShortVertical,
     ShortVerticalParams,
 )
@@ -61,6 +67,14 @@ YEARS = (EXPIRY - SESSIONS[SIGNAL_IDX]).days / 365.0
 #: increments through the traded region.  The synthetic ladder uses the same.
 LADDER_STEP = 1
 
+#: The sigma the MECHANISM tests run at, derived rather than chosen: at v0.1.2's
+#: $8.00 width the IWM-scale ($240) chain's adverse credit/width is 0.1387 at sigma
+#: 0.20 and 0.1462 at 0.25 — BELOW the 0.150 baseline floor — and 0.1637 at 0.30,
+#: which clears every grid value (0.150, 0.155) and the OAT value (0.140).  The
+#: v0.1.1 tests ran at 0.20 because 0.20 cleared v0.1.1's 0.10 at $2.  Asserted
+#: below in ``test_the_mechanism_sigma_clears_the_baseline_floor``.
+MECH_SIGMA = 0.30
+
 
 def _ticker(right: Right, strike: float, sym: str = "IWM") -> str:
     return f"O:{sym}240315{'P' if right is Right.PUT else 'C'}{int(strike * 1000):08d}"
@@ -68,7 +82,7 @@ def _ticker(right: Right, strike: float, sym: str = "IWM") -> str:
 
 def build_chain(
     *,
-    sigma: float = 0.20,
+    sigma: float = MECH_SIGMA,
     volume: float = 1000.0,
     transactions: int | None = 50,
     shares_per_contract: int = 100,
@@ -128,7 +142,7 @@ def _q(_sym: str, _d: date) -> float:
 
 
 def strategy(**param_overrides) -> OptionsShortVertical:
-    """The strategy at its **pre-registered v0.1.1 parameters**.
+    """The strategy at its **pre-registered v0.1.2 parameters**.
 
     v0.1.0's version of this helper had to loosen ``min_credit_to_width`` to 0.08
     — a value that was never pre-registered anywhere — because the pre-registered
@@ -180,14 +194,39 @@ def test_a_signal_session_outside_the_dte_window_skips_the_cycle() -> None:
 # --------------------------------------------------------------------------- #
 # the regime filter, lagged one completed session
 # --------------------------------------------------------------------------- #
+#: SIDE-SELECTION mechanism tests only.  At v0.1.2's $8 width the CALL mirror's
+#: adverse credit/width tops out at 0.135 over the whole Stage A x IV space (0.125
+#: on this $240 chain at sigma 0.30), below every v0.1.2 band value — Amendment 2
+#: F15.  Testing WHICH side is chosen therefore needs a floor the call side can
+#: clear; v0.1.1's pre-registered 0.10 is used, and F15 itself is asserted below.
+SIDE_TEST_FLOOR = 0.10
+
+
 def test_a_bear_regime_sells_the_call_side_mirror() -> None:
     """The mirror is what makes gate 6's bear bucket reachable at all."""
     chain, under = build_chain()
-    strat = strategy()
+    strat = strategy(min_credit_to_width=SIDE_TEST_FLOOR)
     strat.proxy_regimes = _regimes(dict.fromkeys(range(len(SESSIONS)), Trend.BEAR))
     sig = strat(chain.head(SIGNAL_IDX), under.head(SIGNAL_IDX), SIGNAL_IDX)
     assert sig is not None
     assert {leg.contract.right for leg in sig.structure.legs} == {Right.CALL}
+
+
+@pytest.mark.parametrize("sigma", [0.15, 0.20, 0.30, 0.40, 0.60])
+def test_f15_the_call_mirror_enters_nothing_at_the_v012_band(sigma: float) -> None:
+    """**F15, pre-registered in Amendment 2 §4.6 before any look.**
+
+    The v0.1.2 band is read off the PUT side (D5a's rule, unchanged in scope).  At
+    $8 the call mirror's attainable adverse ratio is 0.050 - 0.135, so under a
+    BEAR label the strategy enters nothing at the 0.140 OAT value or either grid
+    value: gate 6's bear bucket is expected EMPTY and the regime filter reduces to
+    "sell puts, or stand aside".  Recorded so it is a prediction, not a discovery.
+    """
+    chain, under = build_chain(sigma=sigma)
+    for floor in CREDIT_TO_WIDTH_QUANTILES.values():
+        strat = strategy(min_credit_to_width=floor)
+        strat.proxy_regimes = _regimes(dict.fromkeys(range(len(SESSIONS)), Trend.BEAR))
+        assert strat(chain.head(SIGNAL_IDX), under.head(SIGNAL_IDX), SIGNAL_IDX) is None
 
 
 def test_a_neutral_regime_sells_the_put_side_like_a_bull_one() -> None:
@@ -205,7 +244,7 @@ def test_the_regime_read_is_lagged_by_exactly_one_completed_session() -> None:
     """The label used is the one in force at ``t-1``, so nothing depends on a
     close the signal session itself produced."""
     chain, under = build_chain()
-    strat = strategy()
+    strat = strategy(min_credit_to_width=SIDE_TEST_FLOOR)
     strat.regime_lag_sessions = 1
     # BEAR at t-1, BULL at t: the lagged read must still choose the CALL mirror.
     strat.proxy_regimes = _regimes({SIGNAL_IDX - 1: Trend.BEAR, SIGNAL_IDX: Trend.BULL})
@@ -242,10 +281,10 @@ def _selected(strat: OptionsShortVertical, chain, under) -> tuple[float, float]:
 
 
 def test_the_short_strike_is_the_listed_strike_closest_to_the_delta_target() -> None:
-    chain, under = build_chain(sigma=0.20)
+    chain, under = build_chain(sigma=MECH_SIGMA)
     short, _ = _selected(strategy(), chain, under)
     deltas = {
-        k: abs(bs.greeks(SPOT, float(k), YEARS, R, 0.20, call=False, q=Q).delta)
+        k: abs(bs.greeks(SPOT, float(k), YEARS, R, MECH_SIGMA, call=False, q=Q).delta)
         for k in range(int(SPOT * 0.70), int(SPOT * 1.30) + 1)
     }
     best = min(
@@ -259,20 +298,20 @@ def test_the_short_strike_is_the_listed_strike_closest_to_the_delta_target() -> 
 def test_a_strike_beyond_max_short_delta_is_never_selectable() -> None:
     """``max_short_delta`` caps how far axis 1 may be pushed to satisfy the
     credit floor — map §3.2's Rule, honoured literally."""
-    chain, under = build_chain(sigma=0.20)
+    chain, under = build_chain(sigma=MECH_SIGMA)
     short_loose, _ = _selected(
         strategy(short_delta_target=0.30, max_short_delta=0.35), chain, under
     )
     short_capped, _ = _selected(
         strategy(short_delta_target=0.30, max_short_delta=0.28), chain, under
     )
-    capped_delta = abs(bs.greeks(SPOT, short_capped, YEARS, R, 0.20, call=False, q=Q).delta)
+    capped_delta = abs(bs.greeks(SPOT, short_capped, YEARS, R, MECH_SIGMA, call=False, q=Q).delta)
     assert capped_delta <= 0.28
     assert short_capped != short_loose  # the axis genuinely binds, it is not inert
 
 
 def test_no_strike_within_the_delta_tolerance_is_a_non_entry() -> None:
-    chain, under = build_chain(sigma=0.20)
+    chain, under = build_chain(sigma=MECH_SIGMA)
     assert (
         strategy(short_delta_target=0.02, delta_tolerance=0.001)(
             chain.head(SIGNAL_IDX), under.head(SIGNAL_IDX), SIGNAL_IDX
@@ -281,23 +320,35 @@ def test_no_strike_within_the_delta_tolerance_is_a_non_entry() -> None:
     )
 
 
-@pytest.mark.parametrize("width_usd", [1.00, 2.00])
-def test_the_wing_sits_at_exactly_the_declared_dollar_width(width_usd: float) -> None:
+@pytest.mark.parametrize(
+    ("width_usd", "floor"),
+    # v0.1.1's width at v0.1.1's floor (the OAT control), and v0.1.2's at its own.
+    [(2.00, 0.10), (8.00, 0.150)],
+)
+def test_the_wing_sits_at_exactly_the_declared_dollar_width(width_usd: float, floor: float) -> None:
     """D5a §3: the width is dollars of STRIKE DISTANCE per contract, a constant of
     the version — not a fraction of the underlying close."""
-    chain, under = build_chain(sigma=0.20)
-    short, long_ = _selected(strategy(width_usd=width_usd), chain, under)
+    chain, under = build_chain(sigma=MECH_SIGMA)
+    short, long_ = _selected(strategy(width_usd=width_usd, min_credit_to_width=floor), chain, under)
     assert short - long_ == pytest.approx(width_usd)
+
+
+#: The price levels the multi-underlying tests use.  v0.1.1 used $120/$240/$360 at
+#: sigma 0.15; at $8.00 a $120 underlying's adverse ratio is 0.083-0.143 over sigma
+#: 0.20-0.40 and never clears the 0.150 floor (an $8 wing is 6.7% of a $120 close),
+#: so the levels move up to where the mechanism is exercised at all.  That a cheap
+#: underlying rarely clears the floor is itself Amendment 2 §4.5's disclosure.
+PRICE_LEVELS = (240.0, 360.0, 480.0)
 
 
 def test_the_declared_width_is_the_same_distance_at_every_price_level() -> None:
     """The whole repair, in one assertion: ``width_pct x U`` gave a different width
     (and therefore a different R scale) on every underlying, which is what failed
-    gate 0.5.  ``width_usd`` gives $2.00 at $120 and at $360 alike."""
-    for spot in (120.0, 240.0, 360.0):
-        chain, under = build_chain(sigma=0.15, spot=spot)
+    gate 0.5.  ``width_usd`` gives $8.00 at $240 and at $480 alike."""
+    for spot in PRICE_LEVELS:
+        chain, under = build_chain(sigma=MECH_SIGMA, spot=spot)
         short, long_ = _selected(strategy(), chain, under)
-        assert short - long_ == pytest.approx(2.00)
+        assert short - long_ == pytest.approx(8.00)
 
 
 def test_a_ladder_that_cannot_place_the_declared_width_exactly_is_a_non_entry() -> None:
@@ -308,13 +359,13 @@ def test_a_ladder_that_cannot_place_the_declared_width_exactly_is_a_non_entry() 
     rewritten width — the same hazard the tolerance was written for, handled more
     strictly rather than less.
     """
-    coarse, under = build_chain(sigma=0.20, step=5)
+    coarse, under = build_chain(sigma=MECH_SIGMA, step=5)
     assert strategy()(coarse.head(SIGNAL_IDX), under.head(SIGNAL_IDX), SIGNAL_IDX) is None
 
 
 def test_the_long_wing_always_sits_strictly_further_otm_than_the_short() -> None:
     """A naked short is not representable: ``OptionStructure`` refuses it."""
-    chain, under = build_chain(sigma=0.20)
+    chain, under = build_chain(sigma=MECH_SIGMA)
     short, long_ = _selected(strategy(), chain, under)
     assert long_ < short
     sig = strategy()(chain.head(SIGNAL_IDX), under.head(SIGNAL_IDX), SIGNAL_IDX)
@@ -370,7 +421,7 @@ def test_the_strategy_is_handed_a_truncated_view_it_cannot_opt_out_of() -> None:
 # end to end through the engine
 # --------------------------------------------------------------------------- #
 def test_the_strategy_drives_the_engine_to_a_closed_structure() -> None:
-    chain, under = build_chain(sigma=0.20)
+    chain, under = build_chain(sigma=MECH_SIGMA)
     outcome = run_options_backtest(
         chain,
         under,
@@ -391,7 +442,7 @@ def test_the_strategy_drives_the_engine_to_a_closed_structure() -> None:
 
 
 def test_the_engine_goes_flat_between_cycles_so_nothing_overlaps() -> None:
-    chain, under = build_chain(sigma=0.20)
+    chain, under = build_chain(sigma=MECH_SIGMA)
     outcome = run_options_backtest(
         chain, under, strategy(), cost_model=PREREGISTERED_COST_MODEL, warmup=0
     )
@@ -400,12 +451,32 @@ def test_the_engine_goes_flat_between_cycles_so_nothing_overlaps() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# D5a §2 — THE BOUND TABLE.  Reproduced so the amendment cannot be reverted.
+# §2 — THE BOUND TABLES.  Reproduced so neither amendment can be reverted.
 # --------------------------------------------------------------------------- #
 #: D5a §0.3's declared dividend yields, per Stage A underlying.  They are an
 #: assumption **for this derivation only**: at evaluation time ``q`` is sourced per
 #: underlying per session and an unsourced ``q`` is still a non-entry.
 STAGE_A_Q: dict[float, float] = {660.0: 0.013, 590.0: 0.006, 240.0: 0.013}
+
+#: D5a §2.3's declared IV grid over the Stage A levels — 30 cells.
+IV_GRID = (0.12, 0.15, 0.18, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50, 0.60)
+
+#: Entry costs of one 2-leg structure, from the SHIPPED cost model: $1.60.
+ENTRY_COSTS = PREREGISTERED_COST_MODEL.commission(2) + PREREGISTERED_COST_MODEL.fees(2)
+
+#: D5 §2.2's declared population, all on the same monthly third-Friday cycle.
+DECLARED_UNDERLYINGS = 14
+
+
+def _short_strike(spot: float, sigma: float, q: float) -> int:
+    deltas = {
+        k: abs(bs.greeks(spot, float(k), YEARS, R, sigma, call=False, q=q).delta)
+        for k in range(int(spot * 0.60), int(spot) + 1)
+    }
+    return min(
+        (k for k, d in deltas.items() if d <= 0.35 and abs(d - 0.20) <= 0.05),
+        key=lambda k: (abs(deltas[k] - 0.20), k),
+    )
 
 
 def _adverse_ratio(spot: float, sigma: float, width: float, *, q: float | None = None) -> float:
@@ -413,14 +484,7 @@ def _adverse_ratio(spot: float, sigma: float, width: float, *, q: float | None =
     model rather than a re-implementation of it."""
     q = STAGE_A_Q.get(spot, Q) if q is None else q
     cm = PREREGISTERED_COST_MODEL
-    deltas = {
-        k: abs(bs.greeks(spot, float(k), YEARS, R, sigma, call=False, q=q).delta)
-        for k in range(int(spot * 0.60), int(spot) + 1)
-    }
-    ks = min(
-        (k for k, d in deltas.items() if d <= 0.35 and abs(d - 0.20) <= 0.05),
-        key=lambda k: (abs(deltas[k] - 0.20), k),
-    )
+    ks = _short_strike(spot, sigma, q)
     kl = ks - width
     ps = bs.price(spot, float(ks), YEARS, R, sigma, call=False, q=q)
     pl = bs.price(spot, kl, YEARS, R, sigma, call=False, q=q)
@@ -432,36 +496,61 @@ def _adverse_ratio(spot: float, sigma: float, width: float, *, q: float | None =
     return (sell - buy) / width
 
 
-def test_the_credit_to_width_ratio_is_bounded_by_roughly_the_short_delta() -> None:
-    """Arithmetic, not opinion — D5a §2.1.
+def _target_win_usd(spot: float, sigma: float, width: float) -> float:
+    """D5a §4's ``0.5 C - F``: half the adverse credit minus the four-crossing
+    round-trip friction ``F``, which the leg PRINTS set and the width barely moves."""
+    cm = PREREGISTERED_COST_MODEL
+    q = STAGE_A_Q[spot]
+    credit = _adverse_ratio(spot, sigma, width) * width * 100.0
+    ks = _short_strike(spot, sigma, q)
+    ps = bs.price(spot, float(ks), YEARS, R, sigma, call=False, q=q)
+    pl = bs.price(spot, float(ks - width), YEARS, R, sigma, call=False, q=q)
+    friction = (
+        2
+        * 100
+        * (cm.spread(ps, moneyness=ks / spot, dte=35) + cm.spread(pl, moneyness=1.0, dte=35))
+        + cm.commission(4)
+        + cm.fees(4)
+    )
+    return 0.5 * credit - friction
+
+
+def _design_space(width: float) -> list[float]:
+    return [_adverse_ratio(s, g, width) for s in (660.0, 590.0, 240.0) for g in IV_GRID]
+
+
+def _round_down(x: float, step: float) -> float:
+    return round(math.floor(x / step + 1e-9) * step, 6)
+
+
+@pytest.mark.parametrize("width", [2.00, 8.00])
+def test_the_credit_to_width_ratio_is_bounded_by_roughly_the_short_delta(width: float) -> None:
+    """Arithmetic, not opinion — D5a §2.1, at both the v0.1.1 and v0.1.2 widths.
 
     ``credit = P(K_short) - P(K_long)``, and by the mean value theorem that is
     ``dP/dK x width`` somewhere inside the strike range, where
     ``dP/dK = e^{-rT} N(-d2)`` — the risk-neutral probability of finishing ITM,
     which is slightly above ``|delta|`` at the short strike and **falls** toward
     the wing.  So ``credit/width`` is bounded above by roughly the short delta
-    and sits below it for any width worth trading.
+    and sits below it for any width worth trading — and further below it the
+    wider the width, because the average is taken further toward the wing.
     """
     for spot in (240.0, 590.0, 660.0):
         q = STAGE_A_Q[spot]
         for sigma in (0.15, 0.20, 0.30, 0.40, 0.60):
-            deltas = {
-                k: abs(bs.greeks(spot, float(k), YEARS, R, sigma, call=False, q=q).delta)
-                for k in range(int(spot * 0.60), int(spot) + 1)
-            }
-            ks = min(deltas, key=lambda k: abs(deltas[k] - 0.20))
-            kl = ks - 2
+            ks = _short_strike(spot, sigma, q)
+            delta = abs(bs.greeks(spot, float(ks), YEARS, R, sigma, call=False, q=q).delta)
             ps = bs.price(spot, float(ks), YEARS, R, sigma, call=False, q=q)
-            pl = bs.price(spot, float(kl), YEARS, R, sigma, call=False, q=q)
-            print_ratio = (ps - pl) / (ks - kl)
-            assert print_ratio <= deltas[ks] + 0.06, (spot, sigma, print_ratio, deltas[ks])
+            pl = bs.price(spot, float(ks - width), YEARS, R, sigma, call=False, q=q)
+            print_ratio = (ps - pl) / width
+            assert print_ratio <= delta + 0.06, (spot, sigma, print_ratio, delta)
             assert print_ratio < 0.25 + 0.12, (spot, sigma, print_ratio)
 
 
 #: D5a §2.3's table, verbatim: (U, sigma) -> adverse credit/width at width_usd 2.00,
-#: ``short_delta_target`` 0.20, 35 DTE, r 0.04.  The signs are the finding: the
-#: index ETFs at $590-$660 go NEGATIVE above ~0.25 vol, which is what makes the
-#: floor a cost filter rather than the volatility filter D5 §1 argued for.
+#: ``short_delta_target`` 0.20, 35 DTE, r 0.04.  **v0.1.1 history**: still follows
+#: from the shipped code and is kept so the superseded band stays checkable.  The
+#: signs are the finding: the index ETFs at $590-$660 go NEGATIVE above ~0.25 vol.
 D5A_BOUND_TABLE: dict[tuple[float, float], float] = {
     (660.0, 0.15): +0.0750,
     (660.0, 0.30): -0.0250,
@@ -474,53 +563,139 @@ D5A_BOUND_TABLE: dict[tuple[float, float], float] = {
     (240.0, 0.60): +0.0500,
 }
 
+#: Amendment 2 §4.1's table: the same cells at v0.1.2's ``width_usd = 8.00``.  The
+#: charge ``chi = 100 (s_short + s_wing) / W`` scales as ``1/W``, so a 4x wider wing
+#: cuts it to about a quarter and every cell turns positive.  Several values are
+#: exact multiples of 0.00625 = $5 / $800 — the $0.05 tick above $3.00, per $8 wide.
+D5A2_BOUND_TABLE: dict[tuple[float, float], float] = {
+    (660.0, 0.15): 0.15000,
+    (660.0, 0.30): 0.15625,
+    (660.0, 0.60): 0.13125,
+    (590.0, 0.15): 0.15250,
+    (590.0, 0.30): 0.15625,
+    (590.0, 0.60): 0.14375,
+    (240.0, 0.15): 0.12375,
+    (240.0, 0.30): 0.16375,
+    (240.0, 0.60): 0.18125,
+}
+
 
 @pytest.mark.parametrize(("cell", "expected"), sorted(D5A_BOUND_TABLE.items()))
-def test_the_credit_to_width_bound_table_is_reproduced(
+def test_the_v011_bound_table_at_two_dollars_is_still_reproduced(
     cell: tuple[float, float], expected: float
 ) -> None:
-    """**The amendment's load-bearing table, recomputed from the shipped code.**
-
-    If this test fails, either the cost model moved (R4 forbids it) or someone
-    changed the derivation D5a §2.4's floor band was read off.  Either way the
-    amendment's numbers no longer follow from the code and must be re-derived in
-    the open, before the first sealed look — never after one.
-    """
+    """D5a's load-bearing table, recomputed from the shipped code.  If this fails
+    the cost model moved (R4 forbids it) — not merely the width."""
     spot, sigma = cell
     assert _adverse_ratio(spot, sigma, 2.00) == pytest.approx(expected, abs=5e-4)
 
 
+@pytest.mark.parametrize(("cell", "expected"), sorted(D5A2_BOUND_TABLE.items()))
+def test_the_v012_bound_table_at_eight_dollars_is_reproduced(
+    cell: tuple[float, float], expected: float
+) -> None:
+    """**Amendment 2's load-bearing table, recomputed from the shipped code.**
+
+    If this test fails, either the cost model moved (R4 forbids it) or someone
+    changed the derivation the v0.1.2 floor band was read off.  Either way the
+    amendment's numbers no longer follow from the code and must be re-derived in
+    the open, before the first sealed look — never after one.
+    """
+    spot, sigma = cell
+    assert _adverse_ratio(spot, sigma, 8.00) == pytest.approx(expected, abs=5e-4)
+    assert ShortVerticalParams().width_usd == 8.00
+
+
+def test_the_v011_band_is_what_d5as_rule_gives_at_two_dollars() -> None:
+    """History, re-derived: at $2.00 the design space ran -0.2250 .. +0.1550,
+    positive in 21 of 30 cells, and the rule gave 0.05 / 0.10 / 0.13."""
+    space = _design_space(2.00)
+    positive = sorted(v for v in space if v > 0)
+    assert min(space) == pytest.approx(-0.2250, abs=5e-4)
+    assert max(space) == pytest.approx(0.1550, abs=5e-4)
+    assert len(positive) == 21
+    q1, q2, q3 = statistics.quantiles(positive, n=4, method="inclusive")
+    assert [_round_down(v, 0.01) for v in (q1, q2, q3)] == [0.05, 0.10, 0.13]
+
+
+def test_the_v012_band_is_read_off_the_eight_dollar_design_space() -> None:
+    """**Amendment 2 §4.2, as arithmetic.**
+
+    At $8.00 the attainable adverse ratio over Stage A x the IV grid runs 0.0938 ..
+    0.1813 and is positive in all 30 cells.  Its quartiles are 0.14375 / 0.15188 /
+    0.15625.  D5a's rule rounds DOWN to 0.01, which gives 0.14 / 0.15 / **0.15** —
+    the median and p75 collapse and axis 6 would have one value.  Rounding down to
+    the next finer step, 0.005, keeps the direction (never toward the unreachable
+    side) and separates them: 0.140 / 0.150 / 0.155.
+    """
+    space = _design_space(8.00)
+    positive = sorted(v for v in space if v > 0)
+    assert len(positive) == len(space) == 30
+    assert min(space) == pytest.approx(0.09375, abs=5e-4)
+    assert max(space) == pytest.approx(ATTAINABLE_ADVERSE_RATIO_MAX, abs=5e-4)
+    q1, q2, q3 = statistics.quantiles(positive, n=4, method="inclusive")
+    assert (q1, q2, q3) == pytest.approx((0.14375, 0.151875, 0.15625), abs=5e-5)
+    # D5a's 0.01 step collapses the median and p75 — a one-valued axis
+    coarse = [_round_down(v, 0.01) for v in (q1, q2, q3)]
+    assert coarse == [0.14, 0.15, 0.15]
+    fine = [_round_down(v, 0.005) for v in (q1, q2, q3)]
+    assert fine == [0.140, 0.150, 0.155]
+    assert dict(zip(("p25", "median", "p75"), fine, strict=True)) == CREDIT_TO_WIDTH_QUANTILES
+
+
 def test_every_superseded_floor_is_outside_the_attainable_region() -> None:
-    """D5's 0.25 / 0.30 and its OAT 0.20 all sit above the attainable maximum, so
-    v0.1.0 entered nothing anywhere — the defect, as arithmetic."""
-    attainable = max(D5A_BOUND_TABLE.values())
-    assert attainable == pytest.approx(ATTAINABLE_ADVERSE_RATIO_MAX, abs=5e-4)
-    for superseded in (0.20, 0.25, 0.30):
-        assert superseded > attainable
+    """D5's 0.25 / 0.30 and its OAT 0.20 sit above the attainable maximum at BOTH
+    widths, so v0.1.0 would still enter nothing anywhere."""
+    for table in (D5A_BOUND_TABLE, D5A2_BOUND_TABLE):
+        attainable = max(table.values())
+        for superseded in (0.20, 0.25, 0.30):
+            assert superseded > attainable
 
 
 def test_the_amended_band_sits_inside_the_attainable_region() -> None:
-    """And the amended values are the p25 / median / p75 of the positive attainable
-    ratios, rounded DOWN — so each is reachable by construction."""
-    attainable = max(D5A_BOUND_TABLE.values())
     band = CREDIT_TO_WIDTH_QUANTILES
-    assert band == {"p25": 0.05, "median": 0.10, "p75": 0.13}
-    assert band["p25"] < band["median"] < band["p75"] < attainable
+    assert band == {"p25": 0.140, "median": 0.150, "p75": 0.155}
+    assert band["p25"] < band["median"] < band["p75"] < ATTAINABLE_ADVERSE_RATIO_MAX
     assert ShortVerticalParams().min_credit_to_width == band["median"]
+    assert SENSITIVITY_GRID["min_credit_to_width"] == (band["median"], band["p75"])
+    assert OAT_PARAMETERS["min_credit_to_width"] == (band["p25"],)
 
 
-@pytest.mark.parametrize("sigma", [0.15, 0.20, 0.25])
-@pytest.mark.parametrize("floor", [0.05, 0.10, 0.13])
+def test_the_v012_band_binds_without_emptying_and_the_v011_floor_would_not_bind() -> None:
+    """A floor must BIND (D5 §1) without EMPTYING the space (D5 §4.3).
+
+    Over the 30 cells at $8.00: 0.140 admits 25, 0.150 admits 19, 0.155 admits 13
+    — each binds and none is empty.  v0.1.1's 0.10 would admit 29 of 30 and 0.13
+    would admit 28: carried forward to $8 they would be near-inert, which is why
+    the band is re-derived rather than kept.  Compared as exact arithmetic (the
+    strategy's ``_RATIO_EPS``), because 0.150 sits on the $5-per-$800 lattice.
+    """
+    space = _design_space(8.00)
+
+    def admitted(floor: float) -> int:
+        return sum(v >= floor - 1e-9 for v in space)
+
+    assert [admitted(f) for f in (0.140, 0.150, 0.155)] == [25, 19, 13]
+    assert [admitted(f) for f in (0.10, 0.13)] == [29, 28]
+
+
+def test_the_mechanism_sigma_clears_the_baseline_floor() -> None:
+    """``MECH_SIGMA`` is derived: 0.20 and 0.25 do NOT clear 0.150 on the $240
+    chain at $8, and 0.30 clears every grid and OAT value."""
+    assert _adverse_ratio(SPOT, 0.20, 8.00, q=Q) < 0.150
+    assert _adverse_ratio(SPOT, 0.25, 8.00, q=Q) < 0.150
+    assert _adverse_ratio(SPOT, MECH_SIGMA, 8.00, q=Q) >= max(CREDIT_TO_WIDTH_QUANTILES.values())
+
+
+@pytest.mark.parametrize("sigma", [0.30, 0.35, 0.40])
+@pytest.mark.parametrize("floor", [0.140, 0.150, 0.155])
 def test_the_amended_floor_trades_where_the_superseded_floor_traded_nothing(
     sigma: float, floor: float
 ) -> None:
-    """**The rewrite of v0.1.0's "trades nothing" finding.**
-
-    On the same arbitrage-free chain, at the same delta band and the same frozen
-    cost model: every amended value enters, and every superseded value still
-    enters nothing.  The finding is preserved *and* the repair is demonstrated in
-    one assertion pair.
-    """
+    """On the same arbitrage-free chain, at the same delta band and the same frozen
+    cost model: every v0.1.2 band value enters, and every value D5 pre-registered
+    still enters nothing.  The sigmas are the ones Amendment 2's $240 row clears
+    (0.1637 / 0.1650 / 0.1662 >= 0.155)."""
     chain, under = build_chain(sigma=sigma)
     amended = OptionsShortVertical(
         ShortVerticalParams(min_credit_to_width=floor), q_lookup=_q, q_source="test"
@@ -536,51 +711,59 @@ def test_the_amended_floor_trades_where_the_superseded_floor_traded_nothing(
 
 def test_the_floor_still_binds_and_is_not_merely_lowered_until_everything_passes() -> None:
     """A floor that admits everything is not a floor.  Walked up on one chain, the
-    amended band brackets the attainable ratio rather than sitting under it."""
-    chain, under = build_chain(sigma=0.20)
+    strategy clears exactly the floors at or below that chain's derived adverse
+    ratio (0.16375) and none above it."""
+    chain, under = build_chain(sigma=MECH_SIGMA)
+    ratio = _adverse_ratio(SPOT, MECH_SIGMA, 8.00, q=Q)
+    walk = (0.140, 0.150, 0.155, 0.16, 0.165, 0.20, 0.25, 0.30)
     cleared = [
         floor
-        for floor in (0.05, 0.10, 0.13, 0.155, 0.20, 0.25, 0.30)
+        for floor in walk
         if OptionsShortVertical(
             ShortVerticalParams(min_credit_to_width=floor), q_lookup=_q, q_source="test"
         )(chain.head(SIGNAL_IDX), under.head(SIGNAL_IDX), SIGNAL_IDX)
         is not None
     ]
-    assert cleared == [0.05, 0.10, 0.13]
-    assert max(cleared) == CREDIT_TO_WIDTH_QUANTILES["p75"]
+    assert cleared == [f for f in walk if f <= ratio]
+    assert cleared == [0.140, 0.150, 0.155, 0.16]
+
+
+@pytest.mark.parametrize("sigma", [0.15, 0.20, 0.35])
+def test_a_ratio_exactly_on_the_floor_is_admitted_whatever_the_float_rounding(
+    sigma: float,
+) -> None:
+    """Amendment 2 §4.4.  On the $660 chain these cells' adverse credit is exactly
+    $120 on an $800 width — ratio 0.150, the baseline floor itself.  In floats
+    ``(sell - buy) * 100 / 800`` lands either side of 0.15, so without the
+    strategy's ``_RATIO_EPS`` the pre-registered ``>=`` would depend on rounding."""
+    assert _adverse_ratio(660.0, sigma, 8.00, q=Q) == pytest.approx(0.150, abs=1e-12)
+    chain, under = build_chain(sigma=sigma, spot=660.0, symbol="SPY")
+    assert strategy()(chain.head(SIGNAL_IDX), under.head(SIGNAL_IDX), SIGNAL_IDX) is not None
 
 
 def test_the_stop_is_a_real_stop_at_every_grid_and_oat_value() -> None:
     """D5 §3.4: the stop binds only while ``stop_multiple x c/W < 1``.  At D5's
-    floors the high value was near-degenerate (``3.0 x 0.30 = 0.90``); at the
-    amended band the worst case anywhere is ``3.0 x 0.155 = 0.465``.
-
-    This is what re-opens ``stop_multiple`` as a grid axis (D5a §6.2) — it is no
-    longer the near-inert parameter D5 §4.2 pushed into the OAT table.
+    floors the high value was near-degenerate (``3.0 x 0.30 = 0.90``); at $2 the
+    worst case was ``3.0 x 0.155 = 0.465`` and at v0.1.2's $8 it is
+    ``3.0 x 0.1813 = 0.544`` — still a stop that fires well before max loss.
     """
     for multiple in (1.5, 2.0, 3.0):
         assert multiple * ATTAINABLE_ADVERSE_RATIO_MAX < 1.0
-    # what the argument looked like at D5's floor: 90% of the width, i.e. a stop
-    # that sits so close to max loss it can barely fire first
     assert pytest.approx(0.90) == 3.0 * 0.30
-    assert 3.0 * ATTAINABLE_ADVERSE_RATIO_MAX < 0.5
+    assert pytest.approx(0.544, abs=5e-4) == 3.0 * ATTAINABLE_ADVERSE_RATIO_MAX
 
 
 # --------------------------------------------------------------------------- #
-# D5a §3 — ONE R SCALE PER VERSION, and the $250 cap
+# §3 — ONE R SCALE PER VERSION, the OP-1 $900 / $3,600 caps, and F14
 # --------------------------------------------------------------------------- #
 def test_gate_0_5_passes_on_a_genuinely_multi_underlying_trade_list() -> None:
-    """**The defect this amendment exists for.**
-
-    ``width_pct x U`` gave R a different scale on every underlying, so gate 0.5's
+    """``width_pct x U`` gave R a different scale on every underlying, so gate 0.5's
     ``single_scale`` refused any multi-underlying run.  With a declared dollar
-    width the recovered width is $200.00 at every price level and the gate passes
-    by construction, not by luck of which symbols were evaluated.
-    """
+    width the recovered width is $800.00 at every price level."""
     strat = strategy()
     trades = []
-    for spot in (120.0, 240.0, 360.0):
-        chain, under = build_chain(sigma=0.15, spot=spot)
+    for spot in PRICE_LEVELS:
+        chain, under = build_chain(sigma=MECH_SIGMA, spot=spot)
         outcome = run_options_backtest(
             chain, under, strat, cost_model=PREREGISTERED_COST_MODEL, r_basis=RBasis.INCL, warmup=0
         )
@@ -589,39 +772,58 @@ def test_gate_0_5_passes_on_a_genuinely_multi_underlying_trade_list() -> None:
 
     gate = gate_0_5_structure(strat.structure_identity(), trades)
     assert gate.passed, gate.detail
-    assert gate.evidence["widths_observed"] == [200.0]
-    assert gate.evidence["r_scale_usd"] == 200.0
+    assert gate.evidence["widths_observed"] == [800.0]
+    assert gate.evidence["r_scale_usd"] == 800.0
     assert gate.evidence["width_selected_adaptively"] is False
 
 
 def test_the_structure_identity_is_a_constant_of_the_version() -> None:
-    """It takes no argument any more: D4 §3 clause (d) requires ``width`` and ``M``
-    to be declared constants, and an argument is exactly what let them vary."""
     ident = strategy().structure_identity()
-    assert ident.width_declared == 2.00
+    assert ident.width_declared == 8.00
     assert ident.m_declared == 100
-    assert ident.r_scale_usd == 200.00
+    assert ident.r_scale_usd == 800.00
     assert ident.structure_type is StructureType.VERTICAL_CREDIT
 
 
-def test_the_hard_max_loss_clears_the_two_hundred_and_fifty_dollar_cap() -> None:
-    """D5a §3.3.  ``R_hard = width_usd x M + entry_costs`` is the bound no credit
-    can breach, because the strategy refuses ``net_credit <= 0`` outright — so the
-    margin holds at EVERY floor, not only at the baseline one."""
+def test_every_copy_of_the_op1_caps_agrees() -> None:
+    """The strategy's fail-closed guard, gate 0.i's thresholds and the paper-book
+    refusal limits must carry the SAME operator numbers (OP-1, 2026-09-23)."""
+    th = OptionsGateThresholds()
+    limits = OptionsRiskLimits()
+    assert OPTIONS_PER_STRUCTURE_MAX_LOSS == th.options_per_structure_max_loss == 900.0
+    assert limits.per_structure_max_loss_dollars == 900.0
+    assert th.options_total_open_max_loss == limits.total_open_max_loss_dollars == 3_600.0
+    # OP-1's recommendation expressed them against the $25,000 options account
+    assert 900.0 / th.account_equity_basis == pytest.approx(0.036)
+    assert 3_600.0 / th.account_equity_basis == pytest.approx(0.144)
+
+
+def test_the_width_ceiling_under_the_op1_cap_is_eight_dollars() -> None:
+    """Amendment 2 §3.1: ``width_usd x 100 + $1.60 <= $900`` gives ``width_usd <=
+    8.984``; the widest multiple of the declared $1.00 increment is $8.00."""
+    assert pytest.approx(1.60) == ENTRY_COSTS
+    ceiling = (OPTIONS_PER_STRUCTURE_MAX_LOSS - ENTRY_COSTS) / 100.0
+    assert ceiling == pytest.approx(8.984)
+    widest = math.floor(ceiling / DECLARED_STRIKE_INCREMENT) * DECLARED_STRIKE_INCREMENT
+    assert widest == 8.00 == ShortVerticalParams().width_usd
+
+
+def test_the_hard_max_loss_clears_the_nine_hundred_dollar_cap() -> None:
+    """``R_hard = width_usd x M + entry_costs`` is the bound no credit can breach,
+    because the strategy refuses ``net_credit <= 0`` outright — so the margin
+    holds at EVERY floor, not only at the baseline one."""
     p = ShortVerticalParams()
-    assert p.r_scale_usd == 200.0
-    assert p.r_hard_max_usd == pytest.approx(201.60)
+    assert p.r_scale_usd == 800.0
+    assert p.r_hard_max_usd == pytest.approx(801.60)
     assert p.r_hard_max_usd < OPTIONS_PER_STRUCTURE_MAX_LOSS
     margin = (OPTIONS_PER_STRUCTURE_MAX_LOSS - p.r_hard_max_usd) / OPTIONS_PER_STRUCTURE_MAX_LOSS
-    assert margin == pytest.approx(0.194, abs=5e-4)
+    assert margin == pytest.approx(0.1093, abs=5e-4)
 
 
 def test_no_realised_trade_ever_exceeds_the_per_structure_cap() -> None:
-    """Gate 0.i's ``structures_breaching_per_structure_cap`` is 0 by construction,
-    and that is asserted rather than hoped for."""
     strat = strategy()
-    for spot in (120.0, 240.0, 360.0):
-        chain, under = build_chain(sigma=0.15, spot=spot)
+    for spot in PRICE_LEVELS:
+        chain, under = build_chain(sigma=MECH_SIGMA, spot=spot)
         outcome = run_options_backtest(
             chain, under, strat, cost_model=PREREGISTERED_COST_MODEL, r_basis=RBasis.INCL, warmup=0
         )
@@ -632,59 +834,122 @@ def test_no_realised_trade_ever_exceeds_the_per_structure_cap() -> None:
 
 @pytest.mark.parametrize(
     ("width_usd", "hard_max", "fits"),
-    [(1.00, 101.60, True), (2.00, 201.60, True), (2.50, 251.60, False), (3.00, 301.60, False)],
+    [
+        (2.00, 201.60, True),
+        (7.00, 701.60, True),
+        (8.00, 801.60, True),
+        (8.50, 851.60, True),
+        (9.00, 901.60, False),
+        (10.00, 1001.60, False),
+    ],
 )
-def test_the_width_cap_arithmetic_is_what_selected_two_dollars(
+def test_the_width_cap_arithmetic_is_what_selected_eight_dollars(
     width_usd: float, hard_max: float, fits: bool
 ) -> None:
-    """D5a §3.3's table, as a test.  $3.00 would need a floor of 0.172 to clear the
-    cap at all and 0.155 is the attainable maximum, so no floor rescues it.  $2.50
-    fits the cap at the baseline floor but is not a multiple of the declared $1.00
-    strike increment, so it is rejected on **placeability** rather than on risk.
+    """Amendment 2 §3.1's table, as a test.  $9.00 clears the cap at the baseline
+    floor (``900 x 0.85 + 1.60 = $766.60``) but not on the hard bound, and D5a's
+    convention — kept — is that the margin must hold at EVERY floor.  $8.50 fits
+    but is not a multiple of the $1.00 increment, so it is rejected on
+    placeability.  $8.00 is therefore the widest admissible width.
     """
-    entry_costs = PREREGISTERED_COST_MODEL.commission(2) + PREREGISTERED_COST_MODEL.fees(2)
-    assert width_usd * 100 + entry_costs == pytest.approx(hard_max)
+    assert width_usd * 100 + ENTRY_COSTS == pytest.approx(hard_max)
     assert (hard_max <= OPTIONS_PER_STRUCTURE_MAX_LOSS) is fits
     if fits:
         assert OptionsShortVertical(ShortVerticalParams(width_usd=width_usd)) is not None
     else:
         with pytest.raises(ValueError, match="breaches the pre-registered per-structure cap"):
             OptionsShortVertical(ShortVerticalParams(width_usd=width_usd))
-    # $2.50 clears the cap at the baseline floor but is unplaceable on a $1 ladder
-    if width_usd == 2.50:
-        assert not math.isclose(width_usd % 1.00, 0.0, abs_tol=1e-9)
-        assert 250 * (1 - 0.10) + entry_costs < OPTIONS_PER_STRUCTURE_MAX_LOSS
+    if width_usd == 8.50:
+        assert not math.isclose(width_usd % DECLARED_STRIKE_INCREMENT, 0.0, abs_tol=1e-9)
+    if width_usd == 9.00:
+        assert 900 * (1 - 0.150) + ENTRY_COSTS < OPTIONS_PER_STRUCTURE_MAX_LOSS
 
 
-def test_the_cost_coverage_finding_f14_holds_at_the_cap_compliant_width() -> None:
-    """**F14, pre-registered in D5a §4 before the first look.**
+#: D5a §4's F14 cells.
+F14_CELLS = (
+    (660.0, 0.15),
+    (660.0, 0.20),
+    (660.0, 0.30),
+    (590.0, 0.15),
+    (590.0, 0.20),
+    (590.0, 0.30),
+    (240.0, 0.15),
+    (240.0, 0.20),
+    (240.0, 0.30),
+)
 
-    The target-win outcome is ``0.5C - F``.  ``F`` is set by the leg PRINTS and is
-    nearly independent of the width; ``C`` is proportional to it.  At the width the
-    $250 cap permits, the winning outcome is a LOSS on every Stage A cell — so the
-    expected disposition is D5 §10's null option, and only the operator raising the
-    cap (OP-1) can change it.  Never a post-result adjustment: D4 §2.8a forbids it.
+
+def test_f14_the_target_win_is_negative_in_every_cell_at_the_v011_width() -> None:
+    """**F14 as D5a pre-registered it** (history, still true): at $2.00 ``0.5C - F``
+    is a LOSS in every Stage A cell."""
+    for spot, sigma in F14_CELLS:
+        assert _target_win_usd(spot, sigma, 2.00) < 0.0, (spot, sigma)
+
+
+def test_f14_the_target_win_is_positive_in_seven_of_nine_cells_at_eight_dollars() -> None:
+    """**Amendment 2 §3.2.**  At $8.00 ``0.5C - F`` is positive everywhere except
+    SPY and QQQ at sigma 0.30 (-$17.64 and -$8.24).  OP-1 makes O3 cost-viable on
+    most of the declared space — not all of it, and that is pre-registered too."""
+    wins = {cell: _target_win_usd(*cell, 8.00) for cell in F14_CELLS}
+    negative = sorted(cell for cell, w in wins.items() if w <= 0.0)
+    assert negative == [(590.0, 0.30), (660.0, 0.30)]
+    assert wins[(660.0, 0.30)] == pytest.approx(-17.64, abs=0.01)
+    assert wins[(590.0, 0.30)] == pytest.approx(-8.24, abs=0.01)
+    assert wins[(660.0, 0.15)] == pytest.approx(23.37, abs=0.01)
+    assert wins[(240.0, 0.30)] == pytest.approx(38.33, abs=0.01)
+
+
+#: D5a §4's minimum cost-viable width per cell (reproduced, not copied).
+MIN_VIABLE_WIDTH: dict[tuple[float, float], int] = {
+    (660.0, 0.15): 6,
+    (660.0, 0.20): 8,
+    (660.0, 0.30): 10,
+    (590.0, 0.15): 5,
+    (590.0, 0.20): 7,
+    (590.0, 0.30): 9,
+    (240.0, 0.15): 3,
+    (240.0, 0.20): 3,
+    (240.0, 0.30): 4,
+}
+
+
+def test_the_cost_viable_widths_and_which_the_op1_cap_admits() -> None:
+    """Amendment 2 §3.2's cross-check against F14's viable range.
+
+    D5a quoted the viable range as $254-$842 of CREDIT-NET R.  The guard (and gate
+    0.i's hard reading) uses ``R_hard = W x 100 + $1.60``, on which the same
+    widths cost **$301.60-$1,001.60**.  The $900 cap admits 7 of the 9; SPY at
+    sigma 0.30 ($10 -> $1,001.60) and QQQ at sigma 0.30 ($9 -> $901.60) stay out.
+    D5a's '~$900 (SPY at sigma 0.30)' was read off the credit-net column.
     """
-    cm = PREREGISTERED_COST_MODEL
-    for spot, sigma in ((660.0, 0.15), (660.0, 0.20), (590.0, 0.15), (240.0, 0.15), (240.0, 0.20)):
-        q = STAGE_A_Q[spot]
-        ratio = _adverse_ratio(spot, sigma, 2.00)
-        credit = ratio * 200.0
-        deltas = {
-            k: abs(bs.greeks(spot, float(k), YEARS, R, sigma, call=False, q=q).delta)
-            for k in range(int(spot * 0.60), int(spot) + 1)
-        }
-        ks = min(deltas, key=lambda k: abs(deltas[k] - 0.20))
-        ps = bs.price(spot, float(ks), YEARS, R, sigma, call=False, q=q)
-        pl = bs.price(spot, float(ks - 2), YEARS, R, sigma, call=False, q=q)
-        friction = (
-            2
-            * 100
-            * (cm.spread(ps, moneyness=ks / spot, dte=35) + cm.spread(pl, moneyness=1.0, dte=35))
-            + cm.commission(4)
-            + cm.fees(4)
-        )
-        assert 0.5 * credit - friction < 0.0, (spot, sigma, credit, friction)
+    for cell, expected in MIN_VIABLE_WIDTH.items():
+        viable = [w for w in range(1, 12) if _target_win_usd(*cell, float(w)) > 0.0]
+        assert viable and viable[0] == expected, (cell, viable)
+    hard = {cell: w * 100 + ENTRY_COSTS for cell, w in MIN_VIABLE_WIDTH.items()}
+    assert min(hard.values()) == pytest.approx(301.60)
+    assert max(hard.values()) == pytest.approx(1001.60)
+    admitted = sorted(c for c, r in hard.items() if r <= OPTIONS_PER_STRUCTURE_MAX_LOSS)
+    assert len(admitted) == 7
+    assert (660.0, 0.30) not in admitted and (590.0, 0.30) not in admitted
+    declared = ShortVerticalParams().width_usd
+    assert all(w <= declared for c, w in MIN_VIABLE_WIDTH.items() if c in admitted)
+
+
+def test_the_aggregate_leg_at_the_op1_numbers() -> None:
+    """Amendment 2 §3.3 (was D5a §3.5's ``14 x $201.60 = $2,822.40`` vs $1,000).
+
+    At $8.00: ``14 x $801.60 = $11,222.40`` against the $3,600 aggregate, so at most
+    ``floor(3600 / 801.60) = 4`` structures may be open at once and D5a §3.5's
+    pre-registered 4-structure concurrency branch applies.  (At $2.00 the whole
+    population would fit — ``$2,822.40 <= $3,600`` — which is the trade the wider,
+    cost-viable width makes: n for viability.)
+    """
+    agg = OptionsGateThresholds().options_total_open_max_loss
+    r_hard = ShortVerticalParams().r_hard_max_usd
+    assert DECLARED_UNDERLYINGS * r_hard == pytest.approx(11_222.40)
+    assert DECLARED_UNDERLYINGS * r_hard > agg
+    assert math.floor(agg / r_hard) == 4
+    assert DECLARED_UNDERLYINGS * ShortVerticalParams(width_usd=2.00).r_hard_max_usd <= agg
 
 
 # --------------------------------------------------------------------------- #

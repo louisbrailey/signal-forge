@@ -45,7 +45,17 @@ SPEC_HASH = "spec-hash-under-test"
 
 
 def _bars(session: Session, inst: Instrument) -> None:
-    d = date(2026, 8, 1)
+    from datetime import timedelta
+
+    from signalforge.data.calendar import rth_bounds_utc, sessions
+
+    now = datetime.now(UTC)
+    completed = [
+        d
+        for d in sessions(now.date() - timedelta(days=14), now.date())
+        if rth_bounds_utc(d)[1] <= now
+    ]
+    d = completed[-1] - timedelta(days=29)
     for i in range(30):
         session.add(
             OHLCVDaily(
@@ -59,7 +69,8 @@ def _bars(session: Session, inst: Instrument) -> None:
                 adj_close=100.0,
                 source="massive",
                 latency_category=LatencyCategory.HISTORICAL,
-                is_simulated=True,
+                is_simulated=False,
+                is_adjusted=True,
                 ingested_at=datetime.now(UTC),
                 quality_flags=[],
             )

@@ -114,6 +114,7 @@ def test_mark_to_market_stops_out_a_loss_on_a_falling_series(
                 source="fixture2",
                 latency_category=LatencyCategory.HISTORICAL,
                 is_simulated=True,
+                is_adjusted=True,  # Synthetic series has no corporate actions.
                 ingested_at=datetime.now(UTC),
                 quality_flags=[],
             )

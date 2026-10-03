@@ -195,6 +195,18 @@ def run_scan(
         result.notes.append("Live alerts disabled: " + "; ".join(fresh.reasons))
 
     end = as_of or date.today()
+    required_bar_date = None
+    if as_of is None and not intraday and provider != "fixture":
+        from zoneinfo import ZoneInfo
+
+        from signalforge.data.calendar import sessions
+
+        local_now = started.astimezone(ZoneInfo("America/New_York"))
+        cutoff_date = local_now.date()
+        if (local_now.hour, local_now.minute) < (17, 30):
+            cutoff_date -= timedelta(days=1)
+        completed = sessions(cutoff_date - timedelta(days=14), cutoff_date)
+        required_bar_date = completed[-1] if completed else cutoff_date
     start = end - timedelta(days=365 * 6)
 
     # Regime always comes from the daily proxy (it does not flip intraday).
@@ -240,7 +252,14 @@ def run_scan(
         if inst is None or len(daily) < _MIN_HISTORY:
             result._exclude(sym, Exclusion.MISSING_DATA)
             continue
-        if not fresh.fresh:
+        if not fresh.fresh or (
+            required_bar_date is not None
+            and (
+                daily.dates[-1] < required_bar_date
+                or not proxy.dates
+                or proxy.dates[-1] < required_bar_date
+            )
+        ):
             result._exclude(sym, Exclusion.STALE_DATA)
             continue
 
