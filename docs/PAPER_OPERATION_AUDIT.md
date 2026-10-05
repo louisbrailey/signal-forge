@@ -75,6 +75,24 @@ Additionally, `paper/ledger.py:319` calls `get_daily_bars` without a source, and
 
 **Fix:** repair entry-point links and clearly separate current persisted posture, historical authorization, paper simulation, and optional armed execution. Surface in-progress ingestion, last completed scan, actual bar coverage and heartbeat separately. Do not call a running launchd process end-to-end healthy.
 
+## 2026-10-04 addendum — missed sessions 09-28..09-30, worker fixes
+
+**What happened.** The 09-28 21:30 UTC EOD update fired ~4 h late and was dropped (1 h misfire grace). A catch-up ingest then failed on provider network errors until 05:14 UTC 09-29; no job ran again until a manual restart at 19:28 UTC 10-01. **There is no approved-scope scan for those sessions, and there will not be one**: the sessions are recorded as explicitly unscanned, not back-filled. This is part of the gap behind "Why there are no newer paper trades" above and behind the P2 liveness finding ("do not call a running launchd process end-to-end healthy").
+
+**What changed** (details and operator notes: `docs/RUNBOOK_ALWAYS_ON.md`, section "2026-10-04 — ingest deadline, multi-session catch-up, visible EOD gaps"):
+
+1. **Ingest deadline.** The daily-bar ingest stops between symbols once the EOD-locked unit has run `EOD_INGEST_DEADLINE_MINUTES` (default 45). It records a resumable `stopped` ingestion run, releases the lock, fails the job with `deadline exceeded after N/M symbols …; resume on next catch-up`, and runs no scan on the half-fetched session.
+2. **Multi-session catch-up.** Every completed session since the last scanned one (look-back `CATCH_UP_LOOKBACK_SESSIONS`, default 10) is resolved oldest first: bars ingested (one provider pass for all of them) and a `scan_skipped_missed_session` row written per session. Only the latest completed session runs the real scan.
+3. **EOD gap check.** `/ops` and the health check flag a last completed session with no successful EOD job run `EOD_GAP_GRACE_MINUTES` (default 120) after its cutoff.
+
+**Why past sessions are not scanned as-of.** `run_scan(as_of=…)` bounds the price read only. Approval state, OOS evidence, the earnings calendar, account equity and both freshness gates are read as of *now*, and the persisted scan/candidate rows carry no as-of marker, so a back-filled scan would be look-ahead evidence that every consumer would treat as live. That would deepen finding P1 above (stored PASSED signals outliving their freshness authority) rather than fix a gap. **No candidate from a missed past session exists, so none can be auto-simulated.**
+
+**Paper-evidence consequence.** Forward paper statistics have no observations for the skipped sessions. Treat them as missing data, not as "no signal" days: a session with a `scan_skipped_missed_session` row says nothing about whether the strategy would have traded.
+
+**Scope hashes.** The three new fields live on the process `Settings`, not `ResearchConfig`; `config_hash` and `full_config_hash` are unchanged (`tests/test_catch_up_multi_session.py`, `tests/unit/test_scope_hash.py`).
+
+**Not addressed here:** P1 portfolio-limit enforcement, P1 exit chronology, the acceptance-time freshness limit, and source-qualified marks all remain open.
+
 ## Kronos, GitHub and verification boundaries
 
 Kronos files and navigation appeared in the checkout during this audit, consistent with the parent integration assignment. This audit did not modify them, run inference, or certify their boundary tests. Kronos should remain a research comparison with explicit provenance and held-out/baseline evaluation; no model output should choose entries, sizes, approvals, or orders.

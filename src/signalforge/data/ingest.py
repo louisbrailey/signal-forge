@@ -7,6 +7,7 @@ Every bar row carries its ``source``, ``latency_category``, ``is_simulated`` fla
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import UTC as _UTC
 from datetime import date, datetime, timedelta
@@ -58,6 +59,9 @@ class IngestReport:
     provider: str
     started_at: str
     results: list[SymbolIngestResult] = field(default_factory=list)
+    # True when ``should_stop`` ended the loop early; ``results`` then holds
+    # only the symbols attempted before the stop.
+    stopped: bool = False
 
     @property
     def bars_written(self) -> int:
@@ -300,9 +304,26 @@ def ingest_universe(
     symbols: list[str],
     start: date,
     end: date,
+    *,
+    skip: Collection[str] = (),
+    should_stop: Callable[[], bool] | None = None,
 ) -> IngestReport:
+    """Fetch-then-write every symbol, one committed transaction per symbol.
+
+    ``skip`` names symbols a previous, interrupted run already completed (the
+    resume contract ``ingest_daily_history`` has always had). ``should_stop``
+    is polled BETWEEN symbols — after the previous symbol's commit and before
+    the next symbol's network fetch — so a stop never interrupts a write
+    transaction and everything attempted so far is durable.
+    """
     report = IngestReport(provider=adapter.provider_name, started_at=utcnow().isoformat())
+    done = {s.upper() for s in skip}
     for sym in symbols:
+        if sym.upper() in done:
+            continue
+        if should_stop is not None and should_stop():
+            report.stopped = True
+            break
         report.results.append(ingest_symbol(session, adapter, sym, start, end))
         # One short write transaction per symbol: release the SQLite write
         # lock before the next symbol's paced network fetch (see
