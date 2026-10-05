@@ -219,11 +219,16 @@ class UnderlyingCoverage:
     first_bar: date | None
     last_bar: date | None
     gap_sessions: int
+    #: The source label this underlying's OPTION rows were read under.  A
+    #: different data kind from ``source`` (the underlying's daily bars) with its
+    #: own label; ``""`` means none was named, which gate 0.b fails.
+    option_source: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "symbol": self.symbol,
             "source": self.source,
+            "option_source": self.option_source,
             "first_bar": self.first_bar.isoformat() if self.first_bar else None,
             "last_bar": self.last_bar.isoformat() if self.last_bar else None,
             "gap_sessions": self.gap_sessions,
@@ -285,6 +290,13 @@ class OptionsDataAvailability:
     width_grid_declared: tuple[float, ...] = ()
     limits_source: str = ""
     limits_in_options_config_hash: bool = False
+    #: Why ``limits_in_options_config_hash`` is False, in words; ``""`` when True.
+    limits_hash_detail: str = ""
+    # 0.b, second data kind: the ONE source the option rows must come from, taken
+    # from recorded provenance (the snapshot's scope / its cycle-backfill runs).
+    # ``""`` — no option source named — fails gate 0.b; it is never defaulted to
+    # the underlying-bar source.
+    required_option_source: str = ""
     # 0.g provenance: the q series is mutable and outside the snapshot key, so
     # the evidence names exactly which series (and which derivation) it read.
     q_series_digest: str = ""
@@ -477,17 +489,43 @@ def gate_0b_underlyings(av: OptionsDataAvailability) -> OptionsGate:
 
     A blended or bridged underlying must fail here, *before* gate 8 sees it:
     gate 0 is fail-fast and gate 8 is never reached.
+
+    R6 holds **per data kind**.  The underlying's daily bars and its option rows
+    are stored under different source labels (``massive`` / ``massive_options``),
+    so each kind is checked against its own required source: one bar source for
+    every underlying, and one option-data source for every underlying.  Two
+    labels of one kind is a blend; an unnamed option source is a failure, never
+    a default to the bar source.
     """
     sources = sorted({u.source for u in av.underlyings})
     single_source = sources == [av.required_source]
+    option_sources = sorted({u.option_source for u in av.underlyings})
+    option_source_named = bool(av.required_option_source)
+    single_option_source = option_source_named and option_sources == [av.required_option_source]
     gapped = [u.symbol for u in av.underlyings if u.gap_sessions > 0]
     missing_bars = [u.symbol for u in av.underlyings if u.first_bar is None or u.last_bar is None]
-    passed = bool(av.underlyings) and single_source and not gapped and not missing_bars
+    passed = (
+        bool(av.underlyings)
+        and single_source
+        and single_option_source
+        and not gapped
+        and not missing_bars
+    )
     reasons = []
     if not av.underlyings:
         reasons.append("no underlying passed coverage")
     if not single_source:
         reasons.append(f"sources {sources} != [{av.required_source!r}] — R6 forbids a blend")
+    if not option_source_named:
+        reasons.append(
+            "no option-data source is named by the snapshot's recorded provenance — it is "
+            "never defaulted to the underlying-bar source"
+        )
+    elif not single_option_source:
+        reasons.append(
+            f"option-data sources {option_sources} != [{av.required_option_source!r}] — "
+            "R6 forbids a blend"
+        )
     if gapped:
         reasons.append(f"gap sessions in {gapped}")
     if missing_bars:
@@ -497,7 +535,8 @@ def gate_0b_underlyings(av: OptionsDataAvailability) -> OptionsGate:
         "data_availability_underlyings",
         passed,
         (
-            f"{len(av.underlyings)} underlyings continuous on {av.required_source!r}"
+            f"{len(av.underlyings)} underlyings continuous on {av.required_source!r} "
+            f"(option data on {av.required_option_source!r})"
             if passed
             else "; ".join(reasons)
         ),
@@ -505,6 +544,8 @@ def gate_0b_underlyings(av: OptionsDataAvailability) -> OptionsGate:
             "underlyings": [u.to_dict() for u in av.underlyings],
             "underlying_source": av.required_source,
             "underlying_sources_observed": sources,
+            "option_data_source": av.required_option_source,
+            "option_data_sources_observed": option_sources,
         },
         label="0.b",
     )
@@ -801,7 +842,10 @@ def gate_0i_risk_limits(av: OptionsDataAvailability, th: OptionsGateThresholds) 
             f"{av.structures_breaching_per_structure_cap} structures breach the per-structure cap"
         )
     if not hashed:
-        reasons.append("the limit set is NOT inside options_config_hash — it can move silently")
+        reasons.append(
+            "the limit set is NOT inside options_config_hash — it can move silently"
+            + (f" ({av.limits_hash_detail})" if av.limits_hash_detail else "")
+        )
     return OptionsGate(
         0,
         "data_availability_risk_limit_fit",
@@ -822,6 +866,7 @@ def gate_0i_risk_limits(av: OptionsDataAvailability, th: OptionsGateThresholds) 
             "width_grid_declared": list(av.width_grid_declared),
             "limits_source": av.limits_source,
             "limits_in_options_config_hash": av.limits_in_options_config_hash,
+            "limits_hash_detail": av.limits_hash_detail,
         },
         label="0.i",
     )

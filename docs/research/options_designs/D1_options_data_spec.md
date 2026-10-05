@@ -1164,6 +1164,9 @@ into `options_scope_hash`:
   "fetch_span": {"from_dte": 60, "pre_entry_buffer_sessions": 5},
   "reference_price": {"source": "massive", "basis": "close",
                       "max_staleness_sessions": 3},
+  "option_data": {"source": "massive_options"},   // added 2026-10-04: the cycle runs' provider —
+                                                  // the label the OPTION rows are stored under,
+                                                  // distinct from the bar source above; hashed
   "iv_policy": {"primary": "local_bs_inverted",
                 "mark_fallback": "same_session_surface",
                 "surface_fit": "quadratic_log_moneyness",

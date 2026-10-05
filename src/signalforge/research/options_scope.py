@@ -60,6 +60,13 @@ def build_options_scope(
     row, and the gate would enforce nothing.
     """
     ev = evaluation or OptionsEvaluationConfig()
+    option_source = str(summary.provider or "").strip()
+    if not option_source:
+        raise ValueError(
+            "the coverage summary names no provider, so the scope cannot record which source "
+            "the option rows are stored under; an options scope never guesses its option-data "
+            "source (R6)"
+        )
     return {
         "schema_version": OPTIONS_SCOPE_SCHEMA_VERSION,
         "underlyings": sorted(summary.underlyings),
@@ -83,6 +90,13 @@ def build_options_scope(
             "basis": "close",
             "max_staleness_sessions": 3,
         },
+        # The source label the OPTION rows (``option_contract`` /
+        # ``option_aggregate_daily``) are stored under: the cycle-backfill runs'
+        # provider, recorded, never inferred from the underlying-bar source.  The
+        # two are different labels ("massive" bars, "massive_options" chains), and
+        # R6's no-blend rule holds per data kind.  Hashed: a dataset whose option
+        # rows come from another source is another dataset.
+        "option_data": {"source": option_source},
         "iv_policy": {
             "primary": "local_bs_inverted",
             "mark_fallback": "same_session_surface",
@@ -121,6 +135,18 @@ def build_options_scope(
         "options_config_hash": ev.options_config_hash,
         "ingestion_run_ids": list(ingestion_run_ids),
     }
+
+
+def recorded_option_source(scope: dict[str, Any] | None) -> str:
+    """The option-data source a scope NAMES, or ``""`` when it names none.
+
+    A read, not a resolution: the evidence path cross-checks it against the
+    recorded ingestion runs and refuses when neither names one.
+    """
+    block = (scope or {}).get("option_data")
+    if not isinstance(block, dict):
+        return ""
+    return str(block.get("source", "") or "").strip()
 
 
 def options_scope_hash(scope: dict[str, Any] | None) -> str:

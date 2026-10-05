@@ -24,6 +24,7 @@ from signalforge.backtest.options_engine import (
     StructureType,
 )
 from signalforge.backtest.options_pricing import IvSource
+from signalforge.config.research import OptionsEvaluationConfig
 from signalforge.data import calendar
 from signalforge.data.option_chain import ContractRef, OptionChainSeries, Right
 from signalforge.data.series import PriceSeries
@@ -39,7 +40,13 @@ from signalforge.db.types import utcnow
 from signalforge.domain import FeedType, Horizon, LatencyCategory
 from signalforge.research.options_gates import OptionsWindow, StructureIdentity
 
+#: Two labels, one per data kind, exactly as the live database stores them: the
+#: underlying's daily bars under the equity adapter's name and the option rows
+#: (and the cycle-backfill run that wrote them) under the options adapter's.  A
+#: fixture that used ONE label for both is how a single ``source`` argument was
+#: able to reach both tables unnoticed.
 SOURCE = "massive"
+OPTION_SOURCE = "massive_options"
 UNDERLYING_LEVEL = 500.0
 SHORT_STRIKE = 480.0
 LONG_STRIKE = 475.0
@@ -201,8 +208,11 @@ def seed_underlying(session: Session, symbol: str, *, level: float = UNDERLYING_
         )
 
 
-def seed_chain(session: Session, symbol: str) -> None:
-    """A put ladder around the money for each expiry, printing every session."""
+def seed_chain(session: Session, symbol: str, *, source: str = OPTION_SOURCE) -> None:
+    """A put ladder around the money for each expiry, printing every session.
+
+    Stored under ``source`` — by default the OPTIONS label, never the bar label.
+    """
     strikes = [460.0, 465.0, 470.0, LONG_STRIKE, SHORT_STRIKE, 485.0, 490.0, 520.0]
     sessions = calendar.sessions(WINDOW_START, WINDOW_END)
     for expiry in EXPIRIES:
@@ -218,7 +228,7 @@ def seed_chain(session: Session, symbol: str) -> None:
                         expiration_date=expiry,
                         exercise_style="american",
                         shares_per_contract=100,
-                        source=SOURCE,
+                        source=source,
                         ingested_at=utcnow(),
                     )
                 )
@@ -241,7 +251,7 @@ def seed_chain(session: Session, symbol: str) -> None:
                             close=px,
                             volume=1500.0,
                             transactions=40,
-                            source=SOURCE,
+                            source=source,
                             latency_category=LatencyCategory.HISTORICAL,
                             ingested_at=utcnow(),
                             quality_flags=[],
@@ -261,6 +271,7 @@ def seed_coverage_run(
     window_start: date = WINDOW_START,
     window_end: date = WINDOW_END,
     started_at: datetime | None = None,
+    provider: str = OPTION_SOURCE,
 ) -> IngestionRun:
     """An ``IngestionRun`` shaped exactly as ``coverage_summary`` reads it.
 
@@ -287,7 +298,7 @@ def seed_coverage_run(
             "shares_per_contract_refusals": 0,
         }
     run = IngestionRun(
-        provider=SOURCE,
+        provider=provider,
         feed_type=FeedType.OPTIONS_CHAIN,
         kind="options_cycle_backfill",
         requested_start=window_start,
@@ -323,18 +334,30 @@ def seed_snapshot(
     key: str = "options_w3b_test",
     *,
     ingestion_run_ids: Sequence[int] = (),
+    option_source: str | None = OPTION_SOURCE,
+    options_config_hash: str | None = None,
 ) -> DataSnapshot:
+    """An options-scoped snapshot.  ``option_source=None`` omits the scope's
+    ``option_data`` block (a snapshot from before it was recorded);
+    ``options_config_hash=None`` records the hash of the config in force."""
+    scope: dict[str, object] = {
+        "schema_version": 1,
+        "underlyings": list(symbols),
+        "options_config_hash": (
+            OptionsEvaluationConfig().options_config_hash
+            if options_config_hash is None
+            else options_config_hash
+        ),
+        "ingestion_run_ids": [int(i) for i in ingestion_run_ids],
+    }
+    if option_source is not None:
+        scope["option_data"] = {"source": option_source}
     snap = DataSnapshot(
         key=key,
         symbols_json=list(symbols),
         description="synthetic options snapshot (test)",
         source_note="SIMULATED",
-        options_scope_json={
-            "schema_version": 1,
-            "underlyings": list(symbols),
-            "options_config_hash": "testhash",
-            "ingestion_run_ids": [int(i) for i in ingestion_run_ids],
-        },
+        options_scope_json=scope,
     )
     session.add(snap)
     session.flush()

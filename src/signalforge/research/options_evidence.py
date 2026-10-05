@@ -53,11 +53,14 @@ reviewer can disagree with it:
    number of distinct printed strikes on that expiry.  That is the sample a
    same-session surface *would* be fitted from, and it is 0 — an honest gate-0.e
    failure — when there are no trades.
-3. ``limits_in_options_config_hash`` is computed by asking
-   ``OptionsEvaluationConfig`` whether it carries the limit fields at all.  Today
-   it does not (they live on the paper-side ``execution_limits`` row, which S11b
-   forbids this module from importing), so the answer is ``False`` and gate 0.i
-   fails — which is the wave-2 finding, surfaced rather than papered over.
+3. ``limits_in_options_config_hash`` is computed, not asserted: it is ``True``
+   only when ``OptionsEvaluationConfig`` carries the limit fields, their values
+   are the ones gate 0.i applies, AND the snapshot's recorded
+   ``options_config_hash`` is the hash of that config (``_limits_hash_status``).
+   The paper-side ``OptionsRiskLimits`` stays outside every hash (D3 §1.4).
+4. Two sources, one per data kind.  ``source`` labels the underlying's daily
+   bars; the option rows' label is read from the snapshot's recorded provenance
+   (``resolve_option_data_source``) and is never defaulted to the bar label.
 
 S11b: this module sits on the same side of the wall as ``options_gates`` and
 imports nothing from ``llm``, ``alerts``, ``execution`` or any paper ledger.
@@ -154,6 +157,7 @@ from signalforge.research.options_gates import (
     gate_10_probation,
 )
 from signalforge.research.options_promotion import OptionsEvidence
+from signalforge.research.options_scope import recorded_option_source
 
 _log = get_logger("research.options_evidence")
 
@@ -414,6 +418,94 @@ def clustered_bootstrap_ci(
 
 
 # --------------------------------------------------------------------------- #
+# which source the OPTION rows are stored under — recorded, never guessed
+# --------------------------------------------------------------------------- #
+class OptionSourceUnresolved(ValueError):
+    """The snapshot's recorded provenance does not name ONE option-data source.
+
+    The underlying's daily bars and its option rows are two data kinds stored
+    under two labels (``massive`` / ``massive_options``).  Passing the bar label
+    to the option tables matches nothing, and the chain then looks merely absent —
+    so the option label is read from provenance and its absence is a refusal.
+    """
+
+
+def resolve_option_data_source(session: Session, snapshot: DataSnapshot) -> str:
+    """The ONE source label ``snapshot``'s option rows are stored under.  Read-only.
+
+    Two recorded witnesses, and they must agree: the scope's own
+    ``option_data.source`` (written by ``options snapshot``), and the ``provider``
+    of every cycle-backfill ``IngestionRun`` the scope's ``ingestion_run_ids``
+    pins — the runs that wrote the rows.  Refused, by name:
+
+    * neither names a source (never a fallback to the underlying-bar source);
+    * the scope pins runs that are not stored cycle-backfill runs;
+    * the witnesses disagree, or the runs disagree among themselves (R6: one
+      options source — a snapshot spanning two is a blend).
+    """
+    scope = snapshot.options_scope_json or {}
+    named = recorded_option_source(scope)
+    try:
+        run_ids = sorted({int(i) for i in (scope.get("ingestion_run_ids") or [])})
+    except (TypeError, ValueError):
+        run_ids = []
+    runs = (
+        session.scalars(
+            select(IngestionRun).where(
+                IngestionRun.id.in_(run_ids), IngestionRun.kind == "options_cycle_backfill"
+            )
+        ).all()
+        if run_ids
+        else []
+    )
+    absent = sorted(set(run_ids) - {int(r.id) for r in runs})
+    if absent:
+        raise OptionSourceUnresolved(
+            f"DataSnapshot {snapshot.key!r} pins ingestion run(s) {absent} that are not stored "
+            "cycle-backfill runs, so the source of its option rows cannot be confirmed"
+        )
+    unnamed = sorted(int(r.id) for r in runs if not str(r.provider or "").strip())
+    if unnamed:
+        raise OptionSourceUnresolved(
+            f"cycle-backfill run(s) {unnamed} pinned by DataSnapshot {snapshot.key!r} record no "
+            "provider, so the source of its option rows cannot be confirmed"
+        )
+    from_runs = sorted({str(r.provider).strip() for r in runs})
+    candidates = sorted(set(from_runs) | ({named} if named else set()))
+    if not candidates:
+        raise OptionSourceUnresolved(
+            f"DataSnapshot {snapshot.key!r} names no option-data source: its options_scope_json "
+            "has no option_data.source and pins no cycle-backfill run to read one from. The "
+            "option source is never guessed and never defaulted to the underlying-bar source — "
+            "build the snapshot with 'signalforge options snapshot'"
+        )
+    if len(candidates) > 1:
+        raise OptionSourceUnresolved(
+            f"DataSnapshot {snapshot.key!r} does not name ONE option-data source: scope says "
+            f"{named or '(nothing)'!r}, its pinned run(s) {run_ids} say {from_runs}. R6 forbids "
+            "a blend of option sources"
+        )
+    return candidates[0]
+
+
+def _stored_option_sources(session: Session, underlying: str, start: date, end: date) -> list[str]:
+    """Which source labels hold option bars for ``underlying`` in the window.
+
+    Diagnostic only — read on the failure path so "no chain" says what IS stored.
+    """
+    return sorted(
+        str(s)
+        for s in session.scalars(
+            select(distinct(OptionAggregateDaily.source)).where(
+                OptionAggregateDaily.underlying_symbol == underlying.upper(),
+                OptionAggregateDaily.session_date >= start,
+                OptionAggregateDaily.session_date <= end,
+            )
+        ).all()
+    )
+
+
+# --------------------------------------------------------------------------- #
 # data loading — plain reads, bounded per underlying, nothing written
 # --------------------------------------------------------------------------- #
 def load_option_chain_series(
@@ -423,9 +515,15 @@ def load_option_chain_series(
     start: date,
     end: date,
     source: str,
+    option_source: str,
     underlying_series: PriceSeries | None = None,
 ) -> OptionChainSeries | None:
     """Build one underlying's :class:`OptionChainSeries` from stored rows.
+
+    Two sources, one per data kind, both explicit: ``source`` labels the
+    underlying's daily bars (``ohlcv_daily``) and ``option_source`` labels the
+    option rows (``option_contract`` / ``option_aggregate_daily``).  Neither
+    defaults to the other; an empty ``option_source`` raises.
 
     ``None`` when the underlying has no daily bars in the window — a chain must be
     indexed by the *underlying's* session list (D2 §3.5), so without those bars
@@ -437,6 +535,11 @@ def load_option_chain_series(
     what leaves this function is an in-memory series the engine prices against,
     and nothing downstream emits a contract row into a report.
     """
+    if not str(option_source or "").strip():
+        raise OptionSourceUnresolved(
+            f"no option-data source was given for {underlying.upper()}; it is never defaulted "
+            "to the underlying-bar source"
+        )
     series = underlying_series or PriceSeries.load(
         session, underlying, start, end, source=source, adjusted=UNDERLYING_ADJUSTED
     )
@@ -447,7 +550,7 @@ def load_option_chain_series(
     meta_rows = session.scalars(
         select(OptionContract).where(
             OptionContract.underlying_symbol == underlying.upper(),
-            OptionContract.source == source,
+            OptionContract.source == option_source,
         )
     ).all()
     if not meta_rows:
@@ -468,7 +571,7 @@ def load_option_chain_series(
         )
         .where(
             OptionAggregateDaily.underlying_symbol == underlying.upper(),
-            OptionAggregateDaily.source == source,
+            OptionAggregateDaily.source == option_source,
             OptionAggregateDaily.session_date >= start,
             OptionAggregateDaily.session_date <= end,
         )
@@ -1225,11 +1328,15 @@ def run_underlying(
     *,
     window: OptionsWindow,
     source: str,
+    option_source: str,
     dte_targets: Sequence[int],
     include_mechanical: bool = True,
     warmup: int = 50,
 ) -> UnderlyingRun:
     """Load one underlying, run the dual-spread pass, and reduce it.
+
+    ``source`` is the underlying-bar source and ``option_source`` the option-data
+    source; they are separate labels and neither stands in for the other.
 
     A plain read followed by pure compute.  Nothing here writes, and the chain is
     dropped when the function returns so peak memory is one underlying, not the
@@ -1245,6 +1352,7 @@ def run_underlying(
         first_bar=series.dates[0] if len(series) else None,
         last_bar=series.dates[-1] if len(series) else None,
         gap_sessions=max(0, sessions_expected - len(series)) if len(series) else 0,
+        option_source=option_source,
     )
     empty = UnderlyingRun(
         symbol=symbol,
@@ -1265,10 +1373,25 @@ def run_underlying(
         return replace(empty, skipped_reason="no underlying bars in the window")
 
     chain = load_option_chain_series(
-        session, symbol, start=window.start, end=window.end, source=source, underlying_series=series
+        session,
+        symbol,
+        start=window.start,
+        end=window.end,
+        source=source,
+        option_source=option_source,
+        underlying_series=series,
     )
     if chain is None:
-        return replace(empty, skipped_reason="no option chain rows in the window")
+        # Say what IS stored: a chain that exists under another label is a source
+        # mismatch, not an absent chain, and the two must not read the same.
+        stored = _stored_option_sources(session, symbol, window.start, window.end)
+        return replace(
+            empty,
+            skipped_reason=(
+                f"no option chain rows in the window under option source {option_source!r} "
+                f"(option bars stored for this underlying in the window: {stored or 'none'})"
+            ),
+        )
 
     baseline = strategy.selection_cost_model
     stressed = replace(baseline, spread_multiplier=2.0)
@@ -1496,17 +1619,52 @@ def _sharpe(
     ).sharpe
 
 
-def _limits_are_hashed(evaluation: OptionsEvaluationConfig) -> bool:
-    """Is the arming limit set inside ``options_config_hash``?  Asked, not assumed.
+_HASHED_LIMIT_FIELDS = ("options_per_structure_max_loss", "options_total_open_max_loss")
 
-    Today the limits live on the paper-side ``execution_limits`` row, which S11b
-    forbids this module from importing, and ``OptionsEvaluationConfig`` carries no
-    equivalent field — so the answer is ``False`` and gate 0.i fails.  Written as a
-    field probe so it flips the day the fields are added, rather than as a constant
-    somebody has to remember to change.
+
+def _limits_hash_status(
+    evaluation: OptionsEvaluationConfig,
+    thresholds: OptionsGateThresholds,
+    snapshot: DataSnapshot,
+) -> tuple[bool, str]:
+    """Is the limit set gate 0.i APPLIES inside the hash the snapshot is keyed on?
+
+    Asked, not assumed — and three things must all hold (D4 §2.8a / §2.9b), each
+    of which alone would let a limit move silently:
+
+    1. ``OptionsEvaluationConfig`` carries the limit fields, so they are inside
+       ``options_config_hash`` at all (a field probe, not a constant);
+    2. the hashed values ARE the ones the gate applies (``OptionsGateThresholds``):
+       a hashed $900 beside an applied $1,200 binds nothing;
+    3. the snapshot's recorded ``options_config_hash`` is the hash of this very
+       config, so the snapshot KEY — and therefore the sealed look — is bound to
+       these limits.  A snapshot minted before the limits were hashed fails here
+       and must be superseded by a new one, never re-labelled.
+
+    Returns ``(True, "")`` or ``(False, why)``.
     """
     fields = set(type(evaluation).model_fields)
-    return {"options_per_structure_max_loss", "options_total_open_max_loss"} <= fields
+    missing = [f for f in _HASHED_LIMIT_FIELDS if f not in fields]
+    if missing:
+        return False, f"OptionsEvaluationConfig carries no {', '.join(missing)}"
+    moved = [
+        f"{f}: hashed {float(getattr(evaluation, f)):,.2f} vs applied "
+        f"{float(getattr(thresholds, f)):,.2f}"
+        for f in _HASHED_LIMIT_FIELDS
+        if float(getattr(evaluation, f)) != float(getattr(thresholds, f))
+    ]
+    if moved:
+        return False, "the hashed limits are not the limits applied — " + "; ".join(moved)
+    recorded = str((snapshot.options_scope_json or {}).get("options_config_hash", "") or "")
+    current = evaluation.options_config_hash
+    if recorded != current:
+        return False, (
+            f"snapshot {snapshot.key!r} records options_config_hash "
+            f"{recorded[:12] or '(none)'}, not {current[:12]} — the hash of the evaluation "
+            "config that carries these limits; its key is not bound to them, so it must be "
+            "superseded by a new snapshot"
+        )
+    return True, ""
 
 
 def assemble_options_evidence(
@@ -1526,7 +1684,7 @@ def assemble_options_evidence(
     presealed_abandonments: int = 0,
     equity_diagnostic_ref: str = "",
     warmup: int = 50,
-    limits_source: str = "D5 §9.2 / decisions #4 and #13 (paper-side execution_limits)",
+    limits_source: str = "D5 §9.2 / decisions #4 and #13; OP-1 (OptionsEvaluationConfig, hashed)",
 ) -> AssembledEvidence:
     """Measure everything the options ladder gates on, over one keyed snapshot.
 
@@ -1535,6 +1693,11 @@ def assemble_options_evidence(
     ``evaluate_options_promotion`` has nothing to seal.  A caller that wants to
     spend a look must say so.
 
+    ``source`` is the UNDERLYING-BAR source.  The option-data source is not a
+    parameter: it is read from the snapshot's recorded provenance by
+    :func:`resolve_option_data_source`, which raises
+    :class:`OptionSourceUnresolved` rather than guess one.
+
     Read-only.  The session may be a plain reader; nothing here needs — or takes —
     write intent.
     """
@@ -1542,6 +1705,7 @@ def assemble_options_evidence(
     ev = evaluation or OptionsEvaluationConfig()
     symbols = [str(s).upper() for s in (dataset_snapshot.symbols_json or [])]
     notes: list[str] = []
+    option_source = resolve_option_data_source(session, dataset_snapshot)
 
     axes = strategy.sensitivity_axes()
     dte_targets = [int(v) for v in axes.get("dte_target", [35])]
@@ -1555,6 +1719,7 @@ def assemble_options_evidence(
                 sym,
                 window=window,
                 source=source,
+                option_source=option_source,
                 dte_targets=dte_targets,
                 include_mechanical=include_mechanical,
                 warmup=warmup,
@@ -1606,12 +1771,16 @@ def assemble_options_evidence(
         th=th,
         ev=ev,
         source=source,
+        option_source=option_source,
+        dataset_snapshot=dataset_snapshot,
         symbols=symbols,
         dte_targets=dte_targets,
         identity=identity,
         limits_source=limits_source,
         axes=axes,
     )
+    if not availability.limits_in_options_config_hash:
+        notes.append(f"gate 0.i: {availability.limits_hash_detail}")
 
     clustered_d4 = clustered_bootstrap_ci(
         oos, key_fn=cluster_key_underlying_cycle, unit=CLUSTER_UNIT_D4, seed=cluster_seed
@@ -1731,6 +1900,7 @@ def assemble_options_evidence(
             benchmark={"market_sharpe": _market_sharpe(proxy, window.sealed_start, window.end)},
             data_provenance={
                 "sources": [source],
+                "option_sources": [option_source],
                 "simulated": False,
                 "dataset_snapshot": dataset_snapshot.key,
             },
@@ -1838,12 +2008,15 @@ def _availability(
     th: OptionsGateThresholds,
     ev: OptionsEvaluationConfig,
     source: str,
+    option_source: str,
+    dataset_snapshot: DataSnapshot,
     symbols: Sequence[str],
     dte_targets: Sequence[int],
     identity: StructureIdentity,
     limits_source: str,
     axes: Mapping[str, Sequence[float | int]],
 ) -> OptionsDataAvailability:
+    limits_hashed, limits_hash_detail = _limits_hash_status(ev, th, dataset_snapshot)
     trades = list(dual.baseline.trades)
     counters = dual.baseline.counters
     mix, unnamed = _iv_source_mix(trades)
@@ -1953,7 +2126,9 @@ def _availability(
             )
         ),
         limits_source=limits_source,
-        limits_in_options_config_hash=_limits_are_hashed(ev),
+        limits_in_options_config_hash=limits_hashed,
+        limits_hash_detail=limits_hash_detail,
+        required_option_source=option_source,
     )
 
 
@@ -2141,8 +2316,10 @@ __all__ = [
     "OR0C_DECISIONS_FILE",
     "OR0C_ITEM",
     "CoveragePreflight",
+    "OptionSourceUnresolved",
     "OptionsEvidenceError",
     "OptionsStrategy",
+    "resolve_option_data_source",
     "UnderlyingRun",
     "assemble_options_evidence",
     "coverage_preflight",

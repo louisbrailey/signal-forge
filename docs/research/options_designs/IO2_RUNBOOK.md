@@ -406,14 +406,14 @@ signalforge options snapshot --symbols SPY,QQQ,IWM \
 # 6b. write the one DataSnapshot row (refuses while a worker is live)
 signalforge options snapshot --symbols SPY,QQQ,IWM \
   --since 2023-09-04 --until 2026-09-04 \
-  --key options_idx3_massive_2023-09-04_2026-09-04_6fa62e29d7 --confirm
+  --key options_idx3_massive_2023-09-04_2026-09-04_0ae681d590 --confirm
 
 # 7. start the worker again
 
 # 8. the dry-run evaluation — no evaluation row, no sealed test, no look
 signalforge options evaluate-promotion \
   --strategy options_short_vertical.medium_swing \
-  --snapshot-key options_idx3_massive_2023-09-04_2026-09-04_6fa62e29d7 \
+  --snapshot-key options_idx3_massive_2023-09-04_2026-09-04_0ae681d590 \
   --since 2023-09-04 --until 2026-09-04 --dry-run
 ```
 
@@ -428,8 +428,25 @@ underlyings. It reads `ingestion_run` only — no option bar — and prints coun
 characters of `options_scope_hash`. D3 §1 item 4 requires the key to carry the scope hash, so
 that a change to any identity parameter moves the key. `--key` may be omitted (the canonical key
 is used) and a hand-written key is refused unless it contains that hash. For the index set the
-key is `options_idx3_massive_2023-09-04_2026-09-04_6fa62e29d7`; step 6a prints it, and if the
+key is `options_idx3_massive_2023-09-04_2026-09-04_0ae681d590`; step 6a prints it, and if the
 printed suffix differs, **stop** — the scope is not the one Amendment 3 describes.
+
+**Snapshot id 16 is superseded (2026-10-04).** The key this section first named was
+`options_idx3_massive_2023-09-04_2026-09-04_6fa62e29d7`, and live `DataSnapshot` id 16 was
+written under it. Two identity fields have since entered the scope — gate 0.i's risk limits
+($900 / $3,600, now inside `options_config_hash`, D4 §2.8a) and `option_data.source`
+(`massive_options`, the source the option rows are stored under) — so the scope hash, and with
+it the key, moved to `…_0ae681d590`. Snapshot 16 is left in place and is **not** to be
+evaluated: `evaluate-promotion` reports that its `options_config_hash` is not the one in force
+(a refusal on `--confirm`; gate 0.i fails on it in a dry run). Step 6b must be run again, with
+the worker stopped, to write the new row. No evaluation has used snapshot 16 — its one dry run
+loaded no option chain at all — and k is still 0 (Amendment 3 §2.1).
+
+**Two sources, one per data kind.** Daily bars for the underlyings are stored under `massive`;
+option contracts and option bars under `massive_options` (the cycle-backfill run's provider).
+The evaluation reads the option source from the snapshot's recorded provenance — the scope's
+`option_data.source` and the provider of its pinned runs, which must agree — and refuses if
+neither names one. It is never taken from the bar source. Step 6a prints both.
 
 `--run <id>` pins the read to one run; without it each underlying is read from the newest
 overlapping cycle run that requested it. The ids used are recorded in the scope
@@ -469,7 +486,10 @@ run is refused by name, whatever the pool looks like.
 
 It assembles the evidence and prints the ladder through the read-only preview. It writes no
 evaluation row and no sealed test and spends no look; with any refusal it still prints the
-ladder as a diagnostic and exits non-zero. It **does** show pre-sealed diagnostics, so after it
+ladder as a diagnostic and exits non-zero (one exception: a snapshot whose provenance names no
+option-data source exits 2 with no ladder, because there is no chain to load). An underlying
+whose chain is absent under the recorded option source is reported with the labels that *are*
+stored for it. It **does** show pre-sealed diagnostics, so after it
 runs the underlying set, OR-0c and OR-F15 are frozen (Amendment 3 §5). A `--confirm` evaluation
 is a separate operator decision, needs `--grid`, needs the worker stopped, and is look 1 of the
 family.

@@ -99,11 +99,40 @@ as a pool. Which reading binds is the subject of §2.
 > **The first evaluation's underlying set is exactly `{SPY, QQQ, IWM}`.** The snapshot is the
 > options-scoped `DataSnapshot` built by `signalforge options snapshot --symbols SPY,QQQ,IWM
 > --since 2023-09-04 --until 2026-09-04`, whose key carries its scope hash:
-> `options_idx3_massive_2023-09-04_2026-09-04_6fa62e29d7`.
+> `options_idx3_massive_2023-09-04_2026-09-04_0ae681d590`.
 >
 > (The hash suffix was derived read-only from run 17's provenance with the committed code. The
 > command prints the canonical key; if it ever prints a different suffix, the scope differs from
 > the one described here and that must be explained before anything is written.)
+
+### 2.1 The key moved on 2026-10-04, and snapshot id 16 is superseded (explained, as required)
+
+The key first written here was `options_idx3_massive_2023-09-04_2026-09-04_6fa62e29d7`, and a
+`DataSnapshot` (live id **16**) was created under it. **That snapshot is superseded and must
+not be evaluated.** The suffix changed because two identity fields entered the scope, both by
+design and neither in response to a result:
+
+1. **Gate 0.i's risk-limit set is now inside `options_config_hash`** (D4 §2.8a / §2.9b, which
+   always required it): `OptionsEvaluationConfig` carries
+   `options_per_structure_max_loss = 900` and `options_total_open_max_loss = 3600` (OP-1). The
+   values are unchanged; only where they are hashed changed. `options_config_hash` went from
+   `554de314…` to `eae47124…`, and it is a member of the scope.
+2. **The scope names the option-data source**: `option_data.source = massive_options`, the
+   provider of the cycle-backfill run that wrote the option rows. The underlying's daily bars
+   are stored under `massive`; the two labels are different data kinds and R6 holds per kind.
+
+Snapshot 16's key is bound to neither. Under the committed code gate 0.i fails on it by name
+(its recorded `options_config_hash` is not the hash of the config that carries the limits), and
+`options evaluate-promotion --confirm` refuses it. **A snapshot is immutable: 16 is left in
+place, not edited and not relabelled; a new row is written under the new key** (runbook §12
+step 6b). The underlying set, window, coverage run (live id 44 — bulk run 17 re-keyed by the
+merge), floors and strategy version are all unchanged.
+
+**What had been run on snapshot 16, stated exactly.** One `evaluate-promotion --dry-run` on the
+live database. It loaded **no option chain for any underlying** — the evidence path passed the
+bar source `massive` to the option tables, which hold their rows under `massive_options` — so it
+evaluated zero structures and printed no option-derived quantity. No `--confirm` was run, no
+evaluation row or sealed test exists for it, and **k stays 0**.
 
 - **Membership rule.** The Stage A set, which the runbook fixed as a stage on 2026-09-12 before
   any coverage existed (§2, "SPY, QQQ, IWM only — 102 units"). It is not a selection of
@@ -298,6 +327,14 @@ appendix after §8); `DECISIONS_2026-09-12_wave3.md` (addendum 4).
   d2_pct_of_last_print_abs_floor`, `fill_timing.basis = next_session`,
   `multiplier_this_evaluation = 1.0`, with `spread_multipliers = [1.0, 2.0]` both run inside one
   evaluation). They are part of the scope hash; changing any of them is a new snapshot.
+- **Snapshot id 16 superseded (2026-10-04, §2.1).** The new key is
+  `options_idx3_massive_2023-09-04_2026-09-04_0ae681d590`; the operator writes the new row with
+  runbook §12 step 6b (worker stopped). Until then no options snapshot on the live database is
+  evaluable.
+- **Resuming run 44 / 45 is now refused.** Their provenance records the old
+  `options_config_hash`, which is one of the cycle backfill's identity keys, so a resume under
+  the new hash is "a different dataset" by the backfill's own rule. Both runs are `ok` and
+  complete; this matters only if a top-up is ever wanted, which would be a new run.
 
 ## 9. Change record
 
@@ -312,3 +349,6 @@ appendix after §8); `DECISIONS_2026-09-12_wave3.md` (addendum 4).
 | OR-0c while a member is below a floor on its own | a note in this file | **warning on every run; `--confirm` refused** without flag + recorded decision |
 | Strategy version | v0.1.2 | v0.1.2 (unchanged) |
 | Sealed looks spent | 0 | 0 |
+| Gate 0.i limit set ($900 / $3,600) | outside every hash; 0.i failed by construction | **inside `options_config_hash`** (values unchanged); 0.i also requires the snapshot to be keyed on that hash |
+| Option-data source | the bar source `massive` passed to the option tables (no chain loaded) | **read from recorded provenance** (`massive_options`); recorded in the scope; refused if unnamed |
+| Snapshot key | `…_6fa62e29d7` (live id 16) | **`…_0ae681d590`**; id 16 superseded, never evaluated (§2.1) |
