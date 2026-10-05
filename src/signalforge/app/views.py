@@ -835,6 +835,12 @@ def ops_status_context(session: Session) -> dict[str, Any]:
             "catchup_ingest",
             "catchup_scan",
             "catchup_approved_scope_scan",
+            # multi-session catch-up (2026-10-04): the newest per-session rows,
+            # so a session that was ingested but explicitly NOT scanned is
+            # visible here rather than only in the database
+            "catch_up_missed_sessions",
+            "catchup_ingest_session",
+            "scan_skipped_missed_session",
         ]
     )
     jobs: list[dict[str, Any]] = []
@@ -943,6 +949,7 @@ def ops_status_context(session: Session) -> dict[str, Any]:
         EOD_CRON,
         WORKER_STALE_AFTER_S,
         catch_up_pending,
+        eod_gap,
         last_completed_session,
     )
 
@@ -1042,6 +1049,13 @@ def ops_status_context(session: Session) -> dict[str, Any]:
     }
     pending, pending_reason = catch_up_pending(now)
     catch_up = {"pending": pending, "reason": pending_reason}
+    # A silent multi-day gap (2026-09-28..30): the last completed session is past
+    # its expected EOD time + grace with no successful EOD job run on record.
+    try:
+        gap, gap_reason = eod_gap(now)
+    except Exception as exc:  # never let the status page itself fail
+        gap, gap_reason = True, f"EOD gap check failed: {exc}"
+    eod_gap_ctx = {"gap": gap, "reason": gap_reason}
 
     # --- approved-scope scan readiness (the same gate the scheduled job uses) ---
     # /ops must never look "ready" while the daily data-freshness gate would
@@ -1154,6 +1168,11 @@ def ops_status_context(session: Session) -> dict[str, Any]:
         ),
         *bars_checks,
         ("No catch-up pending", not catch_up["pending"], catch_up["reason"]),
+        (
+            "EOD update ran for last completed session",
+            not eod_gap_ctx["gap"],
+            str(eod_gap_ctx["reason"]),
+        ),
         ("Database at migration head", bool(db["at_head"]), db.get("current_revision") or "?"),
         ("All data feeds fresh", not any_stale, "stale or unregistered" if any_stale else "ok"),
         ("Benzinga feed current", benzinga["available"], benzinga["detail"] or ""),
@@ -1211,6 +1230,7 @@ def ops_status_context(session: Session) -> dict[str, Any]:
         "next_scheduled": next_scheduled,
         "freshness": freshness,
         "catch_up": catch_up,
+        "eod_gap": eod_gap_ctx,
         "checks": [{"label": lbl, "ok": ok, "note": note} for lbl, ok, note in checks],
         "overall_ready": all(ok for _lbl, ok, _n in checks),
     }
