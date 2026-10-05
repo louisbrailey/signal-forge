@@ -898,9 +898,12 @@ def cmd_plan(args: argparse.Namespace) -> None:
 
 
 def cmd_run(args: argparse.Namespace) -> None:
-    current = os.nice(0)
-    if current < NICE_TARGET:
-        os.nice(NICE_TARGET - current)
+    try:  # best effort: a sandbox may forbid priority changes; the run is still correct
+        current = os.nice(0)
+        if current < NICE_TARGET:
+            os.nice(NICE_TARGET - current)
+    except OSError:
+        pass
     engine = open_readonly(args.db)
     windows = build_windows()
     for arm in args.arm or list(ARMS):
