@@ -318,7 +318,11 @@ def seed_coverage_run(
 
 
 def seed_snapshot(
-    session: Session, symbols: Sequence[str], key: str = "options_w3b_test"
+    session: Session,
+    symbols: Sequence[str],
+    key: str = "options_w3b_test",
+    *,
+    ingestion_run_ids: Sequence[int] = (),
 ) -> DataSnapshot:
     snap = DataSnapshot(
         key=key,
@@ -329,6 +333,7 @@ def seed_snapshot(
             "schema_version": 1,
             "underlyings": list(symbols),
             "options_config_hash": "testhash",
+            "ingestion_run_ids": [int(i) for i in ingestion_run_ids],
         },
     )
     session.add(snap)
@@ -343,7 +348,7 @@ def seed_everything(
         seed_underlying(session, sym)
         seed_chain(session, sym)
     run = seed_coverage_run(session, symbols)
-    snap = seed_snapshot(session, symbols)
+    snap = seed_snapshot(session, symbols, ingestion_run_ids=[run.id])
     session.commit()
     return snap, run
 

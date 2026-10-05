@@ -133,3 +133,9 @@ pre-flight now judges a snapshot on its own underlyings, at the same floors.
 | OR-0c | Gate 0.c read pooled over the set (SPY, QQQ, IWM: 0.902) or per symbol (QQQ and IWM are 0.882 each, leaving SPY alone) | **Open — before the first `--confirm`** |
 | OR-F15 | Band population (put-only vs pooled) | Open, unchanged |
 | IMPL-3.3 | 4-structure concurrency cap | Open, unchanged |
+
+*OR-0c is enforced in code (2026-10-04; Amendment 3 §3 item 7, runbook §12.4):
+`options evaluate-promotion --confirm` refuses a snapshot with a member below a floor on its own
+numbers unless the command carries `--accept-pooled-coverage OR-0c` and this file contains a
+line beginning with the exact text* `OR-0c: DECIDED pooled`*. This note is not that line and the
+item is still Open. Only the operator adds it.*

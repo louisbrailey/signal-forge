@@ -146,17 +146,46 @@ Now (`research/options_evidence.py`: `snapshot_options_coverage`, `dataset_snaps
 3. The **same two floors** are applied to that pool.
 4. Further refusals: an underlying with no recorded coverage; runs that disagree on provider,
    cycle rule, ladder or strike-listing basis; a run status other than `ok` / `partial`.
-5. A snapshot whose scope recorded `ingestion_run_ids` is judged on those runs only. If one is
-   absent the pre-flight refuses rather than falling back.
+   **A member is never pooled silently** (added 2026-10-04 after safety review): an underlying
+   its run merely *requested* — with no per-cycle records, with zero expected sessions, or
+   listed in that run's `symbols_failed` — is refused **by name**. Such a member adds nothing
+   (or only part of itself) to the pooled counts, so without this refusal the other members
+   would carry it past both floors (`{SPY 10/10, QQQ no records}` pooled to 1.0 / 1.0).
+5. A snapshot is judged **only** on the runs its scope recorded (`ingestion_run_ids`). A
+   snapshot that records none is refused; so is one whose recorded run is absent. There is no
+   fallback to "the newest overlapping run" on the evaluation path. `ingestion_run_ids` is
+   provenance and is **not** part of `options_scope_hash` (a resume must not mint a new key for
+   the same dataset definition, and `options merge` re-keys run ids), so `options snapshot`
+   compares the recorded ids itself and refuses to report "nothing to write" over an existing
+   row pinned to different runs.
 6. The per-underlying fractions are printed with every pre-flight, so a pooled pass never hides
    which member carried it.
+7. **The OR-0c guard** (added 2026-10-04 after safety review). The pre-flight result is still the
+   pooled computation, but it also reports `members_below_floor`: every member whose **own**
+   bracketing is below 0.90 or whose own continuity is below 0.80, with its numbers. While that
+   list is non-empty:
+   - `options snapshot` (dry run and `--confirm`) and `options evaluate-promotion --dry-run`
+     proceed and print `WARNING: OR-0c is open: pooled reading passes, per-symbol reading fails
+     for: …`;
+   - `options evaluate-promotion --confirm` **refuses** — exit 2, nothing assembled, nothing
+     written, no sealed look — unless **both** hold: the command carries
+     `--accept-pooled-coverage OR-0c`, **and** `docs/research/DECISIONS_2026-09-12_wave3.md`
+     contains a line beginning `OR-0c: DECIDED pooled`. The flag without the recorded line is
+     refused; the recorded line without the flag is refused. The flag never overrides a pooled
+     floor failure or any other refusal.
+
+   For this amendment's set the list is QQQ (0.882) and IWM (0.882), so the first `--confirm`
+   cannot run until the operator closes OR-0c in writing. If the operator instead decides the
+   per-symbol reading, no flag exists for it: the snapshot is rebuilt as `{SPY}` (§2), where
+   the list is empty.
 
 For an underlying set equal to one run's set this is the old computation, except that
 continuity uses the per-cycle bar records (§1.1a), which can only lower it. Measured against the
 real run provenance: `{SPY, QQQ, IWM}` passes (0.902 / 0.828); `{SPY, QQQ, IWM, AAPL}` is refused
 (102/136 = 0.750). **Pooling is not per-member strictness**: `{SPY, QQQ, IWM, MSFT}` would pass
 (124/136 = 0.912, 0.854), as would any set whose pool clears the floors. That is the pooled
-reading of §2, and OR-0c is where it is decided.
+reading of §2, and OR-0c is where it is decided — and, per item 7, a `--confirm` on such a set is
+refused until it is.
 
 ---
 
@@ -260,7 +289,9 @@ appendix after §8); `DECISIONS_2026-09-12_wave3.md` (addendum 4).
 ## 8. Open items after this amendment
 
 - **OR-0c (new; before the first `--confirm`).** Pooled reading (`{SPY, QQQ, IWM}`, adopted
-  here) or per-symbol reading (`{SPY}`), §2.
+  here) or per-symbol reading (`{SPY}`), §2. **Enforced in code since 2026-10-04 (§3 item 7):**
+  it is no longer a reminder — `--confirm` refuses the index set until the decision is recorded
+  and named on the command line. This file does not record that decision.
 - **OR-F15** — unchanged, still open, before the first look.
 - **IMPL-3.3** — unchanged, still open.
 - **Scope fields fixed by the snapshot command** (`spread_model.model_id =
@@ -276,5 +307,8 @@ appendix after §8); `DECISIONS_2026-09-12_wave3.md` (addendum 4).
 | Reason | — | Stage B fails 0.c / 0.d: 0.420 / 0.644 (run 18) vs 0.90 / 0.80 |
 | Coverage floors | 0.90 / 0.80 | 0.90 / 0.80 (**unchanged**) |
 | Pre-flight reads | the newest cycle run, whole | **the snapshot's own underlyings**, pooled, same floors |
+| A requested member with no cycle records / failed in its run | pooled silently | **refused by name** |
+| Snapshot with no recorded `ingestion_run_ids` | fell back to the newest overlapping runs | **refused** |
+| OR-0c while a member is below a floor on its own | a note in this file | **warning on every run; `--confirm` refused** without flag + recorded decision |
 | Strategy version | v0.1.2 | v0.1.2 (unchanged) |
 | Sealed looks spent | 0 | 0 |

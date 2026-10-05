@@ -375,7 +375,7 @@ Stage A (run 17) passes the coverage floors; Stage B (run 18) does not (0.420 / 
 0.90 / 0.80). The operator chose §6's first permitted response — **drop the Stage B
 underlyings** — recorded in `D5a_amendment_3_index_underlyings.md`. The first evaluation
 therefore runs on SPY, QQQ, IWM. Read that amendment first; item OR-0c in it must be closed
-before any `--confirm` evaluation.
+before any `--confirm` evaluation — and the command now enforces that (§12.4).
 
 The steps, in order. Every step that writes needs the worker stopped; steps 2, 4, 6a and 8 only
 read.
@@ -437,7 +437,10 @@ overlapping cycle run that requested it. The ids used are recorded in the scope
 judged on exactly those runs.
 
 It refuses, exiting 2 and writing nothing, when: the named set's pooled coverage is below 0.90 /
-0.80, or any underlying has no recorded coverage; the runs' window is not exactly
+0.80, or any underlying has no recorded coverage; any underlying was requested by its run but
+has no cycle records or zero expected sessions there, or is listed in that run's
+`symbols_failed` (each named — a member is never carried by the others); the key already exists
+but is pinned to different `ingestion_run_ids`; the runs' window is not exactly
 `--since`..`--until`; the runs disagree on ladder, cycle rule, provider or strike-listing basis;
 the key lacks the scope hash; the key exists with different symbols or a different scope; or
 (`--confirm`) a worker lock or live heartbeat exists. Re-running `--confirm` for an identical
@@ -457,6 +460,11 @@ A set containing a Stage B name is refused whenever it drags the pool below a fl
 AAPL gives 102/136 = 0.750). The remedy is §6's, unchanged: drop it, or pre-register a finer
 rung set and re-backfill (Amendment 3 §6).
 
+The evaluation reads **only** the runs the snapshot recorded in `ingestion_run_ids`. A snapshot
+that recorded none, or whose recorded run is gone, is refused; nothing falls back to the newest
+run. A member with no cycle records, no expected sessions, or a `symbols_failed` entry in its
+run is refused by name, whatever the pool looks like.
+
 ### 12.3 What step 8 does and does not do
 
 It assembles the evidence and prints the ladder through the read-only preview. It writes no
@@ -465,3 +473,30 @@ ladder as a diagnostic and exits non-zero. It **does** show pre-sealed diagnosti
 runs the underlying set, OR-0c and OR-F15 are frozen (Amendment 3 §5). A `--confirm` evaluation
 is a separate operator decision, needs `--grid`, needs the worker stopped, and is look 1 of the
 family.
+
+### 12.4 The OR-0c guard (added 2026-10-04)
+
+The pre-flight computes the floors pooled, and separately lists `members_below_floor`: each
+underlying whose **own** bracketing is below 0.90 or own continuity below 0.80. For the index
+set that is QQQ and IWM (0.882 each). While the list is non-empty:
+
+| Command | Behaviour |
+|---|---|
+| `options snapshot --dry-run` / `--confirm` (6a, 6b) | proceeds; prints the warning |
+| `options evaluate-promotion --dry-run` (8) | proceeds; prints the warning; exit code as before |
+| `options evaluate-promotion --confirm` | **refused**, exit 2, nothing written, no look |
+
+The warning reads `WARNING: OR-0c is open: pooled reading passes, per-symbol reading fails for:
+QQQ (…), IWM (…)`. Expect it at steps 6a, 6b and 8; it is not an error there.
+
+A `--confirm` on such a snapshot runs only when **both** are true:
+
+1. the operator has recorded the decision in `docs/research/DECISIONS_2026-09-12_wave3.md` as a
+   line that begins `OR-0c: DECIDED pooled` (list / quote / bold markers before it are fine;
+   the existing table row saying "Open" does not count), committed like any other decision; and
+2. the command carries `--accept-pooled-coverage OR-0c`.
+
+Either one alone is refused, and the refusal says which is missing. The flag does not relax a
+floor: a set whose pool fails is refused with or without it. If the decision is the per-symbol
+reading instead, there is nothing to pass — rebuild the snapshot as `--symbols SPY` (a new key),
+where no member is below a floor and no flag is needed. An agent never writes the decision line.
