@@ -329,7 +329,7 @@ Alembic migrations from day one so the engine swap is a config change.
 
 | Table | Purpose |
 |---|---|
-| `paper_account` | `name`, `initial_cash`, `cash`, `created_at` |
+| `paper_account` | `name`, `initial_cash`, `cash`, `created_at`, `strategy_version_id` (book key: each PAPER_APPROVED strategy version owns one equity paper book; NULL on the unattributed, options and grid accounts) |
 | `paper_order` | `candidate_id`, `account_id`, `side`, `qty`, `order_type`, `submitted_at`, `assumptions_json` (spread, slippage model, ref quote) |
 | `paper_fill` | `order_id`, `price`, `qty`, `spread_cost`, `slippage`, `commission`, `filled_at` |
 | `paper_position` | `account_id`, `instrument_id`, `qty`, `avg_price`, `strategy_version_id`, `opened_at`, `closed_at`, `realized_pnl` |

@@ -19,6 +19,7 @@ from signalforge.db.models import (
     ScanRun,
     WorkerHeartbeat,
 )
+from signalforge.db.paper_voids import voided_position_ids
 from signalforge.paper.portfolio import portfolio_snapshot
 from signalforge.settings_store import get_setting
 
@@ -36,13 +37,18 @@ def console_context(db: Session) -> dict[str, Any]:
     ).all()
     hb = db.scalar(select(WorkerHeartbeat).where(WorkerHeartbeat.worker == "scheduler"))
     healthy = bool(hb and (datetime.now(UTC) - hb.last_beat_at).total_seconds() < 120)
+    voided = voided_position_ids(db)
     return {
         "account": portfolio_snapshot(db),
+        # Voided positions are resolved (append-only correction); only
+        # UNRESOLVED impossible chronology keeps the warning up.
         "invalid_history": db.scalar(
             select(func.count(PaperPosition.id)).where(
-                PaperPosition.closed_at < PaperPosition.opened_at
+                PaperPosition.closed_at < PaperPosition.opened_at,
+                PaperPosition.id.not_in(voided),
             )
         ),
+        "voided_count": len(voided),
         "worker": hb,
         "worker_healthy": healthy,
         "scans": latest,

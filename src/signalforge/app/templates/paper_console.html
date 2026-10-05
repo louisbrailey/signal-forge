@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Paper Operations · Signal Forge{% endblock %}
+{% from "_macros.html" import paper_books %}
 {% block content %}
 <section hx-get="/paper-console" hx-trigger="every 30s" hx-select="#paper-state" hx-target="#paper-state" hx-swap="outerHTML">
 <div id="paper-state">
@@ -8,14 +9,17 @@
 <p class="text-sm text-slate-600">Refreshes every 30 seconds. Market inputs remain END-OF-DAY or DELAYED; this is not streaming execution.</p>
 <p class="mt-4 font-semibold {{ 'text-green-800' if worker_healthy else 'text-red-800' }}">Worker: {{ 'heartbeat current' if worker_healthy else 'stale or unavailable — inspect Ops' }}</p>
 {% if worker %}<p class="text-sm">Last heartbeat {{ worker.last_beat_at }} UTC · {{ worker.detail }}</p>{% endif %}
-<p>Automatic equity paper acceptance: <strong>{{ 'ON' if automatic else 'OFF' }}</strong> · Daily acceptance cap: {{ daily_cap }}. Only approved, in-scope signals passing all gates are eligible.</p>
+<p>Automatic equity paper acceptance: <strong>{{ 'ON' if automatic else 'OFF' }}</strong> · Daily acceptance cap: {{ daily_cap }} per book. Only approved, in-scope signals passing all gates are eligible.</p>
 {% if invalid_history %}<p role="alert" class="my-4 bg-red-50 border border-red-400 text-red-900 p-3">Historical accounting warning: {{ invalid_history }} position(s) have a recorded exit before entry. Historical P&amp;L below includes legacy records and is not validated performance. Original audit records are preserved.</p>{% endif %}
+{% if voided_count %}<p class="my-4 bg-gray-50 border border-gray-300 p-3">{{ voided_count }} legacy paper trade(s) were voided by append-only correction: they hold no exposure, count toward no cap and are excluded from performance evidence. Original audit records are preserved.</p>{% endif %}
 {% if account.exists %}
 <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 my-5">
 {% for label,value in [('Cash', account.cash),('Estimated equity',account.equity_estimate),('Realized P&L',account.realized_pnl),('Unrealized P&L',account.unrealized_pnl)] %}
 <div class="bg-white border rounded p-3"><div class="text-sm">{{ label }}</div><strong>${{ '%.2f'|format(value) }}</strong></div>
 {% endfor %}</div>
-<p>Accepted paper decisions: {{ accepted }} · Open positions: {{ open_count }}. Marks are estimates; inspect data freshness in <a class="underline" href="/ops">Ops</a>. Historical ledger records retain their original fill assumptions.</p>
+<p class="text-sm">Totals above combine every equity book.</p>
+{{ paper_books(account) }}
+<p class="mt-4">Accepted paper decisions: {{ accepted }} · Open positions: {{ open_count }}. Marks are estimates; inspect data freshness in <a class="underline" href="/ops">Ops</a>. Historical ledger records retain their original fill assumptions.</p>
 {% else %}<p>No paper account exists.</p>{% endif %}
 <h2 class="text-xl font-semibold mt-6">Recent scans</h2>
 <div class="overflow-x-auto"><table class="w-full text-sm text-left"><thead><tr><th>Time (UTC)</th><th>Horizon</th><th>Source</th><th>Qualified</th><th>No trade</th><th>Excluded</th></tr></thead><tbody>

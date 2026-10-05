@@ -13,9 +13,15 @@ Additional guards owned here:
 
 * the kill switch (``ensure_not_engaged``) — nothing runs while engaged;
 * a candidate that already has ANY PaperTrade decision is never re-decided;
-* at most one open paper position per instrument;
-* a daily cap (``auto_simulate_max_per_day`` setting, default 2) counted over
-  every ACCEPTED trade today — manual ones included;
+* every PAPER_APPROVED strategy version trades its OWN book (``paper.books``,
+  operator decision 2026-10-03): at most one open paper position per
+  instrument PER BOOK, so two versions may hold the same symbol at once;
+* a daily cap (``auto_simulate_max_per_day`` setting, default 2) applied PER
+  BOOK and counted over every ACCEPTED trade in that book today — manual ones
+  included;
+* a deterministic, fair order: books in strategy-version-id order, and inside
+  a book candidates by rank, then id. (The old order sorted on the horizon
+  STRING, so MEDIUM_SWING always decided before SHORT_SWING.);
 * each decision is committed on its own, so a later failure can never undo an
   earlier acceptance and a retried job can never double-accept.
 
@@ -39,9 +45,9 @@ from signalforge.db.models import AuditLog, Candidate, Instrument, PaperPosition
 from signalforge.domain import Direction, PaperDecision, QualityGate
 from signalforge.killswitch import ensure_not_engaged
 from signalforge.observability import get_logger
+from signalforge.paper.books import book_for_candidate
 from signalforge.paper.ledger import (
     AutoSimulateForbidden,
-    _account,
     accept_candidate,
     assert_auto_simulate_allowed,
     auto_simulate_enabled,
@@ -124,11 +130,13 @@ def auto_simulate_scan_runs(
     session: Session,
     scan_run_ids: list[int],
     *,
-    account_name: str = "default",
     now: datetime | None = None,
 ) -> AutoSimReport:
     """Offer every gate-PASSED candidate of ``scan_run_ids`` to the auto-simulation
     guard and paper-accept (SIMULATED) the ones it allows, within the daily cap.
+
+    Each candidate is decided in the book of its own strategy version; the
+    open-position rule and the daily cap are per book.
 
     Returns a report of what was accepted / rejected (with reasons) / watched /
     skipped. Does nothing at all unless ``auto_simulate_qualified_signals`` is ON.
@@ -141,18 +149,21 @@ def auto_simulate_scan_runs(
     if not scan_run_ids:
         return report
 
-    acct = _account(session, account_name)
     cap = max_per_day(session)
-    taken = accepted_today(session, acct.id, now)
+    taken: dict[int, int] = {}  # book (account) id -> ACCEPTED today
 
     cands = session.scalars(
-        select(Candidate)
-        .where(
+        select(Candidate).where(
             Candidate.scan_run_id.in_(scan_run_ids),
             Candidate.quality_gate_status == QualityGate.PASSED,
             Candidate.direction != Direction.AVOID,
         )
-        .order_by(Candidate.horizon, Candidate.rank_in_horizon.nulls_last(), Candidate.id)
+        # Books in strategy-version-id order; inside a book by rank, then id.
+        .order_by(
+            Candidate.strategy_version_id,
+            Candidate.rank_in_horizon.nulls_last(),
+            Candidate.id,
+        )
     ).all()
     report.considered = len(cands)
 
@@ -161,6 +172,9 @@ def auto_simulate_scan_runs(
             if _already_decided(session, cand.id):
                 report.skipped.append((cand.id, "candidate already has a paper decision"))
                 continue
+            acct = book_for_candidate(session, cand)
+            if acct.id not in taken:
+                taken[acct.id] = accepted_today(session, acct.id, now)
             if _has_open_position(session, acct.id, cand.instrument_id):
                 reason = "auto-simulation refused: an open paper position already exists"
                 record_decision(
@@ -169,7 +183,7 @@ def auto_simulate_scan_runs(
                 report.rejected.append((cand.id, reason))
                 session.commit()
                 continue
-            if taken >= cap:
+            if taken[acct.id] >= cap:
                 reason = f"auto-simulation daily cap ({cap}) reached — not taken"
                 record_decision(
                     session, cand.id, PaperDecision.WATCH, note=reason, actor=AUTO_SIM_ACTOR
@@ -205,13 +219,15 @@ def auto_simulate_scan_runs(
                         "shares": res.shares,
                         "fill_price": res.fill_price,
                         "position_id": res.position_id,
+                        "account": acct.name,
+                        "book_strategy_version_id": acct.strategy_version_id,
                         "simulated": True,
                         "notice": "Research signal only — no order was placed.",
                     },
                 )
             )
             session.commit()
-            taken += 1
+            taken[acct.id] += 1
             report.accepted.append(res.paper_trade_id)
             _log.info(
                 "paper.auto_simulated",

@@ -49,7 +49,7 @@ def _maybe_narrative(session: Session, facts: dict[str, Any], text: str) -> str 
 
 
 def build_and_store_briefing(
-    session: Session, *, account_name: str = "default", as_of: date | None = None
+    session: Session, *, account_name: str | None = None, as_of: date | None = None
 ) -> dict[str, Any]:
     facts = build_briefing_facts(session, account_name=account_name, as_of=as_of)
     text = render_briefing_text(facts)

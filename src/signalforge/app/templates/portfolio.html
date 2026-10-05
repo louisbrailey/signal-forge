@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Portfolio — Signal Forge{% endblock %}
+{% from "_macros.html" import paper_books %}
 {% block content %}
 <h1 class="text-2xl font-semibold text-slate-900">Portfolio &amp; Import</h1>
 
@@ -16,20 +17,22 @@
     equity ${{ '%.2f' | format(paper.equity_estimate) }} ({{ '%+.2f' | format(paper.return_pct) }}%) ·
     cash ${{ '%.2f' | format(paper.cash) }} · unrealized {{ '%+.2f' | format(paper.unrealized_pnl) }} ·
     realized {{ '%+.2f' | format(paper.realized_pnl) }}
+    <span class="text-slate-400">(all equity books combined)</span>
   </div>
+  {{ paper_books(paper) }}
   <div class="mt-3 overflow-x-auto">
     <table class="min-w-full text-sm">
       <thead class="text-left text-slate-500"><tr><th class="py-1 pr-4">Symbol</th><th class="pr-4">Side</th>
         <th class="pr-4">Qty</th><th class="pr-4">Avg</th><th class="pr-4">Last</th><th class="pr-4">Unrl P&L</th>
-        <th class="pr-4">Stop</th><th class="pr-4">Target</th><th class="pr-4">Horizon</th></tr></thead>
+        <th class="pr-4">Stop</th><th class="pr-4">Target</th><th class="pr-4">Horizon</th><th class="pr-4">Book</th></tr></thead>
       <tbody>
       {% for p in paper.open_positions %}
       <tr class="border-t border-slate-100"><td class="py-1 pr-4 font-medium">{{ p.symbol }}</td>
         <td class="pr-4">{{ p.side }}</td><td class="pr-4">{{ p.qty }}</td>
         <td class="pr-4">{{ '%.2f' | format(p.avg_price) }}</td><td class="pr-4">{{ '%.2f' | format(p.last_price) }}</td>
         <td class="pr-4 {{ 'text-emerald-600' if p.unrealized_pnl >= 0 else 'text-red-600' }}">{{ '%+.2f' | format(p.unrealized_pnl) }}</td>
-        <td class="pr-4">{{ p.stop or '–' }}</td><td class="pr-4">{{ p.target or '–' }}</td><td class="pr-4">{{ p.horizon }}</td></tr>
-      {% else %}<tr><td colspan="9" class="py-2 text-slate-500">No open paper positions.</td></tr>{% endfor %}
+        <td class="pr-4">{{ p.stop or '–' }}</td><td class="pr-4">{{ p.target or '–' }}</td><td class="pr-4">{{ p.horizon }}</td><td class="pr-4">{{ p.book }}</td></tr>
+      {% else %}<tr><td colspan="10" class="py-2 text-slate-500">No open paper positions.</td></tr>{% endfor %}
       </tbody>
     </table>
   </div>

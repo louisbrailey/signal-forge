@@ -45,6 +45,7 @@ from signalforge.db.models import (
     StrategyHealth,
     StrategyVersion,
 )
+from signalforge.db.paper_voids import voided_position_ids
 from signalforge.db.types import utcnow
 from signalforge.domain import StrategyStatus
 from signalforge.observability import get_logger
@@ -100,7 +101,12 @@ def closed_paper_r_multiples(
         stmt = stmt.where(PaperPosition.closed_at >= closed_since)
     positions = session.scalars(stmt)
     out: list[float] = []
+    # A voided trade (append-only ``legacy_void`` correction) never happened:
+    # it is not a closed trade and contributes no R.
+    voided = voided_position_ids(session)
     for p in positions:
+        if p.id in voided:
+            continue
         if p.stop_level is None:
             continue
         per_share_risk = abs(float(p.avg_price) - p.stop_level)
