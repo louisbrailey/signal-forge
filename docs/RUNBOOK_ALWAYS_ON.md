@@ -258,6 +258,117 @@ vs the expected session, and whether a catch-up is pending. Reviewed plist
 files live in `deploy/launchd/` (`make launchd-check` validates them; nothing
 installs them for you).
 
+### 2026-10-04 — ingest deadline, multi-session catch-up, visible EOD gaps
+
+**Incident (2026-09-28 → 10-01).** The 21:30 UTC (17:30 ET) `daily_eod_update`
+on 09-28 fired ~4 h late — beyond the 1 h `misfire_grace_time`, so APScheduler
+dropped it. A catch-up ingest then failed on provider network errors until
+05:14 UTC 09-29, and no job ran again until a manual restart at 19:28 UTC on
+10-01. No approved-scope scan exists for the sessions in between. Two code
+weaknesses made that worse than it had to be, and a third hid it:
+
+1. **The ingest had no overall deadline while holding the EOD lock.** A stuck
+   or slow provider could hold `_EOD_UPDATE_LOCK` indefinitely, and with it
+   every later EOD update, catch-up and intraday scan.
+2. **Catch-up only ever looked at the latest completed session.** Sessions
+   missed in the middle of an outage were never revisited.
+3. **Nothing said "no EOD run happened".** `/ops` showed stale bars and a
+   pending catch-up, but not that the EOD job itself had been absent for days.
+
+**Fix 1 — ingest deadline.** `job_ingest` now stops when the locked unit has
+run longer than `eod_ingest_deadline_minutes` (default **45**; a normal
+~175-symbol pass at the 12.1 s Basic pace is ~35 min). The clock starts when
+the EOD lock is taken and is polled **between symbols only** — after one
+symbol's commit, before the next symbol's fetch — so no write transaction is
+ever interrupted. One in-flight request is still bounded by the adapter's own
+timeout/retry, not by this deadline. On expiry:
+
+- the run is recorded as an `IngestionRun` with status **`stopped`** (never
+  `ok`/`partial`, so `data_readiness` and `catch_up_pending` both treat the
+  session as not covered) carrying the completed symbols;
+- `IngestDeadlineExceeded` propagates, the lock is released, **neither scan
+  runs**, and the job row reads
+  `deadline exceeded after N/M symbols (45 min); resume on next catch-up`;
+- the next ingest **resumes**: it skips the symbols the stopped run completed
+  and finishes the same row. It resumes only when that run is the newest
+  daily-bar run for the provider, has the same `requested_end`, and *started
+  after the last completed session's 17:30 ET cutoff* — otherwise symbols
+  fetched before the bar was published could be carried over, so a full pass
+  is made instead.
+
+The scans are local compute and are deliberately **not** under the deadline:
+stopping after a completed ingest would leave a session ingested-but-unscanned
+with nothing owed to retry it. A deadline failure is a failed job like any
+other, so the existing 2 h catch-up back-off applies before the resume — a
+stuck provider is not hammered. The kill switch is unchanged: `guarded()`
+still skips the job, and the adapters still re-check it inside their waits.
+
+**Fix 2 — multi-session catch-up.** The 30-minute `catch_up` job (and, for
+past sessions, start-up via `catch_up_missed_sessions`) now resolves **every**
+completed XNYS session since the last one with a readiness-enforced
+`approved_scope_scan.completed` audit row, oldest first, bounded to the
+`catch_up_lookback_sessions` (default **10**) sessions before the latest one.
+No such audit row at all (fresh install) means nothing is owed. Per missed
+session it writes two `job_run` rows:
+
+| row | meaning |
+|---|---|
+| `catchup_ingest_session` (`ok`/`failed`) | `session=YYYY-MM-DD: covered by daily-bar ingestion run #N (fetched now / already ingested); k/n configured symbols have a bar for this session` |
+| `scan_skipped_missed_session` (`skipped`) | the approved-scope scan was **not** run for that session, and why |
+
+One provider pass serves all missed sessions: the incremental window is 400
+days ending today, so the first missed session triggers the fetch and the
+later ones are verified against that same run rather than re-fetched (three
+identical ~35-minute passes would only re-request bars already stored). A
+session whose ingest fails gets a `failed` row and **no** skip row, so it stays
+owed and is retried after the back-off. A session with a skip row is never
+processed again (idempotent).
+
+**Why missed sessions are skipped, not scanned "as of".** `run_scan(as_of=…)`
+bounds only the price read. A scan of a past session run today would still use
+*today's* approval state, OOS evidence, earnings calendar, paper-account cash
+and feed-freshness gate; it would bypass the completed-bar requirement
+(computed only when `as_of` is `None`) and `data_readiness` (which is
+"now"-based); and it would persist `ScanRun`/`Candidate` rows that carry no
+as-of marker — there is no such column — so the alert planner, the scanner
+page, manual paper acceptance and auto-simulation could not tell them from a
+live scan. That is look-ahead plus a stale-signal hazard (audit finding P1,
+`docs/PAPER_OPERATION_AUDIT.md`), so it is not faked. Doing it properly needs
+a schema change and edits to the research gates and every candidate consumer.
+
+**Auto-simulation.** Because no scan is produced for a missed past session,
+nothing from one can reach `paper.auto_simulate`. Only the latest completed
+session runs the real chain (`scan_all` → `approved_scope_scan` → guarded
+auto-simulation), exactly as before.
+
+**Fix 3 — visible EOD gap.** `/ops` has a new readiness check, **"EOD update
+ran for last completed session"**, and a `DEGRADED — EOD GAP` pill in the
+worker panel. It fails when the last completed session is more than
+`eod_gap_grace_minutes` (default **120**) past its 17:30 ET cutoff with no
+`ok` `job_run` for `daily_eod_update`, `approved_scope_scan` or
+`catchup_approved_scope_scan` since that cutoff; the note also names earlier
+sessions still unscanned. (The `catch_up` row itself is not evidence — it is
+written `ok` even when it found nothing to do.) The 15-minute `health_check`
+logs the same condition as `health.eod_gap status=degraded`; it logs rather
+than fails, so it does not add a failed job row every 15 minutes.
+
+**New settings** (process environment / `.env`, on `Settings` — *not* on
+`ResearchConfig`, so `config_hash`, `full_config_hash` and every approved
+scope are untouched):
+
+| env var | default | meaning |
+|---|---|---|
+| `EOD_INGEST_DEADLINE_MINUTES` | `45` | wall-clock budget for the daily-bar ingest while the EOD lock is held |
+| `CATCH_UP_LOOKBACK_SESSIONS` | `10` | how many sessions before the latest the catch-up looks back over (`0` disables) |
+| `EOD_GAP_GRACE_MINUTES` | `120` | grace after the 17:30 ET cutoff before a missing EOD run is flagged |
+
+**Operator notes.** After an outage, expect `scan_skipped_missed_session`
+rows on `/ops` — they are the record that those sessions have no approved-scope
+evidence, not an error to clear. What this does **not** fix: a host that is
+asleep or a worker that is not running still runs nothing (see "Why a sleeping
+laptop cannot run scheduled jobs"); the gap check makes that visible, it does
+not prevent it.
+
 ### Manual smoke test (do this before installing launchd)
 
 Run each step in its own terminal at the repo root; stop anything from `make dev`
