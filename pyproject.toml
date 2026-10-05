@@ -158,6 +158,7 @@ asyncio_mode = "auto"
 markers = [
     "safety: invariant tests (S1-S10 from ARCHITECTURE.md) — must always pass",
     "slow: longer-running tests (backtests over large synthetic series)",
+    "serial: wall-clock-sensitive tests (real threads vs a short SQLite busy timeout) — run in their own non-parallel pass",
 ]
 
 [tool.coverage.run]
