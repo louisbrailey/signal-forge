@@ -123,6 +123,10 @@ def test_write_intent_scope_waits_for_the_lock_instead_of_failing(
 # --------------------------------------------------------------------------- #
 # 3. Concurrent API-style traffic + worker ingestion + heartbeat/job writes
 # --------------------------------------------------------------------------- #
+# Real threads race a 250 ms busy timeout: correct, but only meaningful on an idle
+# interpreter. Under pytest-xdist the other workers steal the CPU and the timeout
+# fires for reasons unrelated to locking, so CI runs `-m serial` as its own pass.
+@pytest.mark.serial
 def test_concurrent_api_traffic_and_worker_ingest_never_lock(
     db_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

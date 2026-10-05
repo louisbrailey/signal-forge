@@ -69,7 +69,7 @@ lint: ## Ruff + Black --check + mypy + import-linter
 	$(RUN) lint-imports
 
 .PHONY: test
-test: ## Full test suite with coverage
+test: ## Full test suite with coverage (serial-marked tests run in the same process)
 	$(RUN) pytest
 
 .PHONY: safety

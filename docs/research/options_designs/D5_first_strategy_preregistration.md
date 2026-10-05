@@ -1496,3 +1496,10 @@ Everything not listed above is unchanged and still binding.
 `docs/research/options_designs/D5a_amendment_2_raised_cap_and_viable_width.md` (v0.1.2: OP-1
 raised the per-structure cap to $900 and the aggregate to $3,600, `width_usd` $8.00, band 0.140 /
 0.150 / 0.155). Read it before acting on any D5a number.
+
+**Addendum (2026-10-04).** §2.2's underlying set is restricted, for the first evaluation, to
+**SPY, QQQ, IWM** by
+`docs/research/options_designs/D5a_amendment_3_index_underlyings.md`: the 21 Stage B underlyings
+fail gate 0.c / 0.d's coverage floors (0.420 / 0.644 against 0.90 / 0.80) and are dropped, the
+runbook's permitted response, on coverage alone at k = 0. No threshold in this document is moved.
+Read it before acting on §2.2, §2.3 or §6.3's sizing.

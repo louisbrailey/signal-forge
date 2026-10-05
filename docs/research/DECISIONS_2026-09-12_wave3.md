@@ -113,3 +113,29 @@ v1's limits would still refuse every O3 structure.
 | OP-4 | Aggregate leg | Closed as a limit; 4-structure concurrency cap applies (IMPL-3.3 open) |
 | OR-F15 | Band population (put-only vs pooled) | Open, orchestrator, before the first look |
 
+
+## Addendum 4 (2026-10-04): the first options evaluation runs on the index ETFs only
+
+**Decision (operator's).** Stage B (21 underlyings, bulk run 18) finished `ok` at cycle bracketing
+**0.420** and bar continuity **0.644**, below the pre-registered floors 0.90 / 0.80. Stage A (SPY,
+QQQ, IWM, bulk run 17) is at **0.902** / **0.851**. Of the two responses the I-O2 runbook permits,
+the operator chose to **drop the Stage B underlyings**. Chosen on coverage alone; no option price
+or result was viewed, and k = 0.
+
+**Recorded in** `options_designs/D5a_amendment_3_index_underlyings.md`, with the consequences
+(sample size below D5 §2.2's floor of 12 underlyings; results do not generalise to single stocks).
+
+**Code.** `signalforge options snapshot` creates the options-scoped `DataSnapshot`; the coverage
+pre-flight now judges a snapshot on its own underlyings, at the same floors.
+
+| # | Item | Status |
+|---|---|---|
+| OR-0c | Gate 0.c read pooled over the set (SPY, QQQ, IWM: 0.902) or per symbol (QQQ and IWM are 0.882 each, leaving SPY alone) | **Open — before the first `--confirm`** |
+| OR-F15 | Band population (put-only vs pooled) | Open, unchanged |
+| IMPL-3.3 | 4-structure concurrency cap | Open, unchanged |
+
+*OR-0c is enforced in code (2026-10-04; Amendment 3 §3 item 7, runbook §12.4):
+`options evaluate-promotion --confirm` refuses a snapshot with a member below a floor on its own
+numbers unless the command carries `--accept-pooled-coverage OR-0c` and this file contains a
+line beginning with the exact text* `OR-0c: DECIDED pooled`*. This note is not that line and the
+item is still Open. Only the operator adds it.*

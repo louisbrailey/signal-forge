@@ -90,7 +90,8 @@ def test_an_unscoped_snapshot_is_refused(session: Session) -> None:
 
 def test_coverage_below_the_floor_refuses_and_exits_non_zero(session: Session) -> None:
     """No cycle-backfill run at all: gate 0.c/0.d have no coverage to read."""
-    snap = seed_snapshot(session, ["SPY"], key="no_coverage_snapshot")
+    # the scope names a run that does not exist: nothing to read, never a fallback
+    snap = seed_snapshot(session, ["SPY"], key="no_coverage_snapshot", ingestion_run_ids=[987654])
     session.commit()
     res = runner.invoke(app, [*_ARGS, "--snapshot-key", "no_coverage_snapshot", *_window_args()])
     assert res.exit_code == 2
@@ -100,10 +101,10 @@ def test_coverage_below_the_floor_refuses_and_exits_non_zero(session: Session) -
 
 
 def test_a_thin_backfill_is_refused_by_the_preflight(session: Session) -> None:
-    seed_snapshot(session, ["SPY"], key="thin_coverage_snapshot")
-    seed_coverage_run(
+    run = seed_coverage_run(
         session, ["SPY"], cycles_total=10, cycles_covered=4, bars_written=10, sessions_expected=100
     )
+    seed_snapshot(session, ["SPY"], key="thin_coverage_snapshot", ingestion_run_ids=[run.id])
     session.commit()
     res = runner.invoke(app, [*_ARGS, "--snapshot-key", "thin_coverage_snapshot", *_window_args()])
     assert res.exit_code == 2
