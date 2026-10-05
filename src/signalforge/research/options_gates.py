@@ -285,6 +285,10 @@ class OptionsDataAvailability:
     width_grid_declared: tuple[float, ...] = ()
     limits_source: str = ""
     limits_in_options_config_hash: bool = False
+    # 0.g provenance: the q series is mutable and outside the snapshot key, so
+    # the evidence names exactly which series (and which derivation) it read.
+    q_series_digest: str = ""
+    q_series_run_id: int | None = None
 
     @property
     def bracket_fraction(self) -> float:
@@ -730,6 +734,8 @@ def gate_0g_dividend_yield(av: OptionsDataAvailability) -> OptionsGate:
         {
             "q_by_underlying": {k: dict(v) for k, v in av.q_by_underlying.items()},
             "q_defaulted_count": av.q_defaulted_count,
+            "q_series_digest": av.q_series_digest,
+            "q_series_run_id": av.q_series_run_id,
         },
         label="0.g",
     )

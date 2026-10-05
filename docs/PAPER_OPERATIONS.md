@@ -239,4 +239,13 @@ A good replay is not a reason to promote a strategy. Evaluate model usefulness
 on preregistered unseen windows before considering any separately specified
 research component; never repeatedly tune against the same held-out period.
 
+`scripts/kronos_skill_study.py` is that pre-registered evaluation
+(`docs/research/kronos/PREREGISTRATION_2026-10-03_kronos_skill.md`). It opens the
+database read-only and calls the same `service.replay` the dashboard uses, so it
+**shares the one-process inference lock with `/kronos`**: while a study call is
+running the dashboard reports "busy", and vice versa (the study sleeps 30 s and
+retries). Each call also takes four CPU threads for 50–90 s, so a full run (160
+windows, 2–4 h) should be scheduled when the live worker's catch-up and scan are
+not due. `plan` and `report` perform no inference and are safe at any time.
+
 Research signal only — no order was placed.

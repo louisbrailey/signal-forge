@@ -30,8 +30,10 @@ What it does, and the four things it refuses to do:
 
 **The cache.**  96 grid points x 14 underlyings x 8 years is the single most
 expensive thing in the program, and a re-run with identical inputs must be free.
-The key is ``(strategy version, snapshot key, options_config_hash)`` — the three
-things that can change what a cell measures.  A cache hit is reported as a hit;
+The key is ``(strategy version, snapshot key, options_config_hash, q-series
+digest)`` — the four things that can change what a cell measures.  The digest is
+there because the dividend ``q`` series is mutable and outside the snapshot key.
+A cache hit is reported as a hit;
 nothing is ever read from the cache under a different key, and a corrupt or
 unreadable entry is a miss, never a partial result.
 
@@ -54,6 +56,7 @@ from sqlalchemy.orm import Session
 
 from signalforge.backtest.options_engine import OptionTrade
 from signalforge.config.paths import data_dir
+from signalforge.data.options_corporate_actions import Q_SERIES_SOURCE, q_series_digest
 from signalforge.db.models import DataSnapshot
 from signalforge.observability import get_logger
 from signalforge.research.options_evidence import OptionsStrategy, run_underlying
@@ -191,8 +194,21 @@ class OptionsSensitivityReport:
 # --------------------------------------------------------------------------- #
 # cache
 # --------------------------------------------------------------------------- #
-def cache_key(*, version: str, snapshot_key: str, options_config_hash: str) -> str:
-    return f"{version}__{snapshot_key}__{options_config_hash or 'nohash'}".replace("/", "_")
+def cache_key(
+    *, version: str, snapshot_key: str, options_config_hash: str, q_series_digest: str
+) -> str:
+    """The four things that can change what a grid cell measures.
+
+    ``q_series_digest`` is required, not defaulted: the dividend ``q`` series is
+    mutable and outside the snapshot key, so a key without it would let a grid
+    cached before the series existed (or before a re-derivation) be served as a
+    hit while the ladder prices on the current ``q``.
+    """
+    if not q_series_digest:
+        raise ValueError("cache_key needs the q-series digest; an empty one is not a key")
+    return (
+        f"{version}__{snapshot_key}__{options_config_hash or 'nohash'}__q{q_series_digest[:32]}"
+    ).replace("/", "_")
 
 
 def cache_dir(root: Path | None = None) -> Path:
@@ -428,19 +444,28 @@ def run_options_sensitivity(
     use_cache: bool = True,
     cache_root: Path | None = None,
     include_oat: bool = True,
+    q_source: str = Q_SERIES_SOURCE,
 ) -> OptionsSensitivityReport:
     """Run the declared grid (and the OAT table) on the pre-sealed slice.
 
-    The cache key is ``(version, snapshot key, options_config_hash)``: a new
-    strategy version, a different dataset or a changed evaluation assumption all
-    invalidate it, and nothing else can.  A hit returns the stored report with
-    ``cache_hit=True`` and runs no backtest at all.
+    The cache key is ``(version, snapshot key, options_config_hash, q-series
+    digest)``: a new strategy version, a different dataset, a changed evaluation
+    assumption or a changed dividend ``q`` series on the evaluated underlyings
+    and pre-sealed span all invalidate it, and nothing else can.  A hit returns
+    the stored report with ``cache_hit=True`` and runs no backtest at all.
     """
     th = thresholds or OptionsGateThresholds()
     key = cache_key(
         version=version,
         snapshot_key=dataset_snapshot.key,
         options_config_hash=options_config_hash,
+        q_series_digest=q_series_digest(
+            session,
+            [str(s) for s in (dataset_snapshot.symbols_json or [])],
+            window.start,
+            window.pre_sealed_end,
+            q_source,
+        ),
     )
     if use_cache:
         cached = load_cached(key, cache_root)

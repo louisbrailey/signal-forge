@@ -7,6 +7,7 @@ Nothing here contacts a provider: the dataset is the synthetic one in
 from __future__ import annotations
 
 import inspect
+from datetime import date
 
 import pytest
 from sqlalchemy import func, select
@@ -189,3 +190,95 @@ def test_the_options_command_is_registered_under_the_options_group() -> None:
     top = {c.name for c in app.registered_commands if c.name}
     assert "evaluate-promotion" in top  # the equity one
     assert len([c for c in app.registered_commands if c.name == "evaluate-promotion"]) == 1
+
+
+def _seed_dividend_series(session: Session, symbol: str) -> None:
+    """Four quarterly payments ending inside the window, then the derived series
+    over the seeded ``massive`` closes — the same two steps the operator runs
+    (``options corp-actions``, ``options q-series``)."""
+    from datetime import UTC, datetime
+
+    from signalforge.data.options_corporate_actions import derive_dividend_yield_series
+    from signalforge.db.models import DividendEvent
+
+    for ex in (date(2023, 6, 16), date(2023, 9, 15), date(2023, 12, 15), date(2024, 3, 15)):
+        session.add(
+            DividendEvent(
+                symbol=symbol,
+                ex_dividend_date=ex,
+                cash_amount=1.5,
+                source="massive_options",
+                ingested_at=datetime.now(UTC),
+            )
+        )
+    session.flush()
+    run = derive_dividend_yield_series(session, [symbol], WINDOW_START, WINDOW_END)
+    assert run.status == "ok" and run.bars_written > 0
+    session.commit()
+
+
+def test_dry_run_prices_with_the_derived_q_series(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decision 11: the ladder instance carries a real ``q_lookup`` read from
+    ``dividend_yield_daily`` and records ``q_source = vendor_dividends``; the
+    gate-5 grid factory builds every point from the SAME lookup."""
+    import signalforge.research.options_evidence as ev
+    import signalforge.research.options_sensitivity as sens
+    from signalforge.research.options_strategies import OptionsShortVertical
+
+    seed_everything(session, ["SPY"])
+    _seed_dividend_series(session, "SPY")
+
+    seen: dict[str, object] = {}
+    real_assemble = ev.assemble_options_evidence
+
+    def _capture(db: Session, strat: object, **kw: object) -> object:
+        seen["strat"] = strat
+        return real_assemble(db, strat, **kw)  # type: ignore[arg-type]
+
+    class _FakeReport:
+        evaluated_points = 0
+        declared_points = 0
+        dropped_points: tuple[object, ...] = ()
+        cache_hit = False
+
+        def summary(self, th: object) -> None:
+            return None
+
+    def _fake_grid(db: Session, strat: object, factory: object, **kw: object) -> _FakeReport:
+        seen["factory"] = factory
+        return _FakeReport()
+
+    monkeypatch.setattr(ev, "assemble_options_evidence", _capture)
+    monkeypatch.setattr(sens, "run_options_sensitivity", _fake_grid)
+
+    res = runner.invoke(
+        app, [*_ARGS, "--snapshot-key", "options_w3b_test", "--grid", *_window_args()]
+    )
+    assert "DRY RUN" in res.output, res.output
+
+    strat = seen["strat"]
+    assert isinstance(strat, OptionsShortVertical)
+    assert strat.q_source == "vendor_dividends"
+    assert strat.q_lookup is not None
+    # three payments sit inside the trailing year on the first window session;
+    # seed_underlying's close on session 0 is exactly the level, 500.0
+    q0 = strat.q_lookup("SPY", WINDOW_START)
+    assert q0 is not None and abs(q0 - 3 * 1.5 / 500.0) < 1e-12
+    assert strat.q_lookup("SPY", date(2024, 3, 16)) is None  # a Saturday: no session, no row
+    assert strat.q_lookup("QQQ", WINDOW_START) is None  # not in the snapshot
+
+    factory = seen["factory"]
+    assert callable(factory)
+    point = factory({})
+    assert isinstance(point, OptionsShortVertical)
+    assert point.q_lookup is strat.q_lookup
+    assert point.q_source == "vendor_dividends"
+
+
+def test_default_options_strategies_signature_is_unchanged() -> None:
+    from signalforge.research.options_strategies import default_options_strategies
+
+    assert list(inspect.signature(default_options_strategies).parameters) == []
+    assert all(s.q_lookup is None for s in default_options_strategies())
