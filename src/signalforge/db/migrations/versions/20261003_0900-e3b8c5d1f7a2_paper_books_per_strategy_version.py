@@ -1,7 +1,7 @@
 """paper books per approved strategy version
 
 Revision ID: e3b8c5d1f7a2
-Revises: c1e5a9f37b24
+Revises: d2f7a1c4e9b6
 Create Date: 2026-10-03 09:00:00
 
 Operator decision 2026-10-03 (paper simulation only): every PAPER_APPROVED
@@ -21,9 +21,10 @@ unique column on ``paper_account``.
 * Books for other versions are created lazily by ``signalforge.paper.books``;
   this migration inserts no account.
 
-NOTE on ordering: PR #7 adds revision ``d2f7a1c4e9b6`` which also revises
-``c1e5a9f37b24``. It is not on this branch's base. Whichever of the two merges
-second must re-point its ``down_revision`` at the other to keep a single head.
+NOTE on ordering: PR #7's revision ``d2f7a1c4e9b6`` (dividend_yield_daily) merged
+first and also revises ``c1e5a9f37b24``; this revision therefore follows
+``d2f7a1c4e9b6`` so the chain keeps exactly one head. The two are independent
+(different tables), so the order carries no data dependency.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "e3b8c5d1f7a2"
-down_revision: str | None = "c1e5a9f37b24"
+down_revision: str | None = "d2f7a1c4e9b6"  # pragma: allowlist secret
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -90,18 +90,26 @@ configured limit and these ceilings (constants in `paper/ledger.py`):
 | Limit | Ceiling | Note |
 |---|---|---|
 | Planned risk per trade | 0.5% of book equity | unchanged |
-| Aggregate open stop risk | **3.0%** | raised from 1.5% — operator decision 2026-10-03, paper only |
+| Aggregate open stop risk | **3.0%** | ceiling raised from 1.5%, **no effect**: configured 1.5% still binds (see below) |
 | Allocation per symbol | **10%** | raised from 5% — operator decision 2026-10-03, paper only |
 | Allocation per sector | 20% | unchanged; now applies to every instrument |
 | Gross exposure | 100% (no leverage) | unchanged |
 
-The ceilings only bound the configured values. The shipped configuration is
-`max_position_concentration_pct = 10`, so the 10% symbol ceiling is in effect.
-`max_daily_portfolio_risk_pct` ships as **1.5**, so aggregate open risk is still
-limited to 1.5% until that setting is raised — and `risk` is part of the
-approved-scope `config_hash`, so raising it puts every existing approval out of
-scope until the strategies are re-evaluated. That is a separate operator
-decision; this release does not change the configured value.
+The effective limit is always `min(configured value, ceiling)`. Stated plainly:
+
+- **Per symbol: 10% is effective.** Configured `max_position_concentration_pct`
+  is 10 and the ceiling is 10.
+- **Open risk: 1.5% is effective. The 3.0% ceiling has NO effect** while
+  `max_daily_portfolio_risk_pct` is configured at 1.5 — and it stays 1.5
+  (operator decision 2026-10-04). The ceiling only says how far the setting
+  *could* be raised; it raises nothing by itself.
+- **Raising it has a cost.** `risk` is part of the approved-scope `config_hash`.
+  Raising `max_daily_portfolio_risk_pct` would change `config_hash` and take
+  both approved strategy versions **out of scope** (no automatic acceptance)
+  until they are re-evaluated. This release changes no configuration, so the
+  approved scope hashes are unchanged (pinned by
+  `tests/paper/test_open_risk_config_scope_pin.py` and
+  `tests/execution/test_config_scope.py`).
 
 Stops and ATR-based candidate sizing remain deterministic. Stops cannot guarantee
 maximum loss through a gap. Existing larger positions are not resized or
@@ -180,23 +188,39 @@ P&L must not be presented as validated forward performance.
 `signalforge paper correct-legacy --dry-run | --confirm` repairs both with
 append-only `trade_correction` rows; `paper_trade` rows are never modified.
 
-- **Invalid exits.** A closed position whose exit date is not after its entry
-  date is reversed (exit proceeds taken back out of the book's cash, realised P&L
-  zeroed, position re-opened) and then re-resolved with the current rules: only
-  bars strictly after the entry date, in order, with the session time stop. It
-  either stays open or closes on a later, valid bar.
+- **Invalid exits are VOIDED (default, operator decision 2026-10-04).** A closed
+  position whose exit date is not after its entry date is treated as a trade
+  that never happened. `--resolution void` (the default; `--void` is a
+  shorthand) writes, per trade:
+  1. `legacy_exit.position.realized_pnl` — the invalid exit's realised P&L
+     reversed to 0, and `legacy_exit.account.cash` — the exit proceeds taken
+     back out of the book's cash;
+  2. `legacy_void.entry.account.cash` — the entry notional returned to cash
+     (with the cost credit below, the whole entry debit comes back);
+  3. `legacy_void.position.status` `closed -> void` — the position stays
+     closed, so it holds no exposure, does not block a new entry in the symbol
+     and counts toward no symbol, sector, gross or open-risk cap. It is also
+     excluded from closed-trade performance evidence (health monitor,
+     probation summary), and the paper console replaces the chronology warning
+     with a "voided" note.
+- **`--resolution reopen` is still available**, not the default: the exit is
+  reversed and the position re-opened and re-resolved on bars strictly after
+  entry. On the live MSFT rows that would leave duplicate open MSFT positions
+  over the symbol cap (the command prints a WARNING), which is why the operator
+  chose void.
 - **Double-counted entry costs.** The old ledger embedded spread and slippage in
   the fill price and also debited them from cash. For every accepted long trade
   it wrote (those whose plan has no `risk_decision`), the second debit is
-  credited back to the book.
+  credited back to the book — voided or not.
 - `--dry-run` runs the identical code inside a savepoint that is rolled back and
-  prints every change, the per-book cash before and after, and any duplicate
-  open positions the corrections leave behind. `--confirm` writes. Re-running
-  finds nothing more to do.
-- **Duplicates are reported, not voided.** If a second position was opened in a
-  symbol only because the first had been wrongly closed, both are re-opened and
-  the command prints a WARNING. They count toward that book's caps. Voiding an
-  accepted decision is an operator judgement and is not automated.
+  writes nothing. It prints every voided trade, every cost credit, the **exact
+  `trade_correction` rows** (trade id, field, old, new) and each affected
+  book's **cash and equity before and after**. `--confirm` writes exactly
+  that. Re-running either resolution afterwards finds nothing more to do.
+- Worked example (the fixture in `tests/paper/test_legacy_corrections.py`): two
+  MSFT x5 trades filled 516.45, "stopped" for -83.50 each, 1.42 double-counted
+  each. Cash 29,830.16 → −2,498.75 → +2,582.25 → −2,498.75 → +2,582.25 →
+  +2.84 = **30,000.00**; equity 29,830.16 → 30,000.00.
 
 ## Deploying the 2026-10-03 release
 
@@ -210,19 +234,23 @@ Run in this order. Take a file-level backup of `data/signalforge.sqlite` first.
    `uv run signalforge paper snapshot` (the `books` list).
 4. `uv run signalforge universe sectors --refresh` — re-run until it reports no
    instruments awaiting a reference request. Unknown sectors stay capped.
-5. `uv run signalforge paper correct-legacy --dry-run` — read every line.
-6. Review: the reversed exits, the cost credits, each book's cash delta, and any
-   duplicate-position WARNING (expected on the live MSFT rows).
-7. `uv run signalforge paper correct-legacy --confirm`
+5. `uv run signalforge paper correct-legacy --dry-run` — read every line. The
+   default resolution is **void**.
+6. Review: the two voided MSFT trades, the cost credits, every printed
+   `trade_correction` row, and the book's cash and equity before/after. There
+   must be no duplicate-position WARNING (that only appears under
+   `--resolution reopen`).
+7. `uv run signalforge paper correct-legacy --confirm` (void). Re-run
+   `--dry-run` afterwards: it must print "nothing to correct".
 8. **Start the worker**
    (`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.signalforge.worker.plist`).
    The first mark logs `paper.time_stop_recomputed` for
    each open position that moves to the session time stop; the first
    approved-scope scan creates the short-swing version's book.
 
-The alembic revision follows `c1e5a9f37b24`. If another revision that also
-follows it has been merged first, re-point one `down_revision` before upgrading
-so the chain keeps a single head (`uv run alembic heads` must print one line).
+The alembic revision `e3b8c5d1f7a2` follows `d2f7a1c4e9b6` (PR #7's
+`dividend_yield_daily`, which merged first). `uv run alembic heads` must print
+exactly one line: `e3b8c5d1f7a2 (head)`.
 
 ## Known gap: missed sessions
 

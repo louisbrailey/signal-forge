@@ -94,14 +94,14 @@ Source: `docs/research/paper_validation/SHORT_SWING_FORWARD_2026-10-03.md` (read
 | Short-swing version starved | 5 gate-PASSED candidates, all refused "an open paper position already exists"; candidates ordered by the horizon string | **Fixed** — one book per approved version; per-book open-position rule, caps and daily cap; order = book by strategy-version id, then rank, then id |
 | Sector cap inert | `instrument.sector` blank on all 2,658 rows; budget only applied to a known sector | **Fixed** — unknown is the single capped `UNKNOWN` bucket; `universe sectors --refresh` populates labels |
 | Time stop in calendar days | ledger `entry + N days`; backtest counts N bars | **Fixed** — N-th XNYS session after entry; open positions migrated on next mark, logged |
-| Impossible exit chronology | two MSFT positions closed at 00:00 UTC on their entry day off the entry-day low | **Correctable** — `paper correct-legacy` (append-only) |
+| Impossible exit chronology | two MSFT positions closed at 00:00 UTC on their entry day off the entry-day low | **Correctable** — `paper correct-legacy` (append-only); operator decision 2026-10-04: **void** both trades (default resolution) |
 | Double-counted entry costs | cash $5.87 below the fill/P&L reconstruction = the four pre-fix fills' costs | **Correctable** — same command |
 | Pre-fix positions over the symbol cap | XLK, MSFT about 10% / 8.7% of equity | **Left as is** — not resized; verified they count in full toward caps for new entries |
 | No scan on 09-28..30 | no `scan_run`, no `job_run` rows | **Operational**, described below; no code change |
 
 ## Separate books
 
-- Key: `paper_account.strategy_version_id` (nullable, unique), revision `e3b8c5d1f7a2`.
+- Key: `paper_account.strategy_version_id` (nullable, unique), revision `e3b8c5d1f7a2` (follows `d2f7a1c4e9b6`; single alembic head).
 - Legacy attribution: `default` becomes the book of the single version that owns all its positions (live: medium swing, six accepted trades). No row and no money moves. Other versions' books are created lazily at the legacy account's `initial_cash`.
 - Consequence to watch: total simulated capital is now one reference equity **per approved version**, and the same symbol can be held in two books. Per-book caps cannot see the other book, so the dashboards add a combined per-symbol exposure table across books. There is no cross-book cap.
 - Historical short-swing REJECTED rows stay in the `default` account's decision history (`paper_trade.account_id` is immutable); they have no position or cash effect.
@@ -110,8 +110,8 @@ Source: `docs/research/paper_validation/SHORT_SWING_FORWARD_2026-10-03.md` (read
 
 Ceilings in `paper/ledger.py`: per-trade risk 0.5% (unchanged), open risk **3.0%** (was 1.5%), per symbol **10%** (was 5%), per sector 20% (unchanged). Effective limit = min(configured, ceiling).
 
-- Per symbol: configured 10 → **10% is now effective.**
-- Open risk: configured `max_daily_portfolio_risk_pct` is 1.5 → **1.5% remains effective.** Raising the configured value moves `config_hash` (the `risk` section is in `SCOPE_HASH_FIELDS`) and would put both approved versions out of scope. Not done here; it needs its own decision and re-evaluation.
+- Per symbol: configured 10 → **10% is effective.**
+- Open risk: configured `max_daily_portfolio_risk_pct` is 1.5 → **1.5% is effective; the 3.0% ceiling in the ledger has NO effect while the setting is 1.5.** Operator decision 2026-10-04: the configured value stays 1.5. Raising it would change `config_hash` (the `risk` section is in `SCOPE_HASH_FIELDS`) and take both approved versions out of scope until re-evaluated. No configuration is changed by this release, so the approved scope hashes are unchanged; `tests/paper/test_open_risk_config_scope_pin.py` pins the default config's scope hash to its pre-release value and asserts that raising the setting would move it.
 
 ## Sector handling
 
@@ -123,7 +123,11 @@ Blank/unknown → `UNKNOWN`, capped as one sector at 20%. Stocks: SIC code → s
 
 ## Legacy corrections
 
-`paper correct-legacy` finds closed positions whose exit date is not after the entry date, reverses the exit and re-resolves the position on later bars; and credits back the double-counted entry cost of every pre-fix accepted long trade. Every change is a `trade_correction` row with old and new values; `paper_trade` is untouched. Expected on the live database (from the forward report, to be confirmed by `--dry-run`): two MSFT exits reversed, both positions re-opened (no later bar reaches the stop), four cost credits totalling about $5.86, and a duplicate-position WARNING for MSFT in the medium-swing book (three open MSFT positions: the two re-opened and the 10-01 entry). That book will then be over its symbol and open-risk limits and will take no new MSFT entry, and possibly no new entry at all, until positions exit. The command does not void the duplicate entries; that is an operator decision.
+Operator decision 2026-10-04: the two legacy MSFT trades with impossible chronology are **voided, not re-opened**. `paper correct-legacy` defaults to `--resolution void`; `--resolution reopen` (reverse the exit, re-open, re-resolve on later bars) remains available and tested but is not the operator path.
+
+Void, per trade, as append-only `trade_correction` rows (old and new values recorded; `paper_trade` untouched): (a) the invalid exit's realised P&L is reversed and its proceeds taken back out of cash; (b) the entry is reversed — the notional is returned, and the double-counted pre-fix entry cost is credited back by the same command, so the whole entry debit returns; (c) the position is marked closed-as-void (`legacy_void.position.status`: `closed` → `void`). A voided position stays closed: no exposure, no block on a new entry in the symbol, nothing toward the symbol/sector/gross/open-risk caps, and it is excluded from closed-trade performance evidence. The command also credits back the double-counted entry cost of every other pre-fix accepted long trade. It is idempotent, and `--dry-run` writes nothing while printing the exact rows and the affected book's cash and equity before and after.
+
+Expected on the live database (from the forward report, **to be confirmed by `--dry-run`**): two MSFT trades voided, four cost credits totalling about $5.86, no duplicate-position warning, and the medium-swing book's cash rising by the two reversed losses plus the credits (about +$172.8 if each loss is the audited −$83.49). Operator steps: `paper correct-legacy --dry-run` → review → `paper correct-legacy --confirm`.
 
 ## Why no approved-scope scan ran on 2026-09-28..30
 
@@ -133,4 +137,4 @@ Two code weaknesses contributed and are **not** changed here because neither is 
 
 ## Not verified
 
-Nothing in this update was run against the live database. The legacy-correction numbers above come from the forward report, not from a dry run. Sector labels were tested against fixtures only.
+Nothing in this update was run against the live database. The legacy-correction numbers above come from the forward report, not from a dry run; the void arithmetic is verified against the MSFT fixture only. Sector labels were tested against fixtures only.

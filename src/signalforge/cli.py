@@ -2115,20 +2115,43 @@ def paper_correct_legacy(
     confirm: Annotated[
         bool, typer.Option("--confirm", help="Write the corrections (append-only).")
     ] = False,
+    resolution: Annotated[
+        str,
+        typer.Option(
+            "--resolution",
+            help="What to do with a trade whose exit is not after its entry: 'void' "
+            "(default: reverse exit and entry, mark closed-as-void) or 'reopen' "
+            "(reverse the exit and re-resolve on later bars).",
+        ),
+    ] = "void",
+    void: Annotated[
+        bool, typer.Option("--void", help="Shorthand for --resolution void (the default).")
+    ] = False,
 ) -> None:
     """Correct legacy paper-ledger defects with append-only trade_correction rows:
-    exits recorded on or before the entry bar are reversed and re-resolved on
-    later bars, and double-counted legacy entry costs are credited back.
-    paper_trade rows are never modified. Stop the worker first; review
-    --dry-run before --confirm. Research signal only — no order was placed."""
+    trades whose exit was recorded on or before the entry bar are VOIDED by
+    default (exit P&L reversed, entry cash returned, position closed-as-void so it
+    holds no exposure and counts toward no cap) or, with --resolution reopen,
+    reversed and re-resolved on later bars; double-counted legacy entry costs
+    are credited back. paper_trade rows are never modified. Stop the worker
+    first; review --dry-run before --confirm. Research signal only — no order
+    was placed."""
     if dry_run == confirm:
         typer.secho("pass exactly one of --dry-run or --confirm", fg=typer.colors.RED)
+        raise typer.Exit(2)
+    if resolution not in ("void", "reopen"):
+        typer.secho("--resolution must be 'void' or 'reopen'", fg=typer.colors.RED)
+        raise typer.Exit(2)
+    if void and resolution != "void":
+        typer.secho("--void conflicts with --resolution reopen", fg=typer.colors.RED)
         raise typer.Exit(2)
     from signalforge.db.session import session_scope
     from signalforge.paper.legacy_corrections import correct_legacy
 
     with session_scope(write=True) as session:
-        rep = correct_legacy(session, confirm=confirm)
+        rep = correct_legacy(
+            session, confirm=confirm, resolution="void" if resolution == "void" else "reopen"
+        )
     for line in rep.lines():
         typer.echo(line)
     typer.echo("SIMULATED paper ledger only. Research signal only — no order was placed.")

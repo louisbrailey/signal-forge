@@ -18,7 +18,7 @@ from sqlalchemy import create_engine, inspect, text
 from tests.support import alembic_config
 
 REVISION = "e3b8c5d1f7a2"  # pragma: allowlist secret
-PARENT = "c1e5a9f37b24"  # pragma: allowlist secret
+PARENT = "d2f7a1c4e9b6"  # pragma: allowlist secret
 
 
 @pytest.fixture

@@ -14,6 +14,10 @@ report, with rows written exactly as the pre-2026-10-02 ledger wrote them:
 Legacy cash, by hand: 30,000 - 2 * (5 * 516.45 + 1.42) + 2 * (5 * 499.75)
 = 30,000 - 5,167.34 + 4,997.50 = 29,830.16.
 
+The tests in the first half exercise ``resolution="reopen"`` (kept available);
+the VOID tests at the end exercise the default resolution (operator decision
+2026-10-04: the two MSFT trades are voided, not re-opened).
+
 Offline: fixture bars only; the live database is never opened.
 """
 
@@ -53,16 +57,22 @@ from signalforge.domain import (
     QualityGate,
 )
 from signalforge.paper import ledger
-from signalforge.paper.ledger import mark_to_market
+from signalforge.paper.auto_simulate import _has_open_position
+from signalforge.paper.corrections import voided_position_ids
+from signalforge.paper.ledger import accept_candidate, mark_to_market
 from signalforge.paper.legacy_corrections import (
     ACTOR,
     FIELD_CASH,
     FIELD_CLOSED_AT,
     FIELD_ENTRY_COST,
     FIELD_REALIZED,
+    FIELD_VOID,
+    FIELD_VOID_ENTRY_CASH,
     correct_legacy,
     find_invalid_exits,
 )
+from signalforge.paper.portfolio import portfolio_snapshot
+from signalforge.research.health_monitor import closed_paper_r_multiples
 
 SOURCE = "fixture_legacy"
 NOW = datetime(2026, 10, 3, 12, 0, tzinfo=UTC)  # Saturday; the 10-02 bar is complete
@@ -280,7 +290,7 @@ def test_dry_run_reports_every_change_and_writes_nothing(session: Session) -> No
     session.commit()
     before = _state(session)
 
-    rep = correct_legacy(session, confirm=False)
+    rep = correct_legacy(session, confirm=False, resolution="reopen")
     session.commit()
 
     assert _state(session) == before  # nothing at all was written
@@ -301,9 +311,9 @@ def test_confirm_reverses_the_invalid_exits_and_credits_the_double_counted_costs
     trade_ids = _seed(session, BARS)
     session.commit()
     before = _state(session)
-    dry = correct_legacy(session, confirm=False)
+    dry = correct_legacy(session, confirm=False, resolution="reopen")
 
-    rep = correct_legacy(session, confirm=True)
+    rep = correct_legacy(session, confirm=True, resolution="reopen")
     session.commit()
     after = _state(session)
 
@@ -357,11 +367,11 @@ def test_confirm_reverses_the_invalid_exits_and_credits_the_double_counted_costs
 def test_confirm_is_idempotent(session: Session) -> None:
     _seed(session, BARS)
     session.commit()
-    correct_legacy(session, confirm=True)
+    correct_legacy(session, confirm=True, resolution="reopen")
     session.commit()
     once = _state(session)
 
-    again = correct_legacy(session, confirm=True)
+    again = correct_legacy(session, confirm=True, resolution="reopen")
     session.commit()
 
     assert again.changed is False and again.corrections_written == 0
@@ -380,7 +390,7 @@ def test_position_stopped_on_a_later_bar_is_re_resolved_not_left_open(session: S
     trade_ids = _seed(session, bars)
     session.commit()
 
-    rep = correct_legacy(session, confirm=True)
+    rep = correct_legacy(session, confirm=True, resolution="reopen")
     session.commit()
     state = _state(session)
 
@@ -422,7 +432,7 @@ def test_post_fix_trades_are_not_credited_and_valid_exits_are_not_reversed(
     )
     session.commit()
 
-    rep = correct_legacy(session, confirm=True)
+    rep = correct_legacy(session, confirm=True, resolution="reopen")
     session.commit()
 
     assert [e["paper_trade_id"] for e in rep.exits] == legacy_ids
@@ -454,16 +464,301 @@ def test_cli_requires_exactly_one_mode_and_dry_run_writes_nothing(
     assert runner.invoke(app, ["paper", "correct-legacy", "--dry-run", "--confirm"]).exit_code == 2
     assert _state(session) == before
 
-    dry = runner.invoke(app, ["paper", "correct-legacy", "--dry-run"])
+    dry = runner.invoke(app, ["paper", "correct-legacy", "--dry-run", "--resolution", "reopen"])
     assert dry.exit_code == 0, dry.output
     assert "DRY RUN — nothing written" in dry.output
     assert "cash 29830.16 -> 24835.50" in dry.output
     assert "no order was placed" in dry.output
     assert _state(session) == before
 
-    done = runner.invoke(app, ["paper", "correct-legacy", "--confirm"])
+    done = runner.invoke(app, ["paper", "correct-legacy", "--confirm", "--resolution", "reopen"])
     assert done.exit_code == 0, done.output
     assert "CONFIRMED — written" in done.output
     session.rollback()  # end this session's read snapshot; the CLI used its own session
     after = _state(session)
     assert after["cash"] == Decimal("24835.50") and after["corrections"] == 8
+
+
+# --------------------------------------------------------------------------
+# VOID — the default resolution (operator decision 2026-10-04)
+#
+# Hand arithmetic for the MSFT fixture (two legacy trades, same book):
+#   legacy cash                                             29,830.16
+#   trade A (a) exit proceeds back out: 5 * 516.45 - 83.50 = 2,498.75
+#                                                        -> 27,331.41
+#   trade A (b) entry notional returned: 5 * 516.45      = 2,582.25
+#                                                        -> 29,913.66
+#   trade B (a)                                - 2,498.75 -> 27,414.91
+#   trade B (b)                                + 2,582.25 -> 29,997.16
+#   double-counted pre-fix entry cost, 2 * 1.42 = + 2.84 -> 30,000.00
+# i.e. cash is back at initial_cash: neither trade ever happened. No position
+# is open before or after, so equity == cash: 29,830.16 -> 30,000.00 (+169.84
+# = the two reversed -83.50 losses + the two 1.42 double-counted costs).
+# --------------------------------------------------------------------------
+
+VOID_CASH = Decimal("30000.00")
+
+
+def _new_msft_candidate(session: Session) -> Candidate:
+    """A fresh MSFT signal in the same book, identical in shape to the legacy one."""
+    old = session.scalars(select(Candidate).order_by(Candidate.id)).first()
+    assert old is not None
+    cand = Candidate(
+        scan_run_id=old.scan_run_id,
+        instrument_id=old.instrument_id,
+        strategy_version_id=old.strategy_version_id,
+        horizon=old.horizon,
+        direction=Direction.LONG,
+        entry_zone_low=515.17,
+        entry_zone_high=517.17,
+        invalidation_level=499.75,
+        target_level=549.01,
+        target_logic="entry + 3 ATR",
+        time_stop_days=40,
+        reward_risk_estimate=2.0,
+        risk_dollars=84.85,
+        risk_pct_of_account=0.28,
+        liquidity_json={},
+        slippage_assumption_json={},
+        event_risk_json={},
+        portfolio_context_json={},
+        data_freshness_json={},
+        ranking_json={},
+        reasons_qualify=["trend"],
+        reasons_fail=["gap"],
+        quality_gate_status=QualityGate.PASSED,
+        failed_gates=[],
+        rank_in_horizon=1,
+    )
+    session.add(cand)
+    session.flush()
+    return cand
+
+
+def test_void_is_the_default_and_restores_cash_and_equity(session: Session) -> None:
+    trade_ids = _seed(session, BARS)
+    session.commit()
+    before = _state(session)
+    dry = correct_legacy(session, confirm=False)  # default resolution
+
+    rep = correct_legacy(session, confirm=True)
+    session.commit()
+    after = _state(session)
+
+    assert rep.resolution == "void" and dry.resolution == "void"
+    assert rep.lines()[1:] == dry.lines()[1:]  # the dry run printed exactly what was done
+    assert after["trades"] == before["trades"]  # paper_trade rows byte-for-byte untouched
+
+    # Positions stay CLOSED (closed_at as recorded), realised P&L reversed to 0.
+    assert [(c, r) for _pid, c, r, _ts in after["positions"]] == [  # type: ignore[union-attr]
+        (datetime(2026, 9, 25, tzinfo=UTC), Decimal("0")),
+        (datetime(2026, 9, 26, tzinfo=UTC), Decimal("0")),
+    ]
+    assert after["cash"] == VOID_CASH  # see the hand arithmetic above
+
+    rows = session.scalars(select(TradeCorrection).order_by(TradeCorrection.id)).all()
+    # per trade: realised, exit cash, entry cash, void status (4) + cost credit (1)
+    assert len(rows) == 10 and rep.corrections_written == 10
+    assert {r.actor for r in rows} == {ACTOR}
+    by_trade = {
+        tid: {r.field: (r.old_value, r.new_value) for r in rows if r.paper_trade_id == tid}
+        for tid in trade_ids
+    }
+    first, second = (by_trade[t] for t in trade_ids)
+    assert first == {
+        FIELD_REALIZED: ("-83.50", "0.00"),  # (a)
+        FIELD_CASH: ("29830.16", "27331.41"),  # (a) - 2,498.75
+        FIELD_VOID_ENTRY_CASH: ("27331.41", "29913.66"),  # (b) + 2,582.25
+        FIELD_VOID: ("closed", "void"),  # (c)
+        FIELD_ENTRY_COST: ("1.42", "0.00"),  # (b) the double-counted cost
+    }
+    assert second == {
+        FIELD_REALIZED: ("-83.50", "0.00"),
+        FIELD_CASH: ("29913.66", "27414.91"),
+        FIELD_VOID_ENTRY_CASH: ("27414.91", "29997.16"),
+        FIELD_VOID: ("closed", "void"),
+        FIELD_ENTRY_COST: ("1.42", "0.00"),
+    }
+    assert FIELD_CLOSED_AT not in first  # the position is not re-opened
+    assert voided_position_ids(session) == {1, 2}
+    assert rep.duplicates == [] and rep.exits == []
+
+    # Book cash AND equity, before and after (no open position either side).
+    assert rep.books == [
+        {
+            "account": "default",
+            "cash_before": "29830.16",
+            "cash_after": "30000.00",
+            "delta": "+169.84",
+            "equity_before": "29830.16",
+            "equity_after": "30000.00",
+            "equity_delta": "+169.84",
+        }
+    ]
+    snap = portfolio_snapshot(session)
+    assert snap["n_open"] == 0
+    assert snap["equity_estimate"] == pytest.approx(30000.00)
+    assert snap["realized_pnl"] == pytest.approx(0.0)
+    # Nothing is open, so the next mark has nothing to do.
+    mtm = mark_to_market(session)
+    assert (mtm.checked, mtm.closed) == (0, 0)
+    # A voided trade is not closed-trade performance evidence.
+    ver = session.scalar(select(StrategyVersion))
+    assert ver is not None
+    assert closed_paper_r_multiples(session, ver.id) == []
+
+
+def test_void_dry_run_prints_exact_rows_cash_and_equity_and_writes_nothing(
+    session: Session,
+) -> None:
+    _seed(session, BARS)
+    session.commit()
+    before = _state(session)
+
+    rep = correct_legacy(session, confirm=False)
+    session.commit()
+
+    assert _state(session) == before  # nothing at all was written
+    assert voided_position_ids(session) == set()
+    text = "\n".join(rep.lines())
+    assert "DRY RUN — nothing written" in text
+    assert "resolution for invalid legacy exits: void" in text
+    assert "invalid legacy trades VOIDED: 2" in text
+    assert "exit proceeds 2498.75 taken back; entry notional 2582.25 returned" in text
+    assert (
+        "book default: cash 29830.16 -> 30000.00 (delta +169.84); "
+        "equity 29830.16 -> 30000.00 (delta +169.84)"
+    ) in text
+    assert "trade_correction rows: 10" in text
+    # The exact rows, in write order.
+    assert [
+        (r["paper_trade_id"], r["field"], r["old_value"], r["new_value"]) for r in rep.rows
+    ] == [
+        (1, FIELD_REALIZED, "-83.50", "0.00"),
+        (1, FIELD_CASH, "29830.16", "27331.41"),
+        (1, FIELD_VOID_ENTRY_CASH, "27331.41", "29913.66"),
+        (1, FIELD_VOID, "closed", "void"),
+        (2, FIELD_REALIZED, "-83.50", "0.00"),
+        (2, FIELD_CASH, "29913.66", "27414.91"),
+        (2, FIELD_VOID_ENTRY_CASH, "27414.91", "29997.16"),
+        (2, FIELD_VOID, "closed", "void"),
+        (1, FIELD_ENTRY_COST, "1.42", "0.00"),
+        (2, FIELD_ENTRY_COST, "1.42", "0.00"),
+    ]
+    for r in rep.rows:
+        assert (
+            f"row: paper_trade_id={r['paper_trade_id']} field={r['field']} "
+            f"old={r['old_value']!r} new={r['new_value']!r}"
+        ) in text
+
+
+def test_void_is_idempotent_and_reopen_never_touches_a_voided_trade(session: Session) -> None:
+    _seed(session, BARS)
+    session.commit()
+    correct_legacy(session, confirm=True)
+    session.commit()
+    once = _state(session)
+    assert find_invalid_exits(session) == []  # voided rows are resolved
+
+    for resolution in ("void", "reopen"):
+        again = correct_legacy(session, confirm=True, resolution=resolution)  # type: ignore[arg-type]
+        session.commit()
+        assert again.changed is False and again.corrections_written == 0
+        assert "nothing to correct" in "\n".join(again.lines())
+        assert _state(session) == once
+
+
+def test_voided_position_blocks_no_entry_and_counts_toward_no_cap(session: Session) -> None:
+    """After the void, a new MSFT signal is sized as if the book were empty.
+
+    Book: cash = equity = 30,000. Fill 516.17 * (1 + 0.00055) = 516.4539 -> 516.45;
+    stop fill 499.75 * (1 - 0.00055) = 499.4751 -> 499.48; risk/share 16.97.
+      candidate risk 84.85 / 16.97            -> 5
+      per-trade 0.5% = 150 / 16.97            -> 8
+      open risk 1.5% (configured) = 450/16.97 -> 26   (nothing open)
+      symbol 10% = 3,000 / 516.45             -> 5    (nothing held in MSFT)
+      sector 20% = 6,000 / 516.45             -> 11   (UNKNOWN bucket empty)
+    => 5 shares. Had the two voided positions counted (10 sh * 517.53 = 5,175.30
+    of MSFT, over the 3,000 symbol budget) no share would be allowed — which is
+    exactly what ``reopen`` produces, asserted in the next test."""
+    _seed(session, BARS)
+    session.commit()
+    correct_legacy(session, confirm=True)
+    session.commit()
+    acct = session.scalar(select(PaperAccount))
+    inst = session.scalar(select(Instrument))
+    assert acct is not None and inst is not None
+    assert _has_open_position(session, acct.id, inst.id) is False  # does not block the symbol
+
+    cand = _new_msft_candidate(session)
+    res = accept_candidate(session, cand.id, as_of=date(2026, 10, 2))
+    session.commit()
+
+    assert res.shares == 5
+    trade = session.scalars(select(PaperTrade).order_by(PaperTrade.id.desc())).first()
+    assert trade is not None
+    risk = trade.plan_json["risk_decision"]
+    assert Decimal(risk["equity"]) == Decimal("30000")
+    for key in ("gross_before", "open_risk_before", "symbol_before", "sector_before"):
+        assert Decimal(risk[key]) == 0, key
+    assert risk["share_caps"]["open_risk"] == 26
+    assert risk["share_caps"]["symbol"] == 5
+    assert risk["share_caps"]["sector"] == 11
+    session.refresh(acct)
+    assert acct.cash == Decimal("30000") - 5 * Decimal("516.45")
+    # Only the new position is open; the voided ones stay closed and voided.
+    open_ids = [
+        p.id
+        for p in session.scalars(select(PaperPosition).where(PaperPosition.closed_at.is_(None)))
+    ]
+    assert open_ids == [3]
+    assert voided_position_ids(session) == {1, 2}
+
+
+def test_reopen_by_contrast_fills_the_symbol_cap(session: Session) -> None:
+    """Control for the test above: with ``reopen`` the same two positions are
+    open exposure (5,175.30 of MSFT > the 10% symbol budget) and block the entry."""
+    _seed(session, BARS)
+    session.commit()
+    correct_legacy(session, confirm=True, resolution="reopen")
+    session.commit()
+    cand = _new_msft_candidate(session)
+    with pytest.raises(ValueError, match="limits"):
+        accept_candidate(session, cand.id, as_of=date(2026, 10, 2))
+
+
+def test_cli_defaults_to_void_and_validates_resolution(session: Session, db_url: str) -> None:
+    _seed(session, BARS)
+    session.commit()
+    before = _state(session)
+    runner = CliRunner()
+
+    assert (
+        runner.invoke(app, ["paper", "correct-legacy", "--dry-run", "--resolution", "x"]).exit_code
+        == 2
+    )
+    assert (
+        runner.invoke(
+            app, ["paper", "correct-legacy", "--dry-run", "--void", "--resolution", "reopen"]
+        ).exit_code
+        == 2
+    )
+
+    for args in (["--dry-run"], ["--dry-run", "--void"], ["--dry-run", "--resolution", "void"]):
+        dry = runner.invoke(app, ["paper", "correct-legacy", *args])
+        assert dry.exit_code == 0, dry.output
+        assert "DRY RUN — nothing written" in dry.output
+        assert "invalid legacy trades VOIDED: 2" in dry.output
+        assert "cash 29830.16 -> 30000.00" in dry.output
+        assert "equity 29830.16 -> 30000.00" in dry.output
+        assert "field=legacy_void.position.status old='closed' new='void'" in dry.output
+        assert "no order was placed" in dry.output
+        assert _state(session) == before
+
+    done = runner.invoke(app, ["paper", "correct-legacy", "--confirm"])
+    assert done.exit_code == 0, done.output
+    assert "CONFIRMED — written" in done.output
+    session.rollback()  # end this session's read snapshot; the CLI used its own session
+    after = _state(session)
+    assert after["cash"] == VOID_CASH and after["corrections"] == 10
+    assert after["trades"] == before["trades"]

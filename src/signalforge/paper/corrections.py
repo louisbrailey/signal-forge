@@ -5,7 +5,10 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from signalforge.db.models import PaperTrade, TradeCorrection
+from signalforge.db.paper_voids import FIELD_VOID, VOID_STATUS, voided_position_ids
 from signalforge.observability import get_logger
+
+__all__ = ["FIELD_VOID", "VOID_STATUS", "record_correction", "voided_position_ids"]
 
 _log = get_logger("paper.corrections")
 

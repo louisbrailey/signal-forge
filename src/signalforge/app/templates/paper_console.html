@@ -11,6 +11,7 @@
 {% if worker %}<p class="text-sm">Last heartbeat {{ worker.last_beat_at }} UTC · {{ worker.detail }}</p>{% endif %}
 <p>Automatic equity paper acceptance: <strong>{{ 'ON' if automatic else 'OFF' }}</strong> · Daily acceptance cap: {{ daily_cap }} per book. Only approved, in-scope signals passing all gates are eligible.</p>
 {% if invalid_history %}<p role="alert" class="my-4 bg-red-50 border border-red-400 text-red-900 p-3">Historical accounting warning: {{ invalid_history }} position(s) have a recorded exit before entry. Historical P&amp;L below includes legacy records and is not validated performance. Original audit records are preserved.</p>{% endif %}
+{% if voided_count %}<p class="my-4 bg-gray-50 border border-gray-300 p-3">{{ voided_count }} legacy paper trade(s) were voided by append-only correction: they hold no exposure, count toward no cap and are excluded from performance evidence. Original audit records are preserved.</p>{% endif %}
 {% if account.exists %}
 <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 my-5">
 {% for label,value in [('Cash', account.cash),('Estimated equity',account.equity_estimate),('Realized P&L',account.realized_pnl),('Unrealized P&L',account.unrealized_pnl)] %}
