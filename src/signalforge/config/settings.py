@@ -93,6 +93,27 @@ class Settings(BaseSettings):
     smtp_from: str = ""
     smtp_to: str = ""
 
+    # --- Worker operating policy (2026-10-04) ---
+    # These live HERE, on the process settings, and deliberately NOT on
+    # ``ResearchConfig``: they shape no signal, and a field on ResearchConfig
+    # moves ``full_config_hash`` (and, if it were ever listed in
+    # ``SCOPE_HASH_FIELDS``, ``config_hash`` — un-scoping every live
+    # PAPER_APPROVED approval). Env: EOD_INGEST_DEADLINE_MINUTES,
+    # CATCH_UP_LOOKBACK_SESSIONS, EOD_GAP_GRACE_MINUTES.
+    #
+    # Overall wall-clock budget for the daily-bar ingest while the EOD lock is
+    # held. Checked BETWEEN symbols only (never mid-transaction); on expiry the
+    # run is recorded ``stopped`` with its completed symbols and resumed by the
+    # next catch-up. A normal ~175-symbol pass at the 12.1 s Basic pace is
+    # ~35 min, so 45 is conservative headroom, not a tight bound.
+    eod_ingest_deadline_minutes: float = Field(default=45.0, gt=0)
+    # How many completed XNYS sessions before the latest one the catch-up will
+    # look back over for sessions that never got an approved-scope scan.
+    catch_up_lookback_sessions: int = Field(default=10, ge=0, le=60)
+    # /ops and the health check flag the last completed session as a GAP when
+    # no successful EOD job run exists this long after its 17:30 ET cutoff.
+    eod_gap_grace_minutes: float = Field(default=120.0, ge=0)
+
     # --- Research config (versioned; hashed onto every run) ---
     research: ResearchConfig = Field(default_factory=ResearchConfig)
 

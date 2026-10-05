@@ -13,6 +13,8 @@ job bodies do not change.
 from __future__ import annotations
 
 import threading
+import time
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -25,6 +27,8 @@ from signalforge.killswitch import KillSwitchEngaged, ensure_not_engaged
 from signalforge.observability import get_logger
 
 if TYPE_CHECKING:  # typing only — the runtime import stays inside the job bodies
+    from sqlalchemy.orm import Session
+
     from signalforge.db.models import IngestionRun
 
 _log = get_logger("scheduler")
@@ -42,6 +46,9 @@ NO_JOB_LEVEL_LOCK_RETRY: frozenset[str] = frozenset(
         "approved_scope_scan",
         "catchup_scan",
         "catchup_approved_scope_scan",
+        # per-session job_run rows + at most one ingest pass; a job-level
+        # retry would duplicate the per-session rows already written
+        "catch_up_missed_sessions",
         # persists a ScanRun of its own; a job-level retry would re-run the
         # whole body and persist a second scan for the same bar
         "intraday_scan",
@@ -213,6 +220,15 @@ def job_ingest() -> None:
     start = end - timedelta(days=400)
     adapter = get_primary_adapter(settings)
 
+    # Overall wall-clock deadline (incident 2026-09-28). The clock starts when
+    # the EOD lock was taken (``_EOD_UNIT_STARTED_AT``), or now for a direct
+    # call. It is polled between symbols only — see ``ingest_universe``.
+    unit_started = _EOD_UNIT_STARTED_AT if _EOD_UNIT_STARTED_AT is not None else _clock()
+    deadline_minutes = float(getattr(settings, "eod_ingest_deadline_minutes", 45.0))
+
+    def _deadline_hit() -> bool:
+        return _clock() - unit_started >= deadline_minutes * 60.0
+
     # Resolve the symbol set as a PLAIN READER. Doing it inside the write scope
     # would open BEGIN IMMEDIATE before the first symbol's paced network fetch
     # and hold the SQLite write lock across it — the exact shape of the
@@ -221,7 +237,18 @@ def job_ingest() -> None:
         scope = ingest_scope(
             session, list(settings.research.universe), source=adapter.provider_name
         )
+        resume = _resumable_ingest(session, adapter.provider_name, end)
+        resume_id = resume.id if resume is not None else None
+        carried = [str(s) for s in (resume.symbols_ok or [])] if resume is not None else []
     symbols = list(scope.symbols)
+    carried_set = {s.upper() for s in carried} & {s.upper() for s in symbols}
+    if resume_id is not None:
+        _log.warning(
+            "ingest.resuming_after_deadline",
+            ingestion_run_id=resume_id,
+            carried_over=len(carried_set),
+            remaining=len(symbols) - len(carried_set),
+        )
     _log.info(
         "ingest.scope",
         provider=adapter.provider_name,
@@ -237,28 +264,71 @@ def job_ingest() -> None:
         # ingest_universe fetches each symbol BEFORE it writes and commits per
         # symbol, so no write transaction ever spans a paced provider call and a
         # run cut short is durable up to its last committed symbol.
-        report = ingest_universe(session, adapter, symbols, start, end)
-        ok_symbols = [r.symbol for r in report.results if not r.error]
+        report = ingest_universe(
+            session,
+            adapter,
+            symbols,
+            start,
+            end,
+            skip=carried_set,
+            should_stop=_deadline_hit,
+        )
+        fresh_ok = {r.symbol.upper() for r in report.results if not r.error}
+        ok_symbols = [s for s in symbols if s.upper() in carried_set or s.upper() in fresh_ok]
         failed = {r.symbol: r.error for r in report.results if r.error}
-        status = "ok" if not failed else ("partial" if ok_symbols else "failed")
-        session.add(
-            IngestionRun(
+        stopped = bool(getattr(report, "stopped", False))
+        if stopped:
+            # Not ok/partial: every reader that gates on the last ingestion
+            # (data_readiness, catch_up_pending) treats ``stopped`` as "not
+            # covered", so nothing scans on a half-fetched session.
+            status = INGEST_STATUS_STOPPED
+        else:
+            status = "ok" if not failed else ("partial" if ok_symbols else "failed")
+        provenance = dict(scope.provenance())
+        note = scope.note()
+        deadline_reason = ""
+        if stopped:
+            deadline_reason = (
+                f"deadline exceeded after {len(ok_symbols)}/{len(symbols)} symbols "
+                f"({deadline_minutes:g} min); resume on next catch-up"
+            )
+            provenance[INGEST_DEADLINE_KEY] = {
+                "reason": deadline_reason,
+                "deadline_minutes": deadline_minutes,
+                "symbols_done": len(ok_symbols),
+                "symbols_total": len(symbols),
+            }
+            note = f"{note} — {deadline_reason}"
+        elif resume_id is not None:
+            provenance["resumed_after_deadline"] = {"carried_over": len(carried_set)}
+            note = (
+                f"{note} (resumed after a deadline stop; "
+                f"{len(carried_set)} symbols carried over)"
+            )
+        row = session.get(IngestionRun, resume_id) if resume_id is not None else None
+        if row is None:
+            row = IngestionRun(
                 provider=adapter.provider_name,
                 feed_type=FeedType.BAR_DAILY,
                 kind="incremental",
                 requested_start=start,
                 requested_end=end,
-                symbols_requested=list(symbols),
-                symbols_ok=ok_symbols,
-                symbols_failed=failed,
-                bars_written=report.bars_written,
-                status=status,
+                bars_written=0,
                 started_at=started,
-                finished_at=utcnow(),
-                gaps_json=scope.provenance(),
-                notes=scope.note(),
             )
-        )
+            session.add(row)
+        row.symbols_requested = list(symbols)
+        row.symbols_ok = ok_symbols
+        row.symbols_failed = failed
+        row.bars_written = int(row.bars_written or 0) + report.bars_written
+        row.status = status
+        row.finished_at = utcnow()
+        row.gaps_json = provenance
+        row.notes = note
+    # Raised only AFTER the write scope has committed the resumable row — an
+    # exception inside the scope would roll it back.
+    if stopped:
+        raise IngestDeadlineExceeded(deadline_reason)
 
 
 def job_scan_all() -> None:
@@ -394,6 +464,59 @@ def job_approved_scope_scan() -> None:
 # and an intraday scan straddling the EOD rescan would read half-updated data).
 _EOD_UPDATE_LOCK = threading.Lock()
 
+# Monotonic clock for the ingest deadline — a module attribute so a test can
+# inject a deterministic one. ``_EOD_UNIT_STARTED_AT`` is the clock reading at
+# the moment the EOD lock was taken (None when no locked unit is running); it
+# is only ever written by the thread that holds ``_EOD_UPDATE_LOCK``.
+_clock: Callable[[], float] = time.monotonic
+_EOD_UNIT_STARTED_AT: float | None = None
+
+INGEST_STATUS_STOPPED = "stopped"
+INGEST_DEADLINE_KEY = "deadline"  # inside IngestionRun.gaps_json
+
+
+class IngestDeadlineExceeded(RuntimeError):
+    """The daily-bar ingest ran past ``eod_ingest_deadline_minutes``. The
+    completed symbols are committed and recorded on a ``stopped``
+    ``IngestionRun``; the next ingest resumes from them."""
+
+
+def _resumable_ingest(session: Session, provider: str, end: date) -> IngestionRun | None:
+    """The deadline-stopped daily-bar run the next ingest may resume, if any.
+
+    Only when ALL hold — otherwise a fresh full pass is the safe answer:
+
+    * it is the newest daily-bar run for this provider (nothing ran since);
+    * it is an ``incremental`` run stopped by the deadline (not the kill
+      switch, not a CLI bound) for the same ``requested_end``;
+    * it STARTED after the publication cutoff of the session that is the last
+      completed one right now. A symbol fetched before that cutoff may predate
+      the session's bar being published, so carrying it over could leave the
+      session silently incomplete.
+    """
+    from sqlalchemy import select
+
+    from signalforge.db.models import IngestionRun
+    from signalforge.domain import FeedType
+
+    row = session.scalar(
+        select(IngestionRun)
+        .where(IngestionRun.feed_type == FeedType.BAR_DAILY, IngestionRun.provider == provider)
+        .order_by(IngestionRun.started_at.desc(), IngestionRun.id.desc())
+        .limit(1)
+    )
+    if (
+        row is None
+        or row.status != INGEST_STATUS_STOPPED
+        or row.kind != "incremental"
+        or row.requested_end != end
+        or INGEST_DEADLINE_KEY not in (row.gaps_json or {})
+    ):
+        return None
+    if row.started_at < _session_cutoff_utc(last_completed_session()):
+        return None
+    return row
+
 
 def job_intraday_scan() -> None:
     """In-session INTRADAY scan on the approved dataset, at the bar cadence.
@@ -464,21 +587,40 @@ def job_daily_eod_update() -> None:
     Ordering is guaranteed by running the three steps sequentially in one job:
     an ingest failure raises before either scan starts.
     """
+    global _EOD_UNIT_STARTED_AT
     if not _EOD_UPDATE_LOCK.acquire(blocking=False):
         _log.warning("daily_eod_update.already_running", detail="skipping overlapping run")
         return
     try:
-        job_ingest()
-        job_scan_all()
-        # Nested guard so the approved-scope step leaves its OWN JobRun row (the
-        # Operational Status page shows it by name) — a failure still propagates
-        # and also marks daily_eod_update failed.
-        guarded("approved_scope_scan", job_approved_scope_scan)()
-        # The mechanical grid is NOT chained here: it reads the bulk universe
-        # source that ``universe_update`` (18:15 ET) refreshes, so it has its own
-        # cron slot after that job (see default_job_specs).
+        _EOD_UNIT_STARTED_AT = _clock()
+        _eod_update_steps(ingest=True)
     finally:
+        _EOD_UNIT_STARTED_AT = None
         _EOD_UPDATE_LOCK.release()
+
+
+def _eod_update_steps(*, ingest: bool) -> None:
+    """The EOD chain for the LATEST completed session. Caller holds
+    ``_EOD_UPDATE_LOCK``. ``ingest=False`` only when this same locked unit has
+    already run a covering ingest (multi-session catch-up).
+
+    The ingest is bounded by ``eod_ingest_deadline_minutes``: a stuck or slow
+    provider raises ``IngestDeadlineExceeded``, the caller's ``finally``
+    releases the lock, and neither scan runs on the half-fetched session. The
+    scans are local compute with no provider call and are NOT under the
+    deadline — cutting them off after a completed ingest would leave the
+    session ingested-but-unscanned with nothing owed to retry it.
+    """
+    if ingest:
+        job_ingest()
+    job_scan_all()
+    # Nested guard so the approved-scope step leaves its OWN JobRun row (the
+    # Operational Status page shows it by name) — a failure still propagates
+    # and also marks daily_eod_update failed.
+    guarded("approved_scope_scan", job_approved_scope_scan)()
+    # The mechanical grid is NOT chained here: it reads the bulk universe
+    # source that ``universe_update`` (18:15 ET) refreshes, so it has its own
+    # cron slot after that job (see default_job_specs).
 
 
 def job_grid_daily() -> None:
@@ -608,6 +750,16 @@ def job_health_check() -> None:
 
     check_db()
     job_feed_probe()
+    # A silent multi-day gap (2026-09-28..30) must be loud in the log as well
+    # as on /ops. Logged, never raised: raising every 15 min would write a
+    # failed job row + audit entry per check and bury the real cause.
+    try:
+        gap, why = eod_gap()
+    except Exception as exc:
+        _log.warning("health.eod_gap_check_failed", error=repr(exc)[:160])
+        return
+    if gap:
+        _log.warning("health.eod_gap", status="degraded", detail=why)
 
 
 def _intraday_scan_spec() -> list[JobSpec]:
@@ -937,19 +1089,371 @@ def catch_up_pending(now: datetime | None = None) -> tuple[bool, str]:
     return True, owed
 
 
+# --------------------------------------------------------------------------- #
+# Multi-session catch-up (incident 2026-09-28..30)
+# --------------------------------------------------------------------------- #
+# Why a missed PAST session gets an explicit skip row and not an as-of scan.
+#
+# ``run_scan(as_of=...)`` does bound the PRICE read (``PriceSeries.load`` only
+# returns bars <= as_of), but that is the only point-in-time input. A scan "as
+# of" a past session, run today, would still:
+#
+#   * read TODAY's approval state, OOS evidence and promotion evaluations
+#     (``approved_scan_groups``, ``latest_oos_metric``) — a version approved or
+#     re-evaluated after that session would be scanned as if it already was;
+#   * read every stored ``EarningsEvent`` regardless of when it was fetched, so
+#     the event-window exclusion sees dates learned after the session;
+#   * size against TODAY's paper-account cash and gate on TODAY's feed status;
+#   * skip the completed-bar requirement entirely (``required_bar_date`` is only
+#     computed when ``as_of is None``) and bypass ``data_readiness``, which is
+#     "now"-based — a symbol with no bar for the session would be scanned on an
+#     older bar without being marked stale;
+#   * persist a ``ScanRun`` / ``Candidate`` rows with NO as-of marker (the
+#     schema has no such column), stamped with today's time — indistinguishable
+#     from a live scan to the alert planner, the scanner page, manual paper
+#     acceptance and ``paper.auto_simulate`` (docs/PAPER_OPERATION_AUDIT.md P1:
+#     stored PASSED signals already outlive their freshness authority).
+#
+# Making that safe needs a schema change plus edits to the research gates and
+# every candidate consumer. Until then the honest record is: bars ingested,
+# scan explicitly NOT run — one ``scan_skipped_missed_session`` row per session.
+# Because no scan is produced for a past session, nothing from it can reach
+# auto-simulation; only the latest completed session runs the real chain.
+MISSED_SESSION_INGEST_JOB = "catchup_ingest_session"
+MISSED_SESSION_SKIP_JOB = "scan_skipped_missed_session"
+MISSED_SESSIONS_JOB = "catch_up_missed_sessions"
+_SESSION_TAG = "session="
+_EOD_FAILURE_JOBS = ("daily_eod_update", "catch_up", MISSED_SESSIONS_JOB)
+
+
+def _session_tag(session_date: date) -> str:
+    return f"{_SESSION_TAG}{session_date.isoformat()}"
+
+
+def _lookback_sessions(latest: date, lookback: int) -> list[date]:
+    """The ``lookback`` completed XNYS sessions strictly before ``latest``,
+    oldest first."""
+    if lookback <= 0:
+        return []
+    from signalforge.data.calendar import sessions
+
+    window = [d for d in sessions(latest - timedelta(days=lookback * 2 + 14), latest) if d < latest]
+    return window[-lookback:]
+
+
+def missed_sessions(now: datetime | None = None) -> tuple[list[date], str]:
+    """Completed sessions BEFORE the latest one that never got an
+    approved-scope scan and have not been explicitly resolved — oldest first.
+
+    The anchor is the newest readiness-enforced ``approved_scope_scan.completed``
+    audit row: the session that was the last completed one when it was written
+    is the last session known to have had a successful EOD update + scan. Every
+    session after it and before the latest completed one is missed, bounded to
+    ``catch_up_lookback_sessions``, minus the sessions already carrying a
+    ``scan_skipped_missed_session`` row (idempotence). No anchor at all (fresh
+    install, no approved strategy ever scanned) means there is nothing to be
+    "since", so nothing is owed. The latest completed session itself is never
+    in this list — ``catch_up_pending`` owns it.
+    """
+    from sqlalchemy import select
+
+    from signalforge.config import get_settings
+    from signalforge.db.models import AuditLog, JobRun
+    from signalforge.db.session import session_scope
+    from signalforge.research.approved_scope_scan import AUDIT_COMPLETED
+
+    now = now or datetime.now(UTC)
+    latest = last_completed_session(now)
+    lookback = int(getattr(get_settings(), "catch_up_lookback_sessions", 10))
+    window = _lookback_sessions(latest, lookback)
+    if not window:
+        return [], "look-back is 0 sessions"
+    with session_scope() as session:
+        anchor_ts: datetime | None = None
+        for row in session.scalars(
+            select(AuditLog)
+            .where(AuditLog.action == AUDIT_COMPLETED, AuditLog.ts <= now)
+            .order_by(AuditLog.ts.desc())
+            .limit(50)
+        ):
+            if (row.after_json or {}).get("readiness_enforced", True):
+                anchor_ts = row.ts
+                break
+        if anchor_ts is None:
+            return [], "no completed approved-scope scan on record — nothing to catch up since"
+        anchor = last_completed_session(anchor_ts)
+        owed = [d for d in window if d > anchor]
+        if not owed:
+            return [], f"approved-scope scan on record for {anchor.isoformat()} — no gap"
+        resolved: set[str] = set()
+        for detail in session.scalars(
+            select(JobRun.detail).where(
+                JobRun.name == MISSED_SESSION_SKIP_JOB,
+                JobRun.started_at >= _session_cutoff_utc(owed[0]),
+            )
+        ):
+            head = str(detail or "").split(":", 1)[0].strip()
+            if head.startswith(_SESSION_TAG):
+                resolved.add(head[len(_SESSION_TAG) :])
+        owed = [d for d in owed if d.isoformat() not in resolved]
+        if not owed:
+            return [], f"every session since {anchor.isoformat()} is scanned or explicitly skipped"
+        last_fail = session.scalar(
+            select(JobRun)
+            .where(JobRun.name.in_(_EOD_FAILURE_JOBS), JobRun.status == "failed")
+            .order_by(JobRun.started_at.desc())
+            .limit(1)
+        )
+    names = ", ".join(d.isoformat() for d in owed)
+    if (
+        last_fail is not None
+        and timedelta(0) <= now - last_fail.started_at < CATCH_UP_RETRY_BACKOFF
+    ):
+        return [], (
+            f"missed sessions ({names}) owed but backing off after a failed attempt at "
+            f"{last_fail.started_at.isoformat()}"
+        )
+    return owed, f"no approved-scope scan since {anchor.isoformat()}: missed {names}"
+
+
+def _covering_ingest(cutoff: datetime) -> tuple[int, datetime] | None:
+    """(id, finished_at) of a daily-bar ingestion that covered the configured
+    universe and finished at/after ``cutoff`` — the same test
+    ``catch_up_pending`` applies to the latest session."""
+    from sqlalchemy import select
+
+    from signalforge.db.models import IngestionRun
+    from signalforge.db.session import session_scope
+    from signalforge.domain import FeedType
+
+    with session_scope() as session:
+        for run in session.scalars(
+            select(IngestionRun)
+            .where(
+                IngestionRun.feed_type == FeedType.BAR_DAILY,
+                IngestionRun.status.in_(("ok", "partial")),
+                IngestionRun.finished_at.is_not(None),
+                IngestionRun.finished_at >= cutoff,
+            )
+            .order_by(IngestionRun.finished_at.desc())
+            .limit(10)
+        ):
+            if run.finished_at is not None and (
+                run.status == "ok" or _covers_configured_universe(run)
+            ):
+                return run.id, run.finished_at
+    return None
+
+
+def _session_bar_coverage(session_date: date) -> tuple[int, int]:
+    """(configured symbols with a stored daily bar for ``session_date``,
+    configured symbols) — evidence for the per-session row, not a gate."""
+    from sqlalchemy import func, select
+
+    from signalforge.config import get_settings
+    from signalforge.db.models import Instrument, OHLCVDaily
+    from signalforge.db.session import session_scope
+
+    symbols = [s.upper() for s in get_settings().research.universe]
+    if not symbols:
+        return 0, 0
+    with session_scope() as session:
+        have = session.scalar(
+            select(func.count(func.distinct(Instrument.symbol)))
+            .join(OHLCVDaily, OHLCVDaily.instrument_id == Instrument.id)
+            .where(Instrument.symbol.in_(symbols), OHLCVDaily.session_date == session_date)
+        )
+    return int(have or 0), len(symbols)
+
+
+def _catch_up_missed_session(session_date: date) -> bool:
+    """One missed PAST session: make sure its bars are ingested (idempotent),
+    then record that its scan was NOT run. Caller holds ``_EOD_UPDATE_LOCK``.
+    Returns True when this call made a provider pass.
+
+    The ingest is one 400-day incremental window ending today, so a single
+    pass covers every missed session at once; the next session's unit finds
+    that covering run and makes no second provider pass. Each session still
+    leaves its own ``catchup_ingest_session`` row saying which run covered it.
+    """
+    tag = _session_tag(session_date)
+    started = datetime.now(UTC)
+    cutoff = _session_cutoff_utc(session_date)
+    fetched = False
+    covering = _covering_ingest(cutoff)
+    if covering is None:
+        try:
+            job_ingest()
+        except Exception as exc:
+            _record_job_run(MISSED_SESSION_INGEST_JOB, started, "failed", f"{tag}: {exc!r}")
+            raise
+        fetched = True
+        covering = _covering_ingest(cutoff)
+    if covering is None:
+        reason = (
+            f"{tag}: ingest finished but did not cover the configured universe; "
+            "session left owed for the next catch-up"
+        )
+        _record_job_run(MISSED_SESSION_INGEST_JOB, started, "failed", reason)
+        raise RuntimeError(reason)
+    have, total = _session_bar_coverage(session_date)
+    _record_job_run(
+        MISSED_SESSION_INGEST_JOB,
+        started,
+        "ok",
+        f"{tag}: covered by daily-bar ingestion run #{covering[0]} "
+        f"({'fetched now' if fetched else 'already ingested'}); "
+        f"{have}/{total} configured symbols have a bar for this session",
+    )
+    _record_job_run(
+        MISSED_SESSION_SKIP_JOB,
+        datetime.now(UTC),
+        "skipped",
+        f"{tag}: approved-scope scan NOT run for this missed session — an as-of scan is "
+        "not point-in-time safe (approval/OOS/earnings/equity state and the freshness "
+        "gates are all 'now'). Bars ingested; no candidates, no auto-simulation.",
+    )
+    _log.warning("catch_up.missed_session_scan_skipped", session=session_date.isoformat())
+    return fetched
+
+
+def _safe_missed_sessions() -> list[date]:
+    """Planning must never stop the latest session's catch-up from running."""
+    try:
+        owed, reason = missed_sessions()
+    except Exception as exc:
+        _log.warning("catch_up.missed_sessions_unavailable", error=repr(exc)[:160])
+        return []
+    if owed:
+        _log.warning("catch_up.missed_sessions", reason=reason)
+    return owed
+
+
+def job_catch_up_missed_sessions() -> None:
+    """Start-up half of the multi-session catch-up: resolve missed PAST
+    sessions only (ingest + explicit skip row each, oldest first). The latest
+    completed session is left to ``run_catch_up`` / ``job_catch_up``."""
+    global _EOD_UNIT_STARTED_AT
+    owed = _safe_missed_sessions()
+    if not owed:
+        return
+    if not _EOD_UPDATE_LOCK.acquire(blocking=False):
+        _log.info("catch_up.skipped", reason="an EOD update is running right now")
+        return
+    try:
+        _EOD_UNIT_STARTED_AT = _clock()
+        for session_date in owed:
+            _catch_up_missed_session(session_date)
+    finally:
+        _EOD_UNIT_STARTED_AT = None
+        _EOD_UPDATE_LOCK.release()
+
+
 def job_catch_up() -> None:
-    """Every 30 min: if the EOD update is owed for the last completed session
-    (missed cron while the Mac slept, worker restarted, provider outage),
-    run it now. Idempotent — a successful update clears the pending state."""
+    """Every 30 min: bring EVERY completed session since the last scanned one
+    up to date (missed cron while the Mac slept, worker restarted, provider
+    outage). Oldest first: each missed past session is ingested and gets an
+    explicit ``scan_skipped_missed_session`` row; then, if the EOD update is
+    owed for the latest completed session, the real chain runs for it — the
+    only session whose candidates may reach auto-simulation. Idempotent — a
+    successful update clears the pending state and a resolved session is never
+    processed twice."""
+    global _EOD_UNIT_STARTED_AT
     if _EOD_UPDATE_LOCK.locked():
         _log.info("catch_up.skipped", reason="an EOD update is running right now")
         return
+    owed = _safe_missed_sessions()
     pending, reason = catch_up_pending()
-    if not pending:
+    if not pending and not owed:
         _log.info("catch_up.not_pending", reason=reason)
         return
-    _log.warning("catch_up.running", reason=reason)
-    job_daily_eod_update()
+    if not owed:
+        _log.warning("catch_up.running", reason=reason)
+        job_daily_eod_update()
+        return
+    if not _EOD_UPDATE_LOCK.acquire(blocking=False):
+        _log.info("catch_up.skipped", reason="an EOD update is running right now")
+        return
+    try:
+        # ONE deadline clock for the whole locked unit: the missed sessions'
+        # ingest and the latest session's ingest share the same budget.
+        _EOD_UNIT_STARTED_AT = _clock()
+        fetched = False
+        for session_date in owed:
+            fetched = _catch_up_missed_session(session_date) or fetched
+        if pending:
+            _log.warning("catch_up.running", reason=reason)
+            # A pass made moments ago for a missed session ended today and so
+            # already covers the latest session — do not hit the provider twice.
+            _eod_update_steps(ingest=not fetched)
+    finally:
+        _EOD_UNIT_STARTED_AT = None
+        _EOD_UPDATE_LOCK.release()
+
+
+# --------------------------------------------------------------------------- #
+# EOD gap visibility (health check + /ops)
+# --------------------------------------------------------------------------- #
+EOD_EVIDENCE_JOBS = ("daily_eod_update", "approved_scope_scan", "catchup_approved_scope_scan")
+
+
+def eod_gap(now: datetime | None = None) -> tuple[bool, str]:
+    """Is the last completed session past its expected EOD time + grace with
+    no successful EOD job run on record? ``(True, why)`` is a DEGRADED state:
+    the worker may look alive while nothing has run for days (2026-09-28..30).
+
+    Evidence is a ``JobRun`` with status ok started at/after the session's
+    17:30 ET cutoff, for the EOD chain itself or its approved-scope step (the
+    30-minute ``catch_up`` row is NOT evidence: it is written ``ok`` even when
+    it found nothing to do)."""
+    from sqlalchemy import select
+
+    from signalforge.config import get_settings
+    from signalforge.db.models import JobRun
+    from signalforge.db.session import session_scope
+
+    now = now or datetime.now(UTC)
+    expected = last_completed_session(now)
+    cutoff = _session_cutoff_utc(expected)
+    grace = timedelta(minutes=float(getattr(get_settings(), "eod_gap_grace_minutes", 120.0)))
+    due = cutoff + grace
+    if now < due:
+        return False, (
+            f"EOD update for {expected.isoformat()} not yet overdue (due by {due.isoformat()})"
+        )
+    with session_scope() as session:
+        row = session.scalar(
+            select(JobRun)
+            .where(
+                JobRun.name.in_(EOD_EVIDENCE_JOBS),
+                JobRun.status == "ok",
+                JobRun.started_at >= cutoff,
+            )
+            .order_by(JobRun.started_at.desc())
+            .limit(1)
+        )
+        if row is not None:
+            return False, (
+                f"{row.name} ok at {row.started_at.isoformat()} for {expected.isoformat()}"
+            )
+        last = session.scalar(
+            select(JobRun)
+            .where(JobRun.name.in_(EOD_EVIDENCE_JOBS), JobRun.status == "ok")
+            .order_by(JobRun.started_at.desc())
+            .limit(1)
+        )
+    why = (
+        f"no successful EOD job run for {expected.isoformat()} — expected after "
+        f"{cutoff.isoformat()} + {int(grace.total_seconds() // 60)} min grace"
+    )
+    why += f"; last ok EOD run: {last.started_at.isoformat()}" if last else "; no ok EOD run ever"
+    try:
+        owed, _why = missed_sessions(now)
+    except Exception:
+        owed = []
+    if owed:
+        why += "; earlier sessions also unscanned: " + ", ".join(d.isoformat() for d in owed)
+    return True, why
 
 
 # --------------------------------------------------------------------------- #
@@ -986,6 +1490,17 @@ def run_catch_up(stale_after_hours: int = 18) -> None:
             guarded("catchup_approved_scope_scan", job_approved_scope_scan)()
         except KillSwitchEngaged:
             _log.warning("scheduler.catch_up_skipped_kill_switch")
+        except IngestDeadlineExceeded as exc:
+            # Recorded failed by guarded(); the stopped run is resumable and the
+            # 30-minute catch_up job picks it up. Crashing start-up here would
+            # only make launchd restart the worker into the same slow provider.
+            _log.warning("scheduler.catch_up_ingest_deadline", detail=str(exc))
+    # Sessions missed BEFORE the latest one (multi-day outage): ingest + an
+    # explicit skip row each. Never allowed to stop the worker from starting.
+    try:
+        guarded(MISSED_SESSIONS_JOB, job_catch_up_missed_sessions)()
+    except Exception as exc:
+        _log.warning("scheduler.catch_up_missed_sessions_failed", error=repr(exc)[:200])
 
 
 def build_scheduler(specs: list[JobSpec] | None = None) -> BackgroundScheduler:

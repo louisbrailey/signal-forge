@@ -36,6 +36,10 @@
 6. **EOD update and catch-up never overlap** — they are different APScheduler jobs
    (cron vs interval), so `max_instances=1` cannot serialize them; a module lock
    (`scheduler._EOD_UPDATE_LOCK`) makes a second firing skip instead of stacking.
+   The lock is not held without bound: the ingest inside it stops at
+   `EOD_INGEST_DEADLINE_MINUTES` (default 45), checked between symbols — after a
+   symbol's commit, never inside a write transaction — and leaves a resumable
+   `stopped` ingestion run (2026-10-04).
 7. **One worker per database** — `worker_lock.py` takes an exclusive `flock` on
    `<data_dir>/worker.lock`; a second `run-scheduler` exits with code 1 naming the holder,
    and a live heartbeat from another pid/host is also refused.

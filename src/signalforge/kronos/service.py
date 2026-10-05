@@ -18,6 +18,7 @@ from signalforge.db.models.market import Instrument, OHLCVDaily
 
 from .runtime import KronosError, KronosUnavailable, infer
 from .runtime import runtime_status as _runtime_status
+from .worker import DEFAULT_MODE, normalise_mode
 
 LOOKBACK = 128
 MODEL = "NeoQuasar/Kronos-small"
@@ -48,7 +49,37 @@ def replay(
 
     Does not flush, commit, fetch, persist a result, or mutate settings. Missing/flagged
     history fails closed. Route owns authentication, kill-switch gating and scheduling.
+    Always runs the fixed production inference mode (eval mode, three seeded samples);
+    this function deliberately has no way to request anything else.
     """
+    return _replay(session, symbol, horizon, as_of, None)
+
+
+def study_replay(
+    session: Session,
+    symbol: str,
+    horizon: int,
+    *,
+    as_of: date | None,
+    mode: dict[str, Any],
+) -> dict[str, Any]:
+    """Study-only replay with an explicit, strictly validated inference ``mode``.
+
+    ``mode`` = ``{"eval": bool, "T": float, "top_p": float, "samples": int,
+    "return_paths": bool}``. This is the only entry point that can request train mode
+    (the replication arm of a pre-registered diagnostic) or non-default sampling. It must
+    never be called from a web route; the dashboard uses :func:`replay`.
+    """
+    return _replay(session, symbol, horizon, as_of, normalise_mode(mode))
+
+
+def _replay(
+    session: Session,
+    symbol: str,
+    horizon: int,
+    as_of: date | None,
+    mode: dict[str, Any] | None,
+) -> dict[str, Any]:
     ticker = symbol
     if not isinstance(ticker, str) or not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,14}", ticker):
         raise ValueError("Invalid ticker")
@@ -116,10 +147,18 @@ def replay(
         raise KronosUnavailable("Daily history has missing or non-XNYS sessions")
     history, actual = bars[:LOOKBACK], bars[LOOKBACK:]
     # Only held-out calendar labels cross the inference boundary, never their OHLCV.
-    paths = infer(history, [b["date"] for b in actual])
+    heldout_dates = [b["date"] for b in actual]
+    if mode is None:
+        resolved = dict(DEFAULT_MODE)
+        paths = infer(history, heldout_dates)
+    else:
+        resolved = mode
+        paths = infer(history, heldout_dates, mode=mode)
+    samples: int = resolved["samples"]
+    inference = {k: resolved[k] for k in ("eval", "T", "top_p", "samples")}
     if (
         not isinstance(paths, list)
-        or len(paths) != 3
+        or len(paths) != samples
         or any(not isinstance(p, list) or len(p) != horizon for p in paths)
         or any(
             type(v) not in (int, float) or not math.isfinite(v) or not 0 < v <= 1e15
@@ -135,7 +174,7 @@ def replay(
             {
                 "date": bar["date"],
                 "actual": bar["close"],
-                "predicted": sum(values) / 3,
+                "predicted": sum(values) / samples,
                 "low": min(values),
                 "high": max(values),
                 "baseline": history[-1]["close"],
@@ -154,10 +193,17 @@ def replay(
     ]
     digest = hashlib.sha256(
         json.dumps(
-            {"ticker": ticker, "bars": bars, "model": MODEL, "seed": 42}, sort_keys=True
+            {
+                "ticker": ticker,
+                "bars": bars,
+                "model": MODEL,
+                "seed": 42,
+                "inference": inference,
+            },
+            sort_keys=True,
         ).encode()
     ).hexdigest()
-    return {
+    result: dict[str, Any] = {
         "id": digest,
         "ticker": ticker,
         "model": MODEL,
@@ -175,8 +221,9 @@ def replay(
         "heldout_end": dates[-1],
         "lookback": LOOKBACK,
         "horizon": horizon,
-        "samples": 3,
+        "samples": samples,
         "seed": 42,
+        "inference": inference,
         "dates": [p["date"] for p in points],
         "actual": [p["actual"] for p in points],
         "predicted": [p["predicted"] for p in points],
@@ -191,7 +238,17 @@ def replay(
         "mae": sum(abs(p["predicted"] - p["actual"]) for p in points) / horizon,
         "baseline_mae": sum(abs(p["baseline"] - p["actual"]) for p in points) / horizon,
     }
+    if resolved["return_paths"]:
+        result["paths"] = [[float(v) for v in p] for p in paths]
+    return result
 
 
 status = runtime_status
-__all__ = ["KronosError", "KronosUnavailable", "replay", "runtime_status", "status"]
+__all__ = [
+    "KronosError",
+    "KronosUnavailable",
+    "replay",
+    "runtime_status",
+    "status",
+    "study_replay",
+]

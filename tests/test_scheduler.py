@@ -396,7 +396,7 @@ def test_startup_catch_up_and_the_30_minute_catch_up_ingest_the_same_symbols(
     _approve_on_snapshot([*APPROVED_EXTRA], key="w6a_catchup")
     seen: list[list[str]] = []
 
-    def _fake_ingest_universe(session, adapter, symbols, start, end):  # type: ignore[no-untyped-def]
+    def _fake_ingest_universe(session, adapter, symbols, start, end, **_kw):  # type: ignore[no-untyped-def]
         seen.append(list(symbols))
         report = IngestReport(provider=adapter.provider_name, started_at="now")
         report.results = [SymbolIngestResult(symbol=s, bars_written=1) for s in symbols]
