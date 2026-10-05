@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import statistics
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -94,9 +95,14 @@ from signalforge.data import calendar as equity_calendar
 from signalforge.data import options_calendar
 from signalforge.data.option_chain import ContractPrint, ContractRef, OptionChainSeries, Right
 from signalforge.data.options_backfill import OptionsCoverageSummary, coverage_summary
-from signalforge.data.options_corporate_actions import splits_between, trailing_dividend_yield
+from signalforge.data.options_corporate_actions import (
+    Q_SERIES_SOURCE,
+    latest_q_series_run_id,
+    q_series_digest,
+    splits_between,
+)
 from signalforge.data.series import PriceSeries
-from signalforge.db.models import DataSnapshot, EntitlementCheck, IngestionRun
+from signalforge.db.models import DataSnapshot, DividendYieldDaily, EntitlementCheck, IngestionRun
 from signalforge.db.models.market import OptionAggregateDaily, OptionContract
 from signalforge.domain import Horizon
 from signalforge.observability import get_logger
@@ -170,6 +176,34 @@ CLUSTER_UNIT_F11 = "(expiry cycle) pooled across underlyings"
 
 #: The pre-registration whose commit freezes the cost-model constants (D4 §2.6).
 D5_PREREGISTRATION_PATH = "docs/research/options_designs/D5_first_strategy_preregistration.md"
+
+#: The operator item deciding whether gate 0.c/0.d's floors are read pooled over
+#: the snapshot's underlyings (D5 §5.1) or per symbol (D5 §2.2).
+OR0C_ITEM = "OR-0c"
+#: Where the operator's decision on it is recorded.  A module attribute so a
+#: test can point it at a temporary file; nothing else may override it (no
+#: environment variable, no CLI option): the record IS the authorisation.
+OR0C_DECISIONS_FILE: Path = (
+    Path(__file__).resolve().parents[3] / "docs/research/DECISIONS_2026-09-12_wave3.md"
+)
+# A whole line, optionally behind markdown list/quote/bold markers.  The table
+# row that lists OR-0c as "Open" cannot match: it has no ``OR-0c: DECIDED``.
+_OR0C_DECIDED_POOLED = re.compile(r"^[ \t>*\-]*OR-0c: DECIDED pooled\b", re.MULTILINE)
+
+
+def or0c_pooled_decision_recorded(path: Path | None = None) -> bool:
+    """Does the decisions file carry a line ``OR-0c: DECIDED pooled``?
+
+    Read at call time, fail closed: a missing or unreadable file is "not
+    decided".  This never writes the file — only the operator records a decision.
+    """
+    target = path or OR0C_DECISIONS_FILE
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return _OR0C_DECIDED_POOLED.search(text) is not None
+
 
 #: Option bars and the underlying closes that index them must share one basis:
 #: a listed strike is an unadjusted number, so the close it is compared against
@@ -487,8 +521,9 @@ def latest_options_coverage_summary(
 
     Counts and completeness only: ``coverage_summary`` reads ``IngestionRun`` and
     never ``option_aggregate_daily``, and ``OptionsCoverageSummary`` cannot hold a
-    price by construction.  This is the single entry point through which coverage
-    reaches an evaluation.
+    price by construction.  A whole-run read, kept for reporting: an EVALUATION
+    is judged on its snapshot's own underlyings through
+    :func:`dataset_snapshot_coverage`, never on whichever run is newest.
     """
     stmt = select(IngestionRun).where(IngestionRun.kind == "options_cycle_backfill")
     if window_start is not None:
@@ -500,6 +535,232 @@ def latest_options_coverage_summary(
         return None
     OptionsCoverageSummary.assert_price_free()
     return coverage_summary(run)
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotCoverage:
+    """Cycle-backfill coverage restricted to ONE dataset snapshot's underlyings.
+
+    The pre-flight used to read the newest cycle-backfill run as a whole.  That
+    answers the wrong question in both directions once the backfill is staged:
+    a snapshot of the Stage A index ETFs was judged on the Stage B stocks' run
+    (the newest), and a snapshot holding a stock would have been judged on the
+    index run had that one been newer.  Coverage is a property of the
+    *evaluated underlying set*, so it is assembled per underlying — each from
+    the newest overlapping run that requested it — and pooled over exactly the
+    snapshot's symbols.  A snapshot's underlyings may therefore span runs.
+
+    Counts only: every part is an ``OptionsCoverageSummary``.
+    """
+
+    underlyings: tuple[str, ...]
+    summary: OptionsCoverageSummary | None
+    per_underlying: tuple[OptionsCoverageSummary, ...] = ()
+    run_ids: tuple[int, ...] = ()
+    missing: tuple[str, ...] = ()
+    inconsistencies: tuple[str, ...] = ()
+    #: Refusals that name a member: no per-cycle records, no expected sessions,
+    #: listed as failed by the run it is read from, or (snapshot-level) no
+    #: recorded ingestion runs.  A member in here is never pooled silently.
+    member_refusals: tuple[str, ...] = ()
+
+
+_POOLED_IDENTITY_FIELDS = ("provider", "cycle_rule", "ladder_id", "strike_listing_basis")
+
+
+def _run_has_underlying(run: IngestionRun, underlying: str) -> bool:
+    requested = {str(x).upper() for x in (run.symbols_requested or [])}
+    recorded = {str(k).upper() for k in (run.gaps_json or {}) if not str(k).startswith("__")}
+    return underlying in requested or underlying in recorded
+
+
+def _pooled_status(parts: Sequence[OptionsCoverageSummary]) -> str:
+    statuses = [p.status for p in parts]
+    bad = sorted({st for st in statuses if st not in ("ok", "partial")})
+    if bad:
+        return bad[0]
+    return "partial" if "partial" in statuses else "ok"
+
+
+def pool_snapshot_coverage(
+    runs_newest_first: Sequence[IngestionRun], underlyings: Sequence[str]
+) -> SnapshotCoverage:
+    """Pool per-underlying coverage over exactly ``underlyings``.  Pure; no I/O.
+
+    For each underlying the newest run that requested it (or recorded cycles for
+    it) is the one read — never an older, better-looking one.  An underlying no
+    run covers is reported in ``missing`` and contributes nothing to the pooled
+    counts; the pre-flight refuses on it.  So does a member the run merely
+    *requested*: one with no per-cycle records, with no expected sessions, or
+    listed in the run's ``symbols_failed`` adds nothing (or only part of itself)
+    to the pooled counts, so pooling it would let the other members carry it
+    past the floors unseen.  Each is reported in ``member_refusals`` by name and
+    the pre-flight refuses on it.  Runs that disagree on the cycle rule,
+    ladder, provider or strike-listing basis cannot define one dataset (D1
+    §9.2), and that too is reported rather than averaged over.
+    """
+    OptionsCoverageSummary.assert_price_free()
+    wanted = tuple(sorted({u.upper().strip() for u in underlyings if u and u.strip()}))
+    parts: list[OptionsCoverageSummary] = []
+    missing: list[str] = []
+    member_refusals: list[str] = []
+    for sym in wanted:
+        run = next((r for r in runs_newest_first if _run_has_underlying(r, sym)), None)
+        if run is None:
+            missing.append(sym)
+            continue
+        part = coverage_summary(run, underlyings=[sym])
+        if not part.underlyings:
+            # Cycles recorded for a symbol the run never listed as requested.
+            part = replace(part, underlyings=(sym,))
+        parts.append(part)
+        failed = {str(k).upper(): str(v) for k, v in (run.symbols_failed or {}).items()}
+        if sym in failed:
+            member_refusals.append(
+                f"{sym} is listed as FAILED by cycle-backfill run #{run.id} "
+                f"({failed[sym] or 'no reason recorded'}); a failed underlying's cycle records "
+                "are incomplete and cannot be pooled — resume the run until it succeeds, or "
+                "build the snapshot without it"
+            )
+        if part.cycles_total == 0:
+            member_refusals.append(
+                f"{sym} was requested by cycle-backfill run #{run.id} but the run recorded no "
+                "cycles for it, so gate 0.c has nothing to read for it — it cannot be pooled "
+                "on the other members' coverage"
+            )
+        elif part.sessions_expected == 0:
+            member_refusals.append(
+                f"{sym} has {part.cycles_total} cycle record(s) in cycle-backfill run #{run.id} "
+                "but zero expected sessions, so gate 0.d has nothing to read for it — it "
+                "cannot be pooled on the other members' coverage"
+            )
+    if not parts:
+        return SnapshotCoverage(underlyings=wanted, summary=None, missing=tuple(missing))
+
+    inconsistencies = []
+    for name in _POOLED_IDENTITY_FIELDS:
+        values = sorted({str(getattr(p, name)) for p in parts})
+        if len(values) > 1:
+            inconsistencies.append(
+                f"the coverage runs disagree on {name} ({', '.join(values)}); runs built on "
+                "different bases cannot define one options dataset (D1 §9.2)"
+            )
+    run_ids = tuple(sorted({p.run_id for p in parts if p.run_id is not None}))
+    reasons: dict[str, int] = {}
+    for p in parts:
+        for reason, n in p.exclusions_by_reason:
+            reasons[reason] = reasons.get(reason, 0) + n
+    earliest = [p.earliest_available_date for p in parts if p.earliest_available_date]
+    head = parts[0]
+    pooled = OptionsCoverageSummary(
+        provider=head.provider,
+        run_id=run_ids[0] if len(run_ids) == 1 else None,
+        # The window every contributing run covers: the intersection.
+        window_start=max(p.window_start for p in parts),
+        window_end=min(p.window_end for p in parts),
+        cycle_rule=head.cycle_rule,
+        ladder_id=head.ladder_id,
+        strike_listing_basis=head.strike_listing_basis,
+        underlyings=tuple(sym for p in parts for sym in p.underlyings),
+        cycles_total=sum(p.cycles_total for p in parts),
+        cycles_covered=sum(p.cycles_covered for p in parts),
+        cycles_excluded=sum(p.cycles_excluded for p in parts),
+        exclusions_by_reason=tuple(sorted(reasons.items())),
+        contracts_selected=sum(p.contracts_selected for p in parts),
+        contracts_fetched=sum(p.contracts_fetched for p in parts),
+        bars_written=sum(p.bars_written for p in parts),
+        bars_skipped=sum(p.bars_skipped for p in parts),
+        sessions_expected=sum(p.sessions_expected for p in parts),
+        shares_per_contract_refusals=sum(p.shares_per_contract_refusals for p in parts),
+        ladder_incomplete_cycles=sum(p.ladder_incomplete_cycles for p in parts),
+        underlyings_ok=tuple(sym for p in parts for sym in p.underlyings_ok),
+        underlyings_failed=tuple(sym for p in parts for sym in p.underlyings_failed),
+        earliest_available_date=min(earliest) if earliest else None,
+        max_total_bars=max(p.max_total_bars for p in parts),
+        max_total_bars_prior=max(p.max_total_bars_prior for p in parts),
+        pacing_s=max(p.pacing_s for p in parts),
+        status=_pooled_status(parts),
+        stopped_reason="; ".join(sorted({p.stopped_reason for p in parts if p.stopped_reason})),
+    )
+    return SnapshotCoverage(
+        underlyings=wanted,
+        summary=pooled,
+        per_underlying=tuple(parts),
+        run_ids=run_ids,
+        missing=tuple(missing),
+        inconsistencies=tuple(inconsistencies),
+        member_refusals=tuple(member_refusals),
+    )
+
+
+def snapshot_options_coverage(
+    session: Session,
+    underlyings: Sequence[str],
+    *,
+    window_start: date | None = None,
+    window_end: date | None = None,
+    run_ids: Sequence[int] | None = None,
+) -> SnapshotCoverage:
+    """Coverage of ``underlyings`` from the stored cycle-backfill runs.  Read-only.
+
+    ``run_ids`` pins the read to named runs — the ones a snapshot's
+    ``options_scope_json.ingestion_run_ids`` recorded when it was created — so a
+    later, unrelated run cannot change what an existing snapshot is judged on.
+    Without it the candidates are every cycle-backfill run overlapping the
+    window, newest first.
+    """
+    stmt = select(IngestionRun).where(IngestionRun.kind == "options_cycle_backfill")
+    if run_ids:
+        stmt = stmt.where(IngestionRun.id.in_([int(i) for i in run_ids]))
+    if window_start is not None:
+        stmt = stmt.where(IngestionRun.requested_end >= window_start)
+    if window_end is not None:
+        stmt = stmt.where(IngestionRun.requested_start <= window_end)
+    runs = session.scalars(
+        stmt.order_by(IngestionRun.started_at.desc(), IngestionRun.id.desc())
+    ).all()
+    return pool_snapshot_coverage(runs, underlyings)
+
+
+def dataset_snapshot_coverage(
+    session: Session,
+    snapshot: DataSnapshot,
+    *,
+    window_start: date | None = None,
+    window_end: date | None = None,
+) -> SnapshotCoverage:
+    """The coverage an evaluation of ``snapshot`` is judged on: ITS symbols, read
+    from exactly the ingestion runs its scope recorded.
+
+    A snapshot whose scope records no ``ingestion_run_ids`` is REFUSED: falling
+    back to "whichever runs overlap the window" would let a later, unrelated run
+    change what an existing snapshot is judged on.  ``options snapshot`` always
+    records them.
+    """
+    scope = snapshot.options_scope_json or {}
+    symbols = list(snapshot.symbols_json or [])
+    try:
+        run_ids = [int(i) for i in (scope.get("ingestion_run_ids") or [])]
+    except (TypeError, ValueError):
+        run_ids = []
+    if not run_ids:
+        return SnapshotCoverage(
+            underlyings=tuple(sorted({str(u).upper().strip() for u in symbols if str(u).strip()})),
+            summary=None,
+            member_refusals=(
+                f"DataSnapshot {snapshot.key!r} records no ingestion_run_ids in its "
+                "options_scope_json, so there is no recorded run to read its coverage from; "
+                "an evaluation never falls back to whichever run is newest — build the "
+                "snapshot with 'signalforge options snapshot'",
+            ),
+        )
+    return snapshot_options_coverage(
+        session,
+        symbols,
+        window_start=window_start,
+        window_end=window_end,
+        run_ids=run_ids,
+    )
 
 
 def preregistration_digest(root: Path | None = None) -> str:
@@ -540,6 +801,42 @@ class CoveragePreflight:
     bar_continuity_fraction: float
     coverage_run_id: int | None
     underlyings: tuple[str, ...] = ()
+    coverage_run_ids: tuple[int, ...] = ()
+    #: ``(underlying, cycles_bracket_fraction, bar_continuity_fraction, run_id)``
+    #: — DISCLOSURE.  ``passed`` is computed on the pooled set (D5 §5.1's
+    #: wording), but whether the floors bind pooled or per symbol (D5 §2.2's
+    #: wording) is operator item OR-0c and is OPEN: this field does not settle
+    #: it.  See ``members_below_floor`` for the per-symbol reading's verdict.
+    per_underlying: tuple[tuple[str, float, float, int | None], ...] = ()
+    #: The per-symbol reading of the same two floors: every member whose OWN
+    #: bracket fraction or continuity is below its floor, with its numbers
+    #: (same tuple shape as ``per_underlying``).  Non-empty means the pooled and
+    #: per-symbol readings disagree or both fail; while OR-0c is open a
+    #: ``--confirm`` evaluation refuses on it.
+    members_below_floor: tuple[tuple[str, float, float, int | None], ...] = ()
+    #: ``(gate 0.c floor, gate 0.d floor)`` the fractions were compared against.
+    floors: tuple[float, float] = (0.0, 0.0)
+
+    @property
+    def pooled_floors_pass(self) -> bool:
+        return (
+            self.bracket_fraction >= self.floors[0]
+            and self.bar_continuity_fraction >= self.floors[1]
+        )
+
+    def or0c_warning(self) -> str:
+        """The text every command prints while members are below a floor, or ``""``."""
+        if not self.members_below_floor:
+            return ""
+        names = ", ".join(
+            f"{sym} (cycles {bracket:.3f} vs {self.floors[0]:.2f}, "
+            f"bars {continuity:.3f} vs {self.floors[1]:.2f})"
+            for sym, bracket, continuity, _ in self.members_below_floor
+        )
+        pooled = "passes" if self.pooled_floors_pass else "fails"
+        return (
+            f"{OR0C_ITEM} is open: pooled reading {pooled}, per-symbol reading fails for: {names}"
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -548,17 +845,105 @@ class CoveragePreflight:
             "cycles_bracket_fraction": round(self.bracket_fraction, 6),
             "bar_continuity_fraction": round(self.bar_continuity_fraction, 6),
             "coverage_run_id": self.coverage_run_id,
+            "coverage_run_ids": list(self.coverage_run_ids),
             "underlyings": list(self.underlyings),
+            "per_underlying": [
+                {
+                    "underlying": sym,
+                    "cycles_bracket_fraction": round(bracket, 6),
+                    "bar_continuity_fraction": round(continuity, 6),
+                    "coverage_run_id": run_id,
+                }
+                for sym, bracket, continuity, run_id in self.per_underlying
+            ],
+            "members_below_floor": [
+                {
+                    "underlying": sym,
+                    "cycles_bracket_fraction": round(bracket, 6),
+                    "bar_continuity_fraction": round(continuity, 6),
+                    "coverage_run_id": run_id,
+                }
+                for sym, bracket, continuity, run_id in self.members_below_floor
+            ],
+            "or0c_reading": "open: pooled computed, per-symbol disclosed",
         }
 
 
 def coverage_preflight(
-    summary: OptionsCoverageSummary | None,
+    coverage: OptionsCoverageSummary | SnapshotCoverage | None,
     *,
     evaluation: OptionsEvaluationConfig | None = None,
 ) -> CoveragePreflight:
-    """Is the stored options coverage above gate 0.c's and 0.d's pre-registered floors?"""
+    """Is the stored options coverage above gate 0.c's and 0.d's pre-registered floors?
+
+    Given a :class:`SnapshotCoverage` — what every evaluation path passes — the
+    two floors are asked of the pool of **the snapshot's own underlyings**, and
+    further refusals apply: an underlying with no recorded coverage; a member
+    with no per-cycle records, no expected sessions, or listed as failed by the
+    run it is read from (never pooled silently); runs that disagree on a dataset
+    identity; and an empty set.  The floors themselves are read from
+    ``OptionsEvaluationConfig`` and are the same two numbers for every
+    underlying set.  A bare ``OptionsCoverageSummary`` is judged as it stands
+    (one run, all of its underlyings).
+
+    ``passed`` is the POOLED reading.  The per-symbol reading of the same floors
+    is reported in ``members_below_floor`` and does not change ``passed``:
+    which reading binds is operator item OR-0c, which is open, and the commands
+    act on it (a warning everywhere; a refusal on a ``--confirm`` evaluation).
+    """
     ev = evaluation or OptionsEvaluationConfig()
+    floors = (float(ev.gate_0c_cycles_bracket), float(ev.gate_0d_session_bars))
+    members_below_floor: tuple[tuple[str, float, float, int | None], ...] = ()
+    reasons: list[str] = []
+    run_ids: tuple[int, ...] = ()
+    per_underlying: tuple[tuple[str, float, float, int | None], ...] = ()
+    summary: OptionsCoverageSummary | None
+    if isinstance(coverage, SnapshotCoverage):
+        summary = coverage.summary
+        run_ids = coverage.run_ids
+        per_underlying = tuple(
+            (
+                p.underlyings[0] if p.underlyings else "?",
+                p.cycles_bracket_fraction,
+                p.bar_continuity_fraction,
+                p.run_id,
+            )
+            for p in coverage.per_underlying
+        )
+        members_below_floor = tuple(
+            row for row in per_underlying if row[1] < floors[0] or row[2] < floors[1]
+        )
+        reasons.extend(coverage.member_refusals)
+        if not coverage.underlyings:
+            reasons.append("the snapshot holds no underlyings to read coverage for")
+        for sym in coverage.missing:
+            reasons.append(
+                f"no options cycle-backfill run overlapping the window records coverage for "
+                f"{sym}, so gate 0.c and 0.d have no coverage to read for it — backfill it or "
+                "build the snapshot without it (docs/research/options_designs/IO2_RUNBOOK.md)"
+            )
+        reasons.extend(coverage.inconsistencies)
+        if summary is None:
+            if not reasons:
+                reasons.append("no coverage could be assembled for the snapshot's underlyings")
+            return CoveragePreflight(
+                passed=False,
+                reasons=tuple(reasons),
+                bracket_fraction=0.0,
+                bar_continuity_fraction=0.0,
+                coverage_run_id=None,
+                underlyings=coverage.underlyings,
+                floors=floors,
+            )
+    else:
+        summary = coverage
+        if summary is not None and summary.run_id is not None:
+            run_ids = (summary.run_id,)
+        if summary is not None and summary.underlyings_failed:
+            reasons.append(
+                f"the coverage run lists {', '.join(summary.underlyings_failed)} as FAILED; a "
+                "failed underlying's cycle records are incomplete and cannot be pooled"
+            )
     if summary is None:
         return CoveragePreflight(
             passed=False,
@@ -570,10 +955,16 @@ def coverage_preflight(
             bracket_fraction=0.0,
             bar_continuity_fraction=0.0,
             coverage_run_id=None,
+            floors=floors,
         )
-    reasons: list[str] = []
     if not summary.underlyings:
         reasons.append("the coverage run requested no underlyings")
+    if summary.cycles_total == 0:
+        reasons.append("the coverage records no cycles at all, so gate 0.c has nothing to read")
+    elif summary.sessions_expected == 0:
+        reasons.append(
+            "the coverage records zero expected sessions, so gate 0.d has nothing to read"
+        )
     if summary.cycles_bracket_fraction < ev.gate_0c_cycles_bracket:
         reasons.append(
             f"cycle bracketing {summary.cycles_bracket_fraction:.3f} is below gate 0.c's "
@@ -595,6 +986,10 @@ def coverage_preflight(
         bar_continuity_fraction=summary.bar_continuity_fraction,
         coverage_run_id=summary.run_id,
         underlyings=tuple(summary.underlyings),
+        coverage_run_ids=run_ids,
+        per_underlying=per_underlying,
+        members_below_floor=members_below_floor,
+        floors=floors,
     )
 
 
@@ -952,36 +1347,86 @@ def _q_by_underlying(
     session: Session,
     symbols: Sequence[str],
     *,
-    as_of: date,
-    closes: Mapping[str, float],
-    source: str,
+    window: OptionsWindow,
+    trades: Sequence[OptionTrade],
+    source: str = Q_SERIES_SOURCE,
 ) -> tuple[dict[str, dict[str, Any]], int]:
-    """``(value, source, as_of)`` per underlying — a defaulted ``q`` is NOT a value.
+    """Summarise the derived ``q`` series per underlying over the PRE-SEALED span.
 
-    Gate 0.g distinguishes a recorded, sourced ``q = 0.0`` from an unset one that
-    fell through the pricer's default.  ``trailing_dividend_yield`` returns ``None``
-    rather than 0.0 when there is no dividend history, and that ``None`` is
-    recorded as an absent record, so the distinction survives to the gate.
+    Gate 0.g distinguishes a recorded, sourced ``q`` from one that fell through
+    the pricer's 0.0 default, so the record is a ``(value, source, as_of)``
+    triple plus coverage, never a bare float.  Everything here is read at or
+    before ``window.pre_sealed_end``: the previous single ``as_of`` at
+    ``window.end`` read a SEALED-window date, which an assembler that runs
+    before the sealed test may not do.
+
+    An underlying counts as DEFAULTED when the series has no row on the
+    pre-sealed span, or when any pre-sealed entry it took has no row on its
+    signal session — the only two ways a priced structure can have rested on an
+    unsourced ``q``.  ``derive_dividend_yield_series`` writes no row where there
+    is no dividend history, so an absent row stays absent here too.
     """
     out: dict[str, dict[str, Any]] = {}
     defaulted = 0
-    for sym in symbols:
-        ref = closes.get(sym, 0.0)
-        dy = (
-            trailing_dividend_yield(session, sym, as_of, reference_close=ref, source=source)
-            if ref > 0
-            else None
+    lo, hi = window.start, window.pre_sealed_end
+    traded: dict[str, set[date]] = {}
+    for t in trades:
+        if lo <= t.entry_date <= hi:
+            traded.setdefault(t.underlying_symbol.upper(), set()).add(t.entry_date)
+    for raw in symbols:
+        # ONE normalised key for the query, the traded-session lookup and the
+        # record: a lower-case symbol must not find its rows yet miss its trades.
+        sym = raw.upper().strip()
+        rows = list(
+            session.execute(
+                select(DividendYieldDaily.session_date, DividendYieldDaily.q)
+                .where(
+                    DividendYieldDaily.symbol == sym,
+                    DividendYieldDaily.source == source,
+                    DividendYieldDaily.session_date >= lo,
+                    DividendYieldDaily.session_date <= hi,
+                )
+                .order_by(DividendYieldDaily.session_date)
+            )
         )
-        if dy is None:
+        sessions_traded = traded.get(sym, set())
+        if not rows:
             defaulted += 1
             continue
+        covered = {d for d, _ in rows}
+        uncovered = sorted(sessions_traded - covered)
+        if uncovered:
+            defaulted += 1
+        last_date, last_q = rows[-1]
         out[sym] = {
-            "value": dy.q,
-            "source": dy.source,
-            "as_of": dy.window_end.isoformat(),
-            "payments": dy.payments,
+            "value": float(last_q),
+            "source": source,
+            "as_of": last_date.isoformat(),
+            "first_session": rows[0][0].isoformat(),
+            "last_session": last_date.isoformat(),
+            "sessions_covered": len(rows),
+            "sessions_traded": len(sessions_traded),
+            "sessions_traded_uncovered": [d.isoformat() for d in uncovered],
+            "span_end": hi.isoformat(),
         }
     return out, defaulted
+
+
+def _q_series_provenance(
+    session: Session,
+    symbols: Sequence[str],
+    *,
+    window: OptionsWindow,
+    source: str = Q_SERIES_SOURCE,
+) -> tuple[str, int | None]:
+    """``(digest, latest derivation run id)`` for the series gate 0.g read.
+
+    The digest covers exactly the span ``_q_by_underlying`` summarises — the
+    pre-sealed span — so two evaluations on the same snapshot that priced on
+    different ``q`` series are distinguishable in the recorded evidence.
+    """
+    digest = q_series_digest(session, symbols, window.start, window.pre_sealed_end, source)
+    return digest, latest_q_series_run_id(session)
 
 
 def _folds(
@@ -1146,20 +1591,6 @@ def assemble_options_evidence(
     # leaking into the gating path, and gate 4b checks the count for exactly that.
     oos_stressed = [t for t in stressed_trades if (t.underlying_symbol, t.entry_date) in oos_keys]
 
-    closes = {r.symbol: 0.0 for r in runs}
-    for r in runs:
-        if r.coverage.last_bar is not None:
-            series = PriceSeries.load(
-                session,
-                r.symbol,
-                r.coverage.last_bar,
-                r.coverage.last_bar,
-                source=source,
-                adjusted=UNDERLYING_ADJUSTED,
-            )
-            if len(series):
-                closes[r.symbol] = float(series.close[-1])
-
     # D5a §3: the width is a constant of the version, so the declared half of gate 0.5
     # takes no argument; the observed half is recovered from the trades by the gate.
     identity = strategy.structure_identity()
@@ -1176,7 +1607,6 @@ def assemble_options_evidence(
         ev=ev,
         source=source,
         symbols=symbols,
-        closes=closes,
         dte_targets=dte_targets,
         identity=identity,
         limits_source=limits_source,
@@ -1350,9 +1780,9 @@ def assemble_options_evidence(
     return AssembledEvidence(
         evidence=evidence,
         per_underlying=tuple(runs),
-        coverage=latest_options_coverage_summary(
-            session, window_start=window.start, window_end=window.end
-        ),
+        coverage=dataset_snapshot_coverage(
+            session, dataset_snapshot, window_start=window.start, window_end=window.end
+        ).summary,
         clustered_d4=clustered_d4,
         clustered_f11=clustered_f11,
         boundary=boundary,
@@ -1409,7 +1839,6 @@ def _availability(
     ev: OptionsEvaluationConfig,
     source: str,
     symbols: Sequence[str],
-    closes: Mapping[str, float],
     dte_targets: Sequence[int],
     identity: StructureIdentity,
     limits_source: str,
@@ -1436,9 +1865,8 @@ def _availability(
         1.0 - (t.unmarked_sessions / t.bars_held) for t in trades if t.bars_held > 0
     ]
 
-    q_map, q_defaulted = _q_by_underlying(
-        session, symbols, as_of=window.end, closes=closes, source=source
-    )
+    q_map, q_defaulted = _q_by_underlying(session, symbols, window=window, trades=trades)
+    q_digest, q_run_id = _q_series_provenance(session, symbols, window=window)
 
     cost_by_multiplier: dict[str, float] = {}
     for outcome in (dual.baseline, dual.stressed):
@@ -1499,6 +1927,8 @@ def _availability(
         q_by_underlying=q_map,
         q_defaulted_count=q_defaulted
         + sum(1 for t in trades if not t.q_source or t.q_source == "unsourced"),
+        q_series_digest=q_digest,
+        q_series_run_id=q_run_id,
         deliverable_refusal_count=counters.shares_per_contract_refusals,
         deliverable_refusals=(
             ({"count": counters.shares_per_contract_refusals, "scope": "pooled"},)
@@ -1708,12 +2138,19 @@ __all__ = [
     "OPTIONS_CLUSTER_BOOTSTRAP_SEED",
     "AssembledEvidence",
     "ClusteredBootstrap",
+    "OR0C_DECISIONS_FILE",
+    "OR0C_ITEM",
     "CoveragePreflight",
     "OptionsEvidenceError",
     "OptionsStrategy",
     "UnderlyingRun",
     "assemble_options_evidence",
     "coverage_preflight",
+    "or0c_pooled_decision_recorded",
+    "snapshot_options_coverage",
+    "pool_snapshot_coverage",
+    "dataset_snapshot_coverage",
+    "SnapshotCoverage",
     "cluster_key_cycle_only",
     "cluster_key_underlying_cycle",
     "clustered_bootstrap_ci",

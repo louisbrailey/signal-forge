@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 from sqlalchemy.orm import Session
 
+from signalforge.db.models import DividendYieldDaily
 from signalforge.research.options_gates import OptionsGateThresholds, gate_5_sensitivity
 from signalforge.research.options_sensitivity import (
     GridTooLarge,
@@ -155,10 +157,18 @@ def test_oat_points_exclude_the_baseline_value() -> None:
 # the cache
 # --------------------------------------------------------------------------- #
 def test_cache_key_is_version_snapshot_and_config_hash() -> None:
-    a = cache_key(version="0.1.0", snapshot_key="snap", options_config_hash="h1")
-    assert a != cache_key(version="0.2.0", snapshot_key="snap", options_config_hash="h1")
-    assert a != cache_key(version="0.1.0", snapshot_key="other", options_config_hash="h1")
-    assert a != cache_key(version="0.1.0", snapshot_key="snap", options_config_hash="h2")
+    a = cache_key(
+        version="0.1.0", snapshot_key="snap", options_config_hash="h1", q_series_digest="d1"
+    )
+    assert a != cache_key(
+        version="0.2.0", snapshot_key="snap", options_config_hash="h1", q_series_digest="d1"
+    )
+    assert a != cache_key(
+        version="0.1.0", snapshot_key="other", options_config_hash="h1", q_series_digest="d1"
+    )
+    assert a != cache_key(
+        version="0.1.0", snapshot_key="snap", options_config_hash="h2", q_series_digest="d1"
+    )
 
 
 def test_cache_round_trip_and_hit_flag(tmp_path: Path) -> None:
@@ -181,7 +191,9 @@ def test_cache_round_trip_and_hit_flag(tmp_path: Path) -> None:
         inert_axes=(),
         reasons=(),
     )
-    key = cache_key(version="0.1.0", snapshot_key="snap", options_config_hash="h")
+    key = cache_key(
+        version="0.1.0", snapshot_key="snap", options_config_hash="h", q_series_digest="d"
+    )
     store_cached(key, report, tmp_path)
     back = load_cached(key, tmp_path)
     assert back is not None
@@ -192,7 +204,9 @@ def test_cache_round_trip_and_hit_flag(tmp_path: Path) -> None:
 
 
 def test_a_corrupt_cache_entry_is_a_miss(tmp_path: Path) -> None:
-    key = cache_key(version="0.1.0", snapshot_key="snap", options_config_hash="h")
+    key = cache_key(
+        version="0.1.0", snapshot_key="snap", options_config_hash="h", q_series_digest="d"
+    )
     (tmp_path / "options_sensitivity_cache").mkdir(parents=True, exist_ok=True)
     (tmp_path / "options_sensitivity_cache" / f"{key}.json").write_text("{not json")
     assert load_cached(key, tmp_path) is None
@@ -219,6 +233,74 @@ def test_a_second_run_with_identical_inputs_is_a_cache_hit(session: Session) -> 
         session, strat, _factory(strat), **{**kwargs, "options_config_hash": "other"}  # type: ignore[arg-type]
     )
     assert third.cache_hit is False
+
+
+def _seed_q(session: Session, symbol: str, d: date, q: float) -> DividendYieldDaily:
+    row = DividendYieldDaily(
+        symbol=symbol,
+        session_date=d,
+        q=q,
+        source="vendor_dividends",
+        payments=4,
+        window_start=d - timedelta(days=365),
+        reference_close=500.0,
+    )
+    session.add(row)
+    session.commit()
+    return row
+
+
+def test_the_cache_key_carries_the_q_series_digest() -> None:
+    base = {"version": "0.1.0", "snapshot_key": "snap", "options_config_hash": "h"}
+    assert cache_key(**base, q_series_digest="a" * 64) != cache_key(
+        **base, q_series_digest="b" * 64
+    )
+    with pytest.raises(ValueError, match="q-series digest"):
+        cache_key(**base, q_series_digest="")
+
+
+def test_a_changed_q_series_is_a_cache_miss_and_an_unchanged_one_a_hit(
+    session: Session,
+) -> None:
+    """The stale-grid case: a grid cached before the dividend series existed
+    (or before a re-derivation) must not be served once the ladder would price
+    on a different ``q``."""
+    snap, _ = seed_everything(session)
+    strat = StubOptionsStrategy()
+    w = window()
+    kwargs = {
+        "baseline_params": {"dte_target": 35, "width_pct": 0.01},
+        "dataset_snapshot": snap,
+        "window": w,
+        "version": "0.1.0",
+        "options_config_hash": "h",
+        "source": SOURCE,
+    }
+
+    def run() -> OptionsSensitivityReport:
+        return run_options_sensitivity(session, strat, _factory(strat), **kwargs)  # type: ignore[arg-type]
+
+    # cached while the series has ZERO rows
+    assert run().cache_hit is False
+    assert run().cache_hit is True
+
+    # the series comes into existence -> miss, then a hit while it is unchanged
+    row = _seed_q(session, "SPY", w.start + timedelta(days=1), 0.013)
+    assert run().cache_hit is False
+    assert run().cache_hit is True
+
+    # a re-derivation rewrites a value in place -> miss, then a hit again
+    row.q = 0.014
+    session.commit()
+    assert run().cache_hit is False
+    assert run().cache_hit is True
+
+    # a row in the SEALED window is outside the evaluated span: still a hit
+    _seed_q(session, "SPY", w.end, 0.5)
+    assert run().cache_hit is True
+    # ... and so is a row for an underlying the snapshot does not evaluate
+    _seed_q(session, "ZZZ", w.start + timedelta(days=1), 0.5)
+    assert run().cache_hit is True
 
 
 def test_summary_feeds_gate_5(session: Session) -> None:

@@ -42,6 +42,8 @@ from signalforge.research.options_gates import OPTIONS_LADDER_SHAPE
 from tests.research.options_evidence_support import (
     EXPIRIES,
     SOURCE,
+    WINDOW_END,
+    WINDOW_START,
     StubOptionsStrategy,
     seed_coverage_run,
     seed_everything,
@@ -292,6 +294,52 @@ def test_assembler_produces_a_complete_evidence_bundle(session: Session) -> None
     # the sealed year was not requested, so nothing can be sealed
     assert ev.sealed is None
     assert ev.extra_provenance["sealed_window_evaluated"] is False
+
+
+def test_assembled_availability_records_which_q_series_it_read(session: Session) -> None:
+    """Two evaluations on the SAME snapshot are told apart by the q-series
+    digest and the latest derivation run recorded in gate 0.g's inputs."""
+    from signalforge.data.options_corporate_actions import derive_dividend_yield_series
+    from signalforge.db.models import DividendEvent
+    from signalforge.db.types import utcnow
+
+    snap, _ = seed_everything(session)
+    strat = StubOptionsStrategy()
+
+    def availability():  # type: ignore[no-untyped-def]
+        return assemble(
+            session,
+            strat,
+            dataset_snapshot=snap,
+            window=window(),
+            source=SOURCE,
+            proxy_symbol="SPY",
+        ).evidence.availability
+
+    before = availability()
+    assert len(before.q_series_digest) == 64 and before.q_series_run_id is None
+
+    for sym in ("SPY", "QQQ"):
+        session.add(
+            DividendEvent(
+                symbol=sym,
+                ex_dividend_date=WINDOW_START - timedelta(days=30),
+                cash_amount=1.5,
+                frequency=4,
+                dividend_type="CD",
+                currency="USD",
+                source="massive_options",
+                ingested_at=utcnow(),
+            )
+        )
+    session.flush()
+    run = derive_dividend_yield_series(
+        session, ["SPY", "QQQ"], WINDOW_START, WINDOW_END, source=SOURCE
+    )
+    after = availability()
+    assert after.q_series_run_id == run.id
+    assert after.q_series_digest != before.q_series_digest
+    assert availability().q_series_digest == after.q_series_digest  # unchanged -> same
 
 
 def test_assembler_never_writes_a_row(session: Session) -> None:

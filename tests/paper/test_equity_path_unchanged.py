@@ -1,7 +1,26 @@
 """Equity accounting/evidence golden and actor authorization regressions.
 
-Updated for the conservative ledger correction: one share under the 5% cap,
-rounded execution-price cash accounting, and explicit acceptance risk evidence.
+Updated for the conservative ledger correction (rounded execution-price cash
+accounting, explicit acceptance risk evidence) and again for the operator
+decision of 2026-10-03 (paper only): per-symbol ceiling 5% -> 10%, open-risk
+ceiling 1.5% -> 3.0%, sector cap always applied, per-book evidence keys.
+
+Hand derivation of the golden below (equity = cash = 10,000; no open positions):
+
+* fill = 471.00 * (1 + 0.00055) = 471.25905 -> 471.26
+* adverse stop fill = 466 * (1 - 0.00055) = 465.7437 -> 465.74;
+  risk/share = 471.26 - 465.74 = 5.52
+* share caps: candidate risk 25 / 5.52 -> 4; per-trade 0.5% = 50 / 5.52 -> 9;
+  open risk min(3.0 ceiling, 1.5 configured) = 1.5% = 150 / 5.52 -> 27;
+  cash 10,000 / 471.26 -> 21; symbol min(10 ceiling, 10 configured) = 10% =
+  1,000 / 471.26 -> 2 (was 5% -> 1); gross 60% = 6,000 / 471.26 -> 12;
+  sector min(20 ceiling, 25 configured) = 20% = 2,000 / 471.26 -> 4
+* shares = min = 2 (symbol binds); accepted risk = 2 * 5.52 = 11.04
+* cash after = 10,000 - 2 * 471.26 = 9,057.48
+* spread attribution = 471 * 2 * 2.5 bps = 0.2355 -> 0.24;
+  slippage attribution = (471.26 - 471.00) * 2 - 0.24 = 0.28
+* only the sector limit is still narrowed below its configured value (20 < 25);
+  the symbol ceiling now equals the configured 10%.
 Automatic-actor coverage uses a genuinely approved, fresh, enabled fixture.
 """
 
@@ -33,13 +52,13 @@ VOLATILE_KEYS = ("code_version", "as_of", "created_at", "submitted_at", "filled_
 #: place. If a future change moves any number here, it is a change to the paper
 #: path and not an incidental refactor.
 GOLDEN = {
-    "account_cash_after": "9528.740000",
+    "account_cash_after": "9057.480000",
     "fill": {
         "commission": "0.000000",
         "price": "471.260000",
-        "qty": 1,
-        "slippage": "0.140000",
-        "spread_cost": "0.120000",
+        "qty": 2,
+        "slippage": "0.280000",
+        "spread_cost": "0.240000",
     },
     "order": {
         "assumptions_json": {
@@ -49,12 +68,12 @@ GOLDEN = {
             "spread_bps": 5.0,
         },
         "order_type": "market",
-        "qty": 1,
+        "qty": 2,
         "side": "long",
     },
     "position": {
         "avg_price": "471.260000",
-        "qty": 1,
+        "qty": 2,
         "realized_pnl": "0.000000",
         "side": "long",
         "stop_level": 466.0,
@@ -69,7 +88,7 @@ GOLDEN = {
             "entry_zone": [470.0, 472.0],
             "fill_price": 471.26,
             "invalidation": 466.0,
-            "shares": 1,
+            "shares": 2,
             "target": 485.0,
             "time_stop_days": 10,
             "acceptance_context": {"mode": "historical_replay", "as_of": "2024-02-01"},
@@ -83,6 +102,8 @@ GOLDEN = {
                 "symbol_before": "0",
                 "sector_before": "0",
                 "sector": "tech",
+                "account": "default",
+                "book_strategy_version_id": None,
                 "configured_limits": {
                     "per_trade_risk_pct": 0.5,
                     "max_daily_portfolio_risk_pct": 1.5,
@@ -94,31 +115,28 @@ GOLDEN = {
                 "effective_limits": {
                     "per_trade_risk_pct": 0.5,
                     "max_daily_portfolio_risk_pct": 1.5,
-                    "max_position_concentration_pct": 5.0,
+                    "max_position_concentration_pct": 10.0,
                     "max_portfolio_exposure_pct": 60.0,
                     "max_correlated_exposure_pct": 20.0,
                 },
                 "candidate_risk_dollars": "25.0",
                 "risk_per_share": "5.52",
                 "exit_slippage_bps": 3.0,
-                "accepted_risk_dollars": "5.52",
+                "accepted_risk_dollars": "11.04",
                 "share_caps": {
                     "candidate_risk": 4,
                     "per_trade_risk": 9,
                     "open_risk": 27,
                     "cash": 21,
-                    "symbol": 1,
+                    "symbol": 2,
                     "gross": 12,
                     "sector": 4,
                 },
-                "shares": 1,
+                "shares": 2,
                 "reduced": True,
                 "reductions": ["symbol"],
                 "binding_caps": ["symbol"],
-                "limit_overrides_narrowed": [
-                    "max_position_concentration_pct",
-                    "max_correlated_exposure_pct",
-                ],
+                "limit_overrides_narrowed": ["max_correlated_exposure_pct"],
             },
         },
         "snapshot_decision": {"actor": "local-user", "automatic": False, "note": ""},
