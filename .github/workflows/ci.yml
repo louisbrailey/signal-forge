@@ -51,7 +51,12 @@ jobs:
       # in its own tmp data dir + SQLite file (tests/conftest.py), so workers
       # share no state; pytest-cov combines the per-worker coverage data.
       - name: Pytest (with coverage)
-        run: uv run pytest -n auto --cov-report=xml
+        run: uv run pytest -n auto -m "not serial" --cov-report=xml
+
+      # Wall-clock-sensitive tests (marked `serial`) run alone, after the parallel
+      # pass, so nothing competes for the CPU. Never skipped: this step is required.
+      - name: Pytest (serial, timing-sensitive)
+        run: uv run pytest -m serial --cov-append --cov-report=xml
 
       - name: Safety invariants must pass
         run: uv run pytest -m safety -q
