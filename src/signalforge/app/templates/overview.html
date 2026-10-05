@@ -49,6 +49,8 @@
         <span class="text-sm {{ 'text-emerald-600' if paper.return_pct >= 0 else 'text-red-600' }}">({{ '%+.2f' | format(paper.return_pct) }}%)</span></p>
       <p class="text-sm text-slate-600">cash ${{ '%.2f' | format(paper.cash) }} · {{ paper.n_open }} open · {{ paper.n_closed }} closed</p>
       <p class="text-sm text-slate-600">unrealized {{ '%+.2f' | format(paper.unrealized_pnl) }} · realized {{ '%+.2f' | format(paper.realized_pnl) }}</p>
+      {% for b in paper.books %}<p class="text-xs text-slate-500">{{ b.book }}: ${{ '%.2f' | format(b.equity_estimate) }} · {{ b.n_open }} open</p>{% endfor %}
+      <p class="text-xs text-slate-500">Combined across books; per-symbol combined exposure on <a class="underline" href="/portfolio">Portfolio</a>.</p>
     {% else %}
       <p class="mt-2 text-sm text-slate-500">No paper account — run <code>signalforge paper init --cash 10000</code>.</p>
     {% endif %}

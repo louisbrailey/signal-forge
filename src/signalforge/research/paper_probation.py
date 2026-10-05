@@ -34,6 +34,7 @@ from signalforge.db.models import (
     StrategySealedTest,
     StrategyVersion,
 )
+from signalforge.db.paper_voids import voided_position_ids
 from signalforge.db.types import utcnow
 from signalforge.domain import StrategyStatus
 from signalforge.research.approval_scope import approved_scopes
@@ -86,7 +87,12 @@ def _paper_trade_summary(
     )
     r_values: list[float] = []
     first_date: datetime | None = None
+    # A voided trade (append-only ``legacy_void`` correction) never happened:
+    # it is not a closed trade and contributes no R.
+    voided = voided_position_ids(session)
     for p in positions:
+        if p.id in voided:
+            continue
         if p.stop_level is None:
             continue
         per_share_risk = abs(float(p.avg_price) - p.stop_level)

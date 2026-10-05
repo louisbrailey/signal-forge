@@ -48,6 +48,20 @@ from signalforge.paper.portfolio import portfolio_snapshot
 #:
 #: Regenerate ONLY with an explanation of what moved and why it is safe.
 #:
+#: **Regenerated 2026-10-03 — three pins moved, by operator decision, in the PR
+#: "Paper: separate books per approved version ...":**
+#:
+#: * ``record_decision`` — ``account_name`` now defaults to None and the account
+#:   is resolved through ``_resolve_account`` (the candidate's own BOOK). The
+#:   trade row it writes is otherwise identical.
+#: * ``_time_stop_date`` — counts XNYS sessions instead of calendar days, to
+#:   match the backtested N-bar rule (see ``tests/paper/test_time_stop_sessions.py``).
+#: * ``paper/auto_simulate.py`` — per-book open-position check and daily cap,
+#:   and book/rank/id ordering instead of ordering by the horizon string
+#:   (see ``tests/paper/test_books.py``). Still contains no options code.
+#:
+#: The other seven function pins are unchanged from the parent commit.
+#:
 #: Recorded as the **first 32 hex characters** of each digest. 128 bits is far
 #: more than a change detector needs, and it keeps every line inside the line
 #: limit with the ``allowlist secret`` pragma the secret-scan gate requires —
@@ -61,14 +75,14 @@ EQUITY_FUNCTION_HASHES = {
     "_exit_price": "41fc4aff71ed45a24540ec1088ca801c",  # pragma: allowlist secret
     "_plan": "70df55354a44f326646850b96ad707c0",  # pragma: allowlist secret
     "_candidate_snapshot": "3c650839b5988a1e0bc2cf0ac85f4991",  # pragma: allowlist secret
-    "record_decision": "d461d60df12d850362ff0fb14394c8cf",  # pragma: allowlist secret
-    "_time_stop_date": "23aa985297150bfc23fdea2e4361b5a9",  # pragma: allowlist secret
+    "record_decision": "376047d7fb73d48fa67d37904dfc8d65",  # pragma: allowlist secret
+    "_time_stop_date": "2468c3cb6358c221d3ebb1efba748f89",  # pragma: allowlist secret
     "auto_simulate_enabled": "49904cbb2b70b6daf1ec03732e688b85",  # pragma: allowlist secret
     "_account": "dda728d6c95648c5122e3124f15a2466",  # pragma: allowlist secret
 }
 
 #: sha256 of the WHOLE of ``paper/auto_simulate.py``. I-O6 does not edit it.
-AUTO_SIMULATE_MODULE_HASH = "67088b4dfb9feb43ecbdbfc8aea384d6"  # pragma: allowlist secret
+AUTO_SIMULATE_MODULE_HASH = "66ded95d1e73ac67c28592cf0a088a38"  # pragma: allowlist secret
 
 
 def _source_hash(name: str) -> str:
@@ -110,14 +124,17 @@ def test_paper_auto_simulate_is_byte_identical() -> None:
 # Behavioural goldens over the two functions that DID change
 # --------------------------------------------------------------------------- #
 
-# Correctness update: 5% cap -> one share; cash = 10000 - 471.26, costs embedded.
+# Operator decision 2026-10-03 (paper only): per-symbol ceiling 5% -> 10%.
+# 10% of 10,000 = 1,000 -> floor(1,000 / 471.26) = 2 shares (was 1);
+# cash = 10,000 - 2 * 471.26 = 9,057.48; spread = 471 * 2 * 2.5bps = 0.2355 -> 0.24;
+# slippage = (471.26 - 471) * 2 - 0.24 = 0.28. Costs stay embedded in the fill.
 ACCEPT_GOLDEN = {
-    "cash_after": "9528.740000",
+    "cash_after": "9057.480000",
     "fill_price": "471.260000",
-    "shares": 1,
+    "shares": 2,
     "side": "long",
-    "spread_cost": "0.120000",
-    "slippage": "0.140000",
+    "spread_cost": "0.240000",
+    "slippage": "0.280000",
     "commission": "0.000000",
     "stop_level": 466.0,
     "target_level": 485.0,

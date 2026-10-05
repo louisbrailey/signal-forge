@@ -34,22 +34,114 @@ account estimates and worker liveness. `/ops` supplies feed and job detail;
 A fresh heartbeat only proves the process is responding, not that data is fresh.
 The startup heartbeat now explicitly says catch-up is running during ingestion.
 
-The active account and switches are read from the database. This release does
+The active accounts and switches are read from the database. This release does
 not reset cash or enable an execution adapter. The October 2 audit found a
 $30,000 equity paper account, automatic acceptance enabled, and a two-acceptance
-UTC-day cap. A cap, open position, stale data, missing scope, or failed evidence
-gate can correctly prevent trading. Rejected and watched decisions are retained;
+UTC-day cap (now applied per book, see below). A cap, open position, stale data,
+missing scope, or failed evidence gate can correctly prevent trading. Rejected and watched decisions are retained;
 new sessions produce new candidates rather than rewriting old decisions.
+
+## Separate books per approved strategy version (2026-10-03)
+
+Each `PAPER_APPROVED` strategy version trades its **own equity paper book**: a
+`paper_account` row whose `strategy_version_id` is that version (unique).
+
+- **Why.** With one shared book, the medium-swing version took a symbol and the
+  short-swing version was refused with "an open paper position already exists";
+  auto-simulation also ordered candidates by the horizon *string*, so
+  `MEDIUM_SWING` always decided before `SHORT_SWING`. The short-swing version
+  accumulated no forward evidence at all.
+- **How books are keyed.** `paper_account.strategy_version_id`. A book is created
+  lazily and idempotently the first time an approved version needs it, named
+  `book-sv<id>`, starting from the same reference equity as the legacy `default`
+  account's `initial_cash`. Creation is recorded in `audit_log`
+  (`paper.book_created`).
+- **How existing rows are attributed.** Nothing is moved. The migration keys the
+  legacy `default` account to the one strategy version all of its positions
+  belong to — on the live database the medium-swing version, which owns all six
+  accepted trades — so `default` **is** that version's book. If an account's
+  positions belong to more than one version (or none), it stays unkeyed.
+  Historical REJECTED/WATCH decisions of other versions remain recorded where
+  they were written (`paper_trade` is immutable); they carry no position or cash.
+- **Unattributed decisions.** A candidate whose version is not `PAPER_APPROVED`
+  (a manual acceptance of an experimental signal) never lands in an approved
+  version's book: it goes to the unkeyed `default` account or, once `default` is
+  a version's book, to the unkeyed `manual` account (created the same lazy way).
+- **Per book:** the open-position rule (the same symbol may be held by two
+  versions at once), every risk cap below, and the auto-simulation daily cap
+  (`auto_simulate_max_per_day`, default 2 **per book**).
+- **Order.** Books are decided in strategy-version-id order; inside a book,
+  candidates by rank then id. Deterministic and repeatable.
+- **Views.** `/portfolio`, `/paper-console` and the overview show one row per
+  book. Because a book's caps cannot see another book's position, those pages
+  also show the **combined exposure per symbol across all books**; treat that
+  table as the account-level concentration figure. `signalforge paper snapshot`
+  prints the same `books` and `symbol_exposure` data.
+- **Not changed.** Scan-time candidate sizing still reads the `default`
+  account's cash; the ledger re-sizes against the candidate's own book at
+  acceptance and takes the smaller size.
 
 ## Acceptance safeguards
 
 New equity paper fills are long-only and cash-funded. At acceptance, the ledger
-rechecks the current account under a write lock and uses the stricter of the
-configured limit and these ceilings: 0.5% planned risk per trade, 1.5% aggregate
-open stop risk, 5% allocation per symbol, 20% per known sector, and no leverage.
+rechecks the candidate's **book** under a write lock and uses the stricter of the
+configured limit and these ceilings (constants in `paper/ledger.py`):
+
+| Limit | Ceiling | Note |
+|---|---|---|
+| Planned risk per trade | 0.5% of book equity | unchanged |
+| Aggregate open stop risk | **3.0%** | ceiling raised from 1.5%, **no effect**: configured 1.5% still binds (see below) |
+| Allocation per symbol | **10%** | raised from 5% — operator decision 2026-10-03, paper only |
+| Allocation per sector | 20% | unchanged; now applies to every instrument |
+| Gross exposure | 100% (no leverage) | unchanged |
+
+The effective limit is always `min(configured value, ceiling)`. Stated plainly:
+
+- **Per symbol: 10% is effective.** Configured `max_position_concentration_pct`
+  is 10 and the ceiling is 10.
+- **Open risk: 1.5% is effective. The 3.0% ceiling has NO effect** while
+  `max_daily_portfolio_risk_pct` is configured at 1.5 — and it stays 1.5
+  (operator decision 2026-10-04). The ceiling only says how far the setting
+  *could* be raised; it raises nothing by itself.
+- **Raising it has a cost.** `risk` is part of the approved-scope `config_hash`.
+  Raising `max_daily_portfolio_risk_pct` would change `config_hash` and take
+  both approved strategy versions **out of scope** (no automatic acceptance)
+  until they are re-evaluated. This release changes no configuration, so the
+  approved scope hashes are unchanged (pinned by
+  `tests/paper/test_open_risk_config_scope_pin.py` and
+  `tests/execution/test_config_scope.py`).
+
 Stops and ATR-based candidate sizing remain deterministic. Stops cannot guarantee
-maximum loss through a gap. Existing larger positions are not silently liquidated.
-The immutable decision record stores the binding limits and size reductions.
+maximum loss through a gap. Existing larger positions are not resized or
+liquidated, but they count in full toward every cap for new entries.
+The immutable decision record stores the book, the binding limits and size reductions.
+
+### Sectors
+
+`instrument.sector` was blank on every row, so the sector cap never operated.
+
+- **Unknown is one capped bucket.** An instrument with a blank or "unknown"
+  sector belongs to the single bucket `UNKNOWN`, capped at 20% like any sector.
+  Unknown never means unlimited.
+- **Populating sectors.** `uv run signalforge universe sectors --refresh` derives
+  a stable label per instrument: stocks from the provider SIC code (the same
+  2-digit SIC grouping the universe screen uses, named in
+  `universe/sectors.py`, with a few 3–4 digit refinements such as 737 software →
+  Technology); a sector SPDR maps to its sector (`XLK` → Technology); every other
+  ETF is its own bucket `ETF:<symbol>`. Stored SIC codes are used first; a stock
+  without one costs one reference request (`--max-requests`, resumable). Without
+  `--refresh` the command is a read-only count per sector.
+- SIC-derived labels are approximate (not GICS) and exist only to bound
+  correlated paper exposure. No signal reads them.
+
+### Time stop
+
+`time_stop_days = N` is the **N-th XNYS session after the entry date** — the
+backtested N-bar rule — not entry + N calendar days. Weekends and exchange
+holidays do not count. Positions opened under the old calendar rule are moved to
+the session rule by an explicit migration that runs on the next mark: each change
+is written to `audit_log` as `paper.time_stop_recomputed` with the old and new
+date, and it is idempotent.
 
 Fresh scan timestamps and a current, source-qualified completed market bar are
 required for normal acceptance. Automatic acceptance additionally requires the
@@ -86,14 +178,90 @@ keys. The POST releases its SQLite write transaction before model work so it doe
 not block ingestion for the duration of inference. Import contracts prevent
 Kronos from reaching trading and prevent trading from consuming Kronos.
 
-## Known historical defects
+## Known historical defects and their correction
 
 The read-only audit in `PAPER_OPERATION_AUDIT.md` found two legacy positions with
 exit timestamps before entry and a cost-accounting defect. Original audit rows
 are preserved. The paper console flags impossible chronology; accumulated legacy
-P&L must not be presented as validated forward performance. New safeguards do not
-retroactively repair past outcomes. Any correction needs append-only evidence,
-not deletion or rewriting of trades.
+P&L must not be presented as validated forward performance.
+
+`signalforge paper correct-legacy --dry-run | --confirm` repairs both with
+append-only `trade_correction` rows; `paper_trade` rows are never modified.
+
+- **Invalid exits are VOIDED (default, operator decision 2026-10-04).** A closed
+  position whose exit date is not after its entry date is treated as a trade
+  that never happened. `--resolution void` (the default; `--void` is a
+  shorthand) writes, per trade:
+  1. `legacy_exit.position.realized_pnl` — the invalid exit's realised P&L
+     reversed to 0, and `legacy_exit.account.cash` — the exit proceeds taken
+     back out of the book's cash;
+  2. `legacy_void.entry.account.cash` — the entry notional returned to cash
+     (with the cost credit below, the whole entry debit comes back);
+  3. `legacy_void.position.status` `closed -> void` — the position stays
+     closed, so it holds no exposure, does not block a new entry in the symbol
+     and counts toward no symbol, sector, gross or open-risk cap. It is also
+     excluded from closed-trade performance evidence (health monitor,
+     probation summary), and the paper console replaces the chronology warning
+     with a "voided" note.
+- **`--resolution reopen` is still available**, not the default: the exit is
+  reversed and the position re-opened and re-resolved on bars strictly after
+  entry. On the live MSFT rows that would leave duplicate open MSFT positions
+  over the symbol cap (the command prints a WARNING), which is why the operator
+  chose void.
+- **Double-counted entry costs.** The old ledger embedded spread and slippage in
+  the fill price and also debited them from cash. For every accepted long trade
+  it wrote (those whose plan has no `risk_decision`), the second debit is
+  credited back to the book — voided or not.
+- `--dry-run` runs the identical code inside a savepoint that is rolled back and
+  writes nothing. It prints every voided trade, every cost credit, the **exact
+  `trade_correction` rows** (trade id, field, old, new) and each affected
+  book's **cash and equity before and after**. `--confirm` writes exactly
+  that. Re-running either resolution afterwards finds nothing more to do.
+- Worked example (the fixture in `tests/paper/test_legacy_corrections.py`): two
+  MSFT x5 trades filled 516.45, "stopped" for -83.50 each, 1.42 double-counted
+  each. Cash 29,830.16 → −2,498.75 → +2,582.25 → −2,498.75 → +2,582.25 →
+  +2.84 = **30,000.00**; equity 29,830.16 → 30,000.00.
+
+## Deploying the 2026-10-03 release
+
+Run in this order. Take a file-level backup of `data/signalforge.sqlite` first.
+
+1. **Stop the worker** (and the API if it is serving writes):
+   `launchctl bootout gui/$(id -u)/com.signalforge.worker`
+2. `uv sync --frozen --extra llm`
+3. `uv run alembic upgrade head` — adds `paper_account.strategy_version_id` and
+   keys `default` to the version that owns all its positions. Verify with
+   `uv run signalforge paper snapshot` (the `books` list).
+4. `uv run signalforge universe sectors --refresh` — re-run until it reports no
+   instruments awaiting a reference request. Unknown sectors stay capped.
+5. `uv run signalforge paper correct-legacy --dry-run` — read every line. The
+   default resolution is **void**.
+6. Review: the two voided MSFT trades, the cost credits, every printed
+   `trade_correction` row, and the book's cash and equity before/after. There
+   must be no duplicate-position WARNING (that only appears under
+   `--resolution reopen`).
+7. `uv run signalforge paper correct-legacy --confirm` (void). Re-run
+   `--dry-run` afterwards: it must print "nothing to correct".
+8. **Start the worker**
+   (`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.signalforge.worker.plist`).
+   The first mark logs `paper.time_stop_recomputed` for
+   each open position that moves to the session time stop; the first
+   approved-scope scan creates the short-swing version's book.
+
+The alembic revision `e3b8c5d1f7a2` follows `d2f7a1c4e9b6` (PR #7's
+`dividend_yield_daily`, which merged first). `uv run alembic heads` must print
+exactly one line: `e3b8c5d1f7a2 (head)`.
+
+## Known gap: missed sessions
+
+No approved-scope scan ran for the 2026-09-28, 09-29 and 09-30 sessions. The
+cause was operational, not a gate: the worker was not executing jobs (the Mac
+slept through the 21:30 UTC scan on 09-28, a catch-up ingest then stalled on
+repeated provider network failures while holding the end-of-day lock, and no job
+ran again until the restart on 10-01 19:28 UTC). Start-up catch-up ingests the
+missed bars but scans only the latest session, so signals on the missed sessions
+are never evaluated. Keep the Mac awake and online across the close; launchd
+`KeepAlive` restarts a crashed process, not a sleeping or stalled one.
 
 A good replay is not a reason to promote a strategy. Evaluate model usefulness
 on preregistered unseen windows before considering any separately specified

@@ -45,6 +45,17 @@ class PaperAccount(Base, IntPK, CreatedAt):
     # is 0 and ``spendable_cash == cash``, so no equity arithmetic moves. Only
     # ``paper.options_ledger`` ever writes it, and only for the options account.
     collateral_reserved: Mapped[Decimal] = mapped_column(_MONEY, default=Decimal("0"))
+    # BOOK KEY (operator decision 2026-10-03, paper only): each PAPER_APPROVED
+    # strategy version owns one equity paper book, and this column names the
+    # version that owns this account. NULL on every account that is not a
+    # per-version equity book (the unattributed/manual equity account, the
+    # options account, the grid account). Unique, so "the book of version N" is
+    # at most one row and lazy creation is idempotent. A plain key, not a DB
+    # foreign key: adding one to this parent table on SQLite needs a copy-and-swap
+    # rebuild of ``paper_account``; ``paper.books`` is the only writer.
+    strategy_version_id: Mapped[int | None] = mapped_column(
+        Integer, default=None, unique=True, index=True
+    )
 
     positions: Mapped[list[PaperPosition]] = relationship(back_populates="account")
 

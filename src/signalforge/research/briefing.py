@@ -39,37 +39,55 @@ def _market_status(session: Session, as_of: date) -> dict[str, Any]:
     }
 
 
-def _open_risk(session: Session, account_name: str, cfg_daily_risk_pct: float) -> dict[str, Any]:
+def _open_risk(
+    session: Session, account_name: str | None, cfg_daily_risk_pct: float
+) -> dict[str, Any]:
+    """Open stop risk of one named account, or of every equity book (the cap
+    applies PER BOOK, so ``over_limit`` is true when any one book is over)."""
     from signalforge.db.models import PaperAccount
+    from signalforge.paper.books import equity_books
 
-    acct = session.scalar(select(PaperAccount).where(PaperAccount.name == account_name))
-    if acct is None:
+    if account_name is not None:
+        named = session.scalar(select(PaperAccount).where(PaperAccount.name == account_name))
+        accounts = [named] if named is not None else []
+    else:
+        accounts = equity_books(session)
+    if not accounts:
         return {"exists": False}
-    positions = list(
-        session.scalars(
-            select(PaperPosition).where(
-                PaperPosition.account_id == acct.id, PaperPosition.closed_at.is_(None)
+    n_open = 0
+    total_risk = 0.0
+    total_cap = 0.0
+    over = False
+    for acct in accounts:
+        positions = list(
+            session.scalars(
+                select(PaperPosition).where(
+                    PaperPosition.account_id == acct.id, PaperPosition.closed_at.is_(None)
+                )
             )
         )
-    )
-    open_risk = 0.0
-    for p in positions:
-        if p.stop_level is None:
-            continue
-        d = 1 if p.side is PositionSide.LONG else -1
-        open_risk += abs(d * (float(p.avg_price) - p.stop_level)) * p.qty
-    cap = float(acct.initial_cash) * cfg_daily_risk_pct / 100.0
+        open_risk = 0.0
+        for p in positions:
+            if p.stop_level is None:
+                continue
+            d = 1 if p.side is PositionSide.LONG else -1
+            open_risk += abs(d * (float(p.avg_price) - p.stop_level)) * p.qty
+        cap = float(acct.initial_cash) * cfg_daily_risk_pct / 100.0
+        n_open += len(positions)
+        total_risk += open_risk
+        total_cap += cap
+        over = over or open_risk > cap
     return {
         "exists": True,
-        "open_positions": len(positions),
-        "open_risk_dollars": round(open_risk, 2),
-        "daily_risk_cap_dollars": round(cap, 2),
-        "over_limit": open_risk > cap,
+        "open_positions": n_open,
+        "open_risk_dollars": round(total_risk, 2),
+        "daily_risk_cap_dollars": round(total_cap, 2),
+        "over_limit": over,
     }
 
 
 def build_briefing_facts(
-    session: Session, *, account_name: str = "default", as_of: date | None = None
+    session: Session, *, account_name: str | None = None, as_of: date | None = None
 ) -> dict[str, Any]:
     on = as_of or date.today()
     cfg = effective_research_config(session)

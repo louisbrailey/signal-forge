@@ -36,6 +36,7 @@ from signalforge.db.types import utcnow
 from signalforge.domain import Direction, Horizon, PaperDecision, PositionSide, QualityGate
 from signalforge.killswitch import ensure_not_engaged
 from signalforge.observability import get_logger
+from signalforge.paper.books import book_for_candidate, equity_books
 from signalforge.paper.equity_guard import NotAnEquityPosition, assert_equity_instrument
 from signalforge.settings_store import effective_research_config
 
@@ -50,12 +51,47 @@ __all__ = [
     "accept_candidate",
     "record_decision",
     "mark_to_market",
+    "migrate_time_stops_to_sessions",
+    "sector_bucket",
+    "HARD_MAX_PER_TRADE_RISK_PCT",
+    "HARD_MAX_OPEN_RISK_PCT",
+    "HARD_MAX_SYMBOL_PCT",
+    "HARD_MAX_SECTOR_PCT",
+    "HARD_MAX_GROSS_PCT",
+    "UNKNOWN_SECTOR",
 ]
 
 Decision = PaperDecision
 _log = get_logger("paper.ledger")
 _NOMINAL_SPREAD_BPS = 5.0
 _CENTS = Decimal("0.01")
+
+# Hard ceilings of the equity paper ledger, each applied PER BOOK. The effective
+# limit is min(configured value, ceiling): configuration can only narrow these,
+# never widen them.
+#
+# Operator decision 2026-10-03, paper only: the per-symbol ceiling was raised
+# from 5% to 10% of book equity and the aggregate open-risk ceiling from 1.5%
+# to 3.0%. Per-trade risk (0.5%) and the per-sector ceiling (20%) are unchanged.
+HARD_MAX_PER_TRADE_RISK_PCT = 0.5
+HARD_MAX_OPEN_RISK_PCT = 3.0  # operator decision 2026-10-03, paper only (was 1.5)
+HARD_MAX_SYMBOL_PCT = 10.0  # operator decision 2026-10-03, paper only (was 5.0)
+HARD_MAX_SECTOR_PCT = 20.0
+HARD_MAX_GROSS_PCT = 100.0
+
+#: The single conservative bucket every instrument with a blank/unknown sector
+#: falls into. It is capped as ONE sector: unknown never means unlimited.
+UNKNOWN_SECTOR = "UNKNOWN"
+_UNKNOWN_SECTOR_SPELLINGS = frozenset({"", "unknown", "unknown_sector", "none", "n/a"})
+
+TIME_STOP_MIGRATION_ACTION = "paper.time_stop_recomputed"
+
+
+def sector_bucket(raw: str | None) -> str:
+    """The sector-cap bucket of an instrument: its case-folded sector label, or
+    :data:`UNKNOWN_SECTOR` when the label is blank or says "unknown"."""
+    label = (raw or "").strip().casefold()
+    return UNKNOWN_SECTOR if label in _UNKNOWN_SECTOR_SPELLINGS else label
 
 
 class ImmutablePaperTradeError(RuntimeError):
@@ -92,6 +128,24 @@ def _account(session: Session, name: str) -> PaperAccount:
     return acct
 
 
+def _resolve_account(session: Session, cand: Candidate, account_name: str | None) -> PaperAccount:
+    """The account a decision on ``cand`` belongs to.
+
+    With no explicit name it is the candidate's BOOK (``paper.books``). An
+    explicit name is honoured, except that a candidate can never be put into
+    another strategy version's book."""
+    if account_name is None:
+        return book_for_candidate(session, cand)
+    acct = _account(session, account_name)
+    if acct.strategy_version_id not in (None, cand.strategy_version_id):
+        raise ValueError(
+            f"paper account {account_name!r} is the book of strategy version "
+            f"{acct.strategy_version_id}; candidate {cand.id} belongs to version "
+            f"{cand.strategy_version_id}"
+        )
+    return acct
+
+
 def _slippage_frac(slippage_bps: float, spread_bps: float) -> float:
     return (slippage_bps + spread_bps / 2.0) / 10_000.0
 
@@ -101,7 +155,7 @@ def record_decision(
     candidate_id: int,
     decision: PaperDecision,
     *,
-    account_name: str = "default",
+    account_name: str | None = None,
     note: str = "",
     actor: str = "local-user",
 ) -> int:
@@ -115,7 +169,7 @@ def record_decision(
     cand = session.get(Candidate, candidate_id)
     if cand is None:
         raise ValueError(f"candidate {candidate_id} not found")
-    acct = _account(session, account_name)
+    acct = _resolve_account(session, cand, account_name)
     trade = PaperTrade(
         account_id=acct.id,
         candidate_id=cand.id,
@@ -277,7 +331,8 @@ def _safe_shares(
     open_risk = Decimal(0)
     symbol_value = Decimal(0)
     sector_value = Decimal(0)
-    sector = (inst.sector or "").strip().casefold()
+    # Blank/unknown sectors share ONE capped bucket (never unlimited).
+    sector = sector_bucket(inst.sector)
     market_date = _completed_market_date(valuation_at)
     for pos in positions:
         held = session.get(Instrument, pos.instrument_id)
@@ -310,7 +365,7 @@ def _safe_shares(
         )
         if pos.instrument_id == inst.id:
             symbol_value += value
-        if sector and (held.sector or "").strip().casefold() == sector:
+        if sector_bucket(held.sector) == sector:
             sector_value += value
     equity = cash + gross
     limits = effective_research_config(session).risk
@@ -323,11 +378,15 @@ def _safe_shares(
         float(stop) * (1 - _slippage_frac(exit_slippage_bps, _NOMINAL_SPREAD_BPS))
     )
     effective_limits = {
-        "per_trade_risk_pct": min(0.5, limits.per_trade_risk_pct),
-        "max_daily_portfolio_risk_pct": min(1.5, limits.max_daily_portfolio_risk_pct),
-        "max_position_concentration_pct": min(5.0, limits.max_position_concentration_pct),
-        "max_portfolio_exposure_pct": min(100.0, limits.max_portfolio_exposure_pct),
-        "max_correlated_exposure_pct": min(20.0, limits.max_correlated_exposure_pct),
+        "per_trade_risk_pct": min(HARD_MAX_PER_TRADE_RISK_PCT, limits.per_trade_risk_pct),
+        "max_daily_portfolio_risk_pct": min(
+            HARD_MAX_OPEN_RISK_PCT, limits.max_daily_portfolio_risk_pct
+        ),
+        "max_position_concentration_pct": min(
+            HARD_MAX_SYMBOL_PCT, limits.max_position_concentration_pct
+        ),
+        "max_portfolio_exposure_pct": min(HARD_MAX_GROSS_PCT, limits.max_portfolio_exposure_pct),
+        "max_correlated_exposure_pct": min(HARD_MAX_SECTOR_PCT, limits.max_correlated_exposure_pct),
     }
     budgets = {
         "candidate_risk": (candidate_risk, risk_per_share),
@@ -339,12 +398,9 @@ def _safe_shares(
         "cash": (cash - reserved, price),
         "symbol": (cap(effective_limits["max_position_concentration_pct"]) - symbol_value, price),
         "gross": (cap(effective_limits["max_portfolio_exposure_pct"]) - gross, price),
+        # Always applied: an unknown sector is the UNKNOWN bucket, not "no cap".
+        "sector": (cap(effective_limits["max_correlated_exposure_pct"]) - sector_value, price),
     }
-    if sector and sector not in {"unknown", "unknown_sector"}:
-        budgets["sector"] = (
-            cap(effective_limits["max_correlated_exposure_pct"]) - sector_value,
-            price,
-        )
     share_caps = {
         name: int(budget // unit) if budget > 0 else 0 for name, (budget, unit) in budgets.items()
     }
@@ -360,7 +416,9 @@ def _safe_shares(
         "open_risk_before": str(open_risk),
         "symbol_before": str(symbol_value),
         "sector_before": str(sector_value),
-        "sector": sector or None,
+        "sector": sector,
+        "account": acct.name,
+        "book_strategy_version_id": acct.strategy_version_id,
         "configured_limits": limits.model_dump(mode="json"),
         "effective_limits": effective_limits,
         "candidate_risk_dollars": str(candidate_risk),
@@ -384,7 +442,7 @@ def accept_candidate(
     session: Session,
     candidate_id: int,
     *,
-    account_name: str = "default",
+    account_name: str | None = None,
     slippage_bps: float | None = None,
     as_of: date | None = None,
     actor: str = "local-user",
@@ -412,7 +470,7 @@ def accept_candidate(
 
     inst = session.get(Instrument, cand.instrument_id)
     assert inst is not None
-    acct = _account(session, account_name)
+    acct = _resolve_account(session, cand, account_name)
     if actor == "auto_simulate":
         # Direct calls cannot bypass the automatic strategy/scope/freshness guard.
         assert_auto_simulate_allowed(session, cand)
@@ -565,24 +623,115 @@ class MarkToMarketResult:
     unrealized_pnl: float
 
 
+def migrate_time_stops_to_sessions(
+    session: Session, *, account_id: int | None = None
+) -> list[dict[str, object]]:
+    """Recompute every OPEN equity position's ``time_stop_date`` under the
+    bar-based rule (the ``time_stop_days``-th XNYS session after entry).
+
+    Positions opened before 2026-10-03 carry a calendar-day time stop
+    (``entry + N days``), which is earlier than the backtested N-bar rule. This
+    is the explicit migration: each change is written to ``audit_log``
+    (action :data:`TIME_STOP_MIGRATION_ACTION`, before/after) and logged.
+    Idempotent — a position already on the session rule is left alone, so it
+    is safe to run on every mark. ``time_stop_days`` is read from the immutable
+    accepted ``paper_trade.plan_json``; a position without one is not touched.
+    Returns the changes made."""
+    account_ids = [account_id] if account_id is not None else [a.id for a in equity_books(session)]
+    changes: list[dict[str, object]] = []
+    if not account_ids:
+        return changes
+    positions = session.scalars(
+        select(PaperPosition)
+        .where(PaperPosition.account_id.in_(account_ids), PaperPosition.closed_at.is_(None))
+        .order_by(PaperPosition.id)
+        .execution_options(populate_existing=True)
+    ).all()
+    for pos in positions:
+        if pos.time_stop_date is None:
+            continue
+        trade = session.scalar(
+            select(PaperTrade)
+            .where(PaperTrade.position_id == pos.id, PaperTrade.decision == PaperDecision.ACCEPTED)
+            .order_by(PaperTrade.id)
+        )
+        bars = trade.plan_json.get("time_stop_days") if trade is not None else None
+        if not isinstance(bars, int) or isinstance(bars, bool) or bars < 1:
+            continue
+        expected = _time_stop_date(pos.opened_at.date(), bars)
+        if pos.time_stop_date == expected:
+            continue
+        change: dict[str, object] = {
+            "position_id": pos.id,
+            "paper_trade_id": trade.id if trade is not None else None,
+            "time_stop_bars": bars,
+            "before": pos.time_stop_date.isoformat(),
+            "after": expected.isoformat(),
+        }
+        session.add(
+            AuditLog(
+                ts=utcnow(),
+                actor="paper.ledger",
+                action=TIME_STOP_MIGRATION_ACTION,
+                entity=f"paper_position:{pos.id}",
+                before_json={"time_stop_date": pos.time_stop_date.isoformat()},
+                after_json={
+                    "time_stop_date": expected.isoformat(),
+                    "time_stop_bars": bars,
+                    "rule": "N-th XNYS session strictly after the entry date",
+                },
+            )
+        )
+        pos.time_stop_date = expected
+        changes.append(change)
+        _log.info("paper.time_stop_recomputed", **change)
+    if changes:
+        session.flush()
+    return changes
+
+
 def mark_to_market(
     session: Session,
     *,
-    account_name: str = "default",
+    account_name: str | None = None,
     as_of: date | None = None,
 ) -> MarkToMarketResult:
     """Value open positions; close any that hit their stop / target / time stop.
 
-    Closing an existing position is allowed while the kill switch is engaged
-    (it is protective); only *opening* new positions is blocked.
+    With no ``account_name`` every equity book is marked, in book order, and
+    the result is the total. Closing an existing position is allowed while the
+    kill switch is engaged (it is protective); only *opening* new positions is
+    blocked.
     """
-    acct = _account(session, account_name)
+    if account_name is not None:
+        accounts = [_account(session, account_name)]
+    else:
+        accounts = equity_books(session) or [_account(session, "default")]
+    checked = closed = 0
+    realized = unrealized = 0.0
+    for acct in accounts:
+        res = _mark_account(session, acct, as_of)
+        checked += res.checked
+        closed += res.closed
+        realized += res.realized_pnl
+        unrealized += res.unrealized_pnl
+    return MarkToMarketResult(
+        checked=checked,
+        closed=closed,
+        realized_pnl=round(realized, 2),
+        unrealized_pnl=round(unrealized, 2),
+    )
+
+
+def _mark_account(session: Session, acct: PaperAccount, as_of: date | None) -> MarkToMarketResult:
     # Serialize closing with acceptance and refresh stale identity-map cash.
     session.flush()
     session.execute(
         update(PaperAccount).where(PaperAccount.id == acct.id).values(cash=PaperAccount.cash)
     )
     session.refresh(acct)
+    # Explicit, logged, idempotent: legacy calendar-day time stops -> sessions.
+    migrate_time_stops_to_sessions(session, account_id=acct.id)
     on = as_of or utcnow().date()
     open_positions = list(
         session.scalars(
@@ -595,88 +744,12 @@ def mark_to_market(
     unrealized = 0.0
     closed = 0
     for pos in open_positions:
-        inst = session.get(Instrument, pos.instrument_id)
-        assert inst is not None
-        # NARROWS, never widens (map §3.3, D3 §7.1): the same predicate
-        # ``assert_auto_simulate_allowed`` already applies, applied at the second
-        # place it matters. Provably a no-op against current data.
-        assert_equity_instrument(inst, "mark_to_market")
-        bars = _position_bars(
-            session, pos, inst.symbol, pos.opened_at.date() + timedelta(days=1), on
-        )
-        bars = [
-            bar
-            for bar in bars
-            if (bounds := rth_bounds_utc(bar.session_date)) is not None
-            and (as_of is not None or bounds[1] <= utcnow())
-        ]
-        if not bars:
-            continue
-        # Do not skip suspect history: an unknown earlier stop cannot be
-        # reconstructed from a later clean bar. Refuse before changing cash.
-        for bar in bars:
-            if not _mark_quality_ok(bar):
-                raise ValueError("untrusted source bar in paper exit history")
-            o, h, low, close, volume = (
-                _finite_decimal(value, "exit OHLCV")
-                for value in (bar.open, bar.high, bar.low, bar.close, bar.volume)
-            )
-            if not (0 < low <= min(o, close) <= max(o, close) <= h and volume >= 0):
-                raise ValueError("inconsistent OHLCV in paper exit history")
-        last = bars[-1]
-        d = 1 if pos.side is PositionSide.LONG else -1
-        # Daily OHLC cannot order entry-day events. Use only subsequent bars,
-        # chronologically, so missed polling days cannot hide an earlier exit.
-        exit_reason = None
-        for bar in bars:
-            exit_reason = _exit_reason(pos, bar, bar.session_date)
-            if exit_reason:
-                last = bar
-                break
-        if exit_reason:
-            exit_px = _exit_price(pos, last, exit_reason)
-            if exit_reason == "stop":
-                exit_px = (
-                    min(exit_px, float(last.open)) if d == 1 else max(exit_px, float(last.open))
-                )
-            exit_slippage = _exit_slippage(session, pos)
-            exit_px = float(
-                _money(exit_px * (1 - d * _slippage_frac(exit_slippage, _NOMINAL_SPREAD_BPS)))
-            )
-            pnl = d * (exit_px - float(pos.avg_price)) * pos.qty
-            bounds = rth_bounds_utc(last.session_date)
-            assert bounds is not None
-            pos.closed_at = bounds[1]
-            pos.realized_pnl = _money(pnl)
-            # Cash model: a long tied up notional on open, so it gets exit proceeds
-            # back; a short only paid costs on open, so it gets the realised P&L.
-            if pos.side is PositionSide.LONG:
-                acct.cash = acct.cash + _money(exit_px * pos.qty)
-            else:
-                acct.cash = acct.cash + _money(pnl)
-            session.add(
-                AuditLog(
-                    ts=utcnow(),
-                    actor="paper.ledger",
-                    action="paper.position_closed",
-                    entity=f"paper_position:{pos.id}",
-                    before_json={},
-                    after_json={
-                        "source": last.source,
-                        "market_date": last.session_date.isoformat(),
-                        "exit_reason": exit_reason,
-                        "fill_price": exit_px,
-                        "slippage_bps": exit_slippage,
-                        "spread_bps": _NOMINAL_SPREAD_BPS,
-                        "time_semantics": "daily bar close; intrabar fill time unknown",
-                    },
-                )
-            )
+        was_closed, pnl = _mark_position(session, acct, pos, on, as_of)
+        if was_closed:
             realized += pnl
             closed += 1
-            _log.info("paper.close", symbol=inst.symbol, reason=exit_reason, pnl=round(pnl, 2))
         else:
-            unrealized += d * (float(last.close) - float(pos.avg_price)) * pos.qty
+            unrealized += pnl
     session.flush()  # A repeated call in this transaction must not close/credit twice.
     return MarkToMarketResult(
         checked=len(open_positions),
@@ -684,6 +757,89 @@ def mark_to_market(
         realized_pnl=round(realized, 2),
         unrealized_pnl=round(unrealized, 2),
     )
+
+
+def _mark_position(
+    session: Session, acct: PaperAccount, pos: PaperPosition, on: date, as_of: date | None
+) -> tuple[bool, float]:
+    """Resolve one open position against the bars strictly after its entry date.
+
+    Returns ``(closed, pnl)``: realised P&L when it closed, unrealised otherwise
+    (0.0 when there is no eligible bar yet)."""
+    inst = session.get(Instrument, pos.instrument_id)
+    assert inst is not None
+    # NARROWS, never widens (map §3.3, D3 §7.1): the same predicate
+    # ``assert_auto_simulate_allowed`` already applies, applied at the second
+    # place it matters. Provably a no-op against current data.
+    assert_equity_instrument(inst, "mark_to_market")
+    bars = _position_bars(session, pos, inst.symbol, pos.opened_at.date() + timedelta(days=1), on)
+    bars = [
+        bar
+        for bar in bars
+        if (bounds := rth_bounds_utc(bar.session_date)) is not None
+        and (as_of is not None or bounds[1] <= utcnow())
+    ]
+    if not bars:
+        return False, 0.0
+    # Do not skip suspect history: an unknown earlier stop cannot be
+    # reconstructed from a later clean bar. Refuse before changing cash.
+    for bar in bars:
+        if not _mark_quality_ok(bar):
+            raise ValueError("untrusted source bar in paper exit history")
+        o, h, low, close, volume = (
+            _finite_decimal(value, "exit OHLCV")
+            for value in (bar.open, bar.high, bar.low, bar.close, bar.volume)
+        )
+        if not (0 < low <= min(o, close) <= max(o, close) <= h and volume >= 0):
+            raise ValueError("inconsistent OHLCV in paper exit history")
+    last = bars[-1]
+    d = 1 if pos.side is PositionSide.LONG else -1
+    # Daily OHLC cannot order entry-day events. Use only subsequent bars,
+    # chronologically, so missed polling days cannot hide an earlier exit.
+    exit_reason = None
+    for bar in bars:
+        exit_reason = _exit_reason(pos, bar, bar.session_date)
+        if exit_reason:
+            last = bar
+            break
+    if not exit_reason:
+        return False, d * (float(last.close) - float(pos.avg_price)) * pos.qty
+    exit_px = _exit_price(pos, last, exit_reason)
+    if exit_reason == "stop":
+        exit_px = min(exit_px, float(last.open)) if d == 1 else max(exit_px, float(last.open))
+    exit_slippage = _exit_slippage(session, pos)
+    exit_px = float(_money(exit_px * (1 - d * _slippage_frac(exit_slippage, _NOMINAL_SPREAD_BPS))))
+    pnl = d * (exit_px - float(pos.avg_price)) * pos.qty
+    bounds = rth_bounds_utc(last.session_date)
+    assert bounds is not None
+    pos.closed_at = bounds[1]
+    pos.realized_pnl = _money(pnl)
+    # Cash model: a long tied up notional on open, so it gets exit proceeds
+    # back; a short only paid costs on open, so it gets the realised P&L.
+    if pos.side is PositionSide.LONG:
+        acct.cash = acct.cash + _money(exit_px * pos.qty)
+    else:
+        acct.cash = acct.cash + _money(pnl)
+    session.add(
+        AuditLog(
+            ts=utcnow(),
+            actor="paper.ledger",
+            action="paper.position_closed",
+            entity=f"paper_position:{pos.id}",
+            before_json={},
+            after_json={
+                "source": last.source,
+                "market_date": last.session_date.isoformat(),
+                "exit_reason": exit_reason,
+                "fill_price": exit_px,
+                "slippage_bps": exit_slippage,
+                "spread_bps": _NOMINAL_SPREAD_BPS,
+                "time_semantics": "daily bar close; intrabar fill time unknown",
+            },
+        )
+    )
+    _log.info("paper.close", symbol=inst.symbol, reason=exit_reason, pnl=round(pnl, 2))
+    return True, pnl
 
 
 # --------------------------------------------------------------------------- #
@@ -695,8 +851,22 @@ def _as_dt(d: date) -> datetime:
     return datetime.combine(d, datetime.min.time()).replace(tzinfo=utcnow().tzinfo)
 
 
-def _time_stop_date(start: date, days: int) -> datetime:
-    return _as_dt(start + timedelta(days=days))
+def _time_stop_date(start: date, bars: int) -> datetime:
+    """The ``bars``-th XNYS session strictly after ``start`` (the entry date).
+
+    The backtested rule exits at the close of the N-th bar after the entry bar
+    (``backtest.engine``: ``u - entry_idx >= time_stop_bars``), so the paper
+    time stop counts trading sessions — weekends and exchange holidays do not
+    count. ``time_stop_days=10`` is the 10th session after entry, not entry +
+    10 calendar days."""
+    if bars < 1:
+        raise ValueError("time stop must be at least one session")
+    span = bars * 2 + 14
+    while True:
+        after = sessions(start + timedelta(days=1), start + timedelta(days=span))
+        if len(after) >= bars:
+            return _as_dt(after[bars - 1])
+        span *= 2
 
 
 def _exit_reason(pos: PaperPosition, bar: OHLCVDaily, on: date) -> str | None:
