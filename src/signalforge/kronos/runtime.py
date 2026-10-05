@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .worker import normalise_mode
+
 HOME = Path.home() / "my-stack/Kronos"
 PYTHON = HOME / ".venv/bin/python"
 TIMEOUT = 90.0
@@ -106,10 +108,19 @@ def run_worker(payload: bytes) -> bytes:
             stream.close()
 
 
-def infer(history: list[dict[str, Any]], dates: list[str]) -> list[list[float]]:
+def infer(
+    history: list[dict[str, Any]], dates: list[str], mode: dict[str, Any] | None = None
+) -> list[list[float]]:
+    """Run one bounded inference. ``mode`` is study-only; ``None`` is production (eval)."""
+    try:
+        resolved = normalise_mode(mode)
+    except ValueError:
+        raise KronosError("Invalid inference mode") from None
     if not runtime_status()["configured"]:
         raise KronosError("Cached local Kronos runtime is unavailable")
-    payload = json.dumps({"history": history, "dates": dates}, allow_nan=False).encode()
+    payload = json.dumps(
+        {"history": history, "dates": dates, "mode": resolved}, allow_nan=False
+    ).encode()
     if len(payload) > 64 * 1024:
         raise KronosError("Inference input exceeded limit")
     # OS lock bounds concurrent inference across dashboard processes too.
@@ -124,7 +135,12 @@ def infer(history: list[dict[str, Any]], dates: list[str]) -> list[list[float]]:
         except BlockingIOError:
             raise KronosError("Kronos replay is busy") from None
         try:
-            return json.loads(run_worker(payload))["paths"]
+            result = json.loads(run_worker(payload))
+            # The worker reports the mode it actually ran in; never trust it silently.
+            if result["eval"] is not resolved["eval"]:
+                raise KronosError("Local inference ran in an unexpected model mode")
+            paths: list[list[float]] = result["paths"]
+            return paths
         except KronosError:
             raise
         except Exception:

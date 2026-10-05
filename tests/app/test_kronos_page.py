@@ -94,3 +94,30 @@ def test_kronos_kill_switch_blocks_work(registered_client):
         ).status_code
         == 423
     )
+
+
+def test_web_route_ignores_study_mode_fields(registered_client, monkeypatch):
+    """Train mode / sampling knobs are study-only: form fields never reach replay()."""
+    from signalforge.app.routers import kronos
+
+    seen = []
+
+    def replay(*args, **kwargs):
+        seen.append((args[1:], kwargs))
+        raise kronos.KronosUnavailable("stop before persistence")
+
+    monkeypatch.setattr(kronos, "replay", replay)
+    r = registered_client.post(
+        "/kronos/replay",
+        data={
+            "symbol": "AAPL",
+            "horizon": "5",
+            "eval": "false",
+            "T": "0.6",
+            "samples": "10",
+            "mode": '{"eval": false, "T": 1.0, "top_p": 0.9, "samples": 3, "return_paths": true}',
+            "csrf_token": _csrf(registered_client, "/kronos"),
+        },
+    )
+    assert r.status_code == 200
+    assert seen == [(("AAPL", 5), {})]
