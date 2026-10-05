@@ -795,14 +795,33 @@ class OptionsCoverageSummary:
             )
 
 
-def coverage_summary(run: IngestionRun) -> OptionsCoverageSummary:
+def coverage_summary(
+    run: IngestionRun, *, underlyings: Sequence[str] | None = None
+) -> OptionsCoverageSummary:
     """Derive the coverage summary from a cycle run's own provenance.
 
     Reads ``IngestionRun`` only. It never touches ``option_aggregate_daily``,
     so it cannot see a price even if someone later asks it to.
+
+    ``underlyings`` restricts the summary to that subset of the run — the form
+    a dataset snapshot's coverage pre-flight needs, because a snapshot may hold
+    fewer underlyings than the run that fetched them (IO2 runbook §6: dropping
+    an underlying is one of the two permitted responses to a shortfall). Every
+    count is then taken from the per-cycle records of those underlyings alone,
+    **including** ``bars_written``: the run-level counter cannot be apportioned,
+    so the restricted form sums each cycle's own ``bars_written``. That sum is
+    never larger than the true count — a cycle re-attempted after a retryable
+    failure records only the bars its last attempt added — so the restricted
+    continuity fraction errs low, the conservative direction for a floor.
+    ``bars_skipped`` is not recorded per cycle and is reported as 0 there.
     """
     detail = dict(run.gaps_json or {})
     prov = dict(detail.pop(_RUN_PROVENANCE_KEY, {}) or {})
+    wanted: frozenset[str] | None = None
+    if underlyings is not None:
+        wanted = frozenset(u.upper().strip() for u in underlyings if u.strip())
+        detail = {k: v for k, v in detail.items() if str(k).upper() in wanted}
+    bars_from_cycles = 0
     cycles_total = cycles_covered = cycles_excluded = 0
     contracts_selected = contracts_fetched = 0
     sessions_expected = refusals = ladder_incomplete = 0
@@ -828,6 +847,11 @@ def coverage_summary(run: IngestionRun) -> OptionsCoverageSummary:
                 cyc.get("contracts_fetched", 0)
             )
             refusals += int(cyc.get("shares_per_contract_refusals", 0))
+            bars_from_cycles += int(cyc.get("bars_written", 0))
+
+    def _keep(names: Sequence[str]) -> tuple[str, ...]:
+        return tuple(n for n in names if wanted is None or str(n).upper() in wanted)
+
     return OptionsCoverageSummary(
         provider=run.provider,
         run_id=run.id,
@@ -836,20 +860,20 @@ def coverage_summary(run: IngestionRun) -> OptionsCoverageSummary:
         cycle_rule=str(prov.get("cycle_rule", "")),
         ladder_id=str(prov.get("ladder_id", "")),
         strike_listing_basis=str(prov.get("strike_listing_basis", "")),
-        underlyings=tuple(run.symbols_requested or []),
+        underlyings=_keep(run.symbols_requested or []),
         cycles_total=cycles_total,
         cycles_covered=cycles_covered,
         cycles_excluded=cycles_excluded,
         exclusions_by_reason=tuple(sorted(reasons.items())),
         contracts_selected=contracts_selected,
         contracts_fetched=contracts_fetched,
-        bars_written=int(run.bars_written or 0),
-        bars_skipped=int(run.bars_skipped or 0),
+        bars_written=int(run.bars_written or 0) if wanted is None else bars_from_cycles,
+        bars_skipped=int(run.bars_skipped or 0) if wanted is None else 0,
         sessions_expected=sessions_expected,
         shares_per_contract_refusals=refusals,
         ladder_incomplete_cycles=ladder_incomplete,
-        underlyings_ok=tuple(run.symbols_ok or []),
-        underlyings_failed=tuple(sorted(run.symbols_failed or {})),
+        underlyings_ok=_keep(run.symbols_ok or []),
+        underlyings_failed=_keep(sorted(run.symbols_failed or {})),
         earliest_available_date=run.earliest_available_date,
         max_total_bars=int(prov.get("max_total_bars", 0)),
         max_total_bars_prior=int(prov.get("max_total_bars_prior", 0)),

@@ -492,8 +492,9 @@ def latest_options_coverage_summary(
 
     Counts and completeness only: ``coverage_summary`` reads ``IngestionRun`` and
     never ``option_aggregate_daily``, and ``OptionsCoverageSummary`` cannot hold a
-    price by construction.  This is the single entry point through which coverage
-    reaches an evaluation.
+    price by construction.  A whole-run read, kept for reporting: an EVALUATION
+    is judged on its snapshot's own underlyings through
+    :func:`dataset_snapshot_coverage`, never on whichever run is newest.
     """
     stmt = select(IngestionRun).where(IngestionRun.kind == "options_cycle_backfill")
     if window_start is not None:
@@ -505,6 +506,179 @@ def latest_options_coverage_summary(
         return None
     OptionsCoverageSummary.assert_price_free()
     return coverage_summary(run)
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotCoverage:
+    """Cycle-backfill coverage restricted to ONE dataset snapshot's underlyings.
+
+    The pre-flight used to read the newest cycle-backfill run as a whole.  That
+    answers the wrong question in both directions once the backfill is staged:
+    a snapshot of the Stage A index ETFs was judged on the Stage B stocks' run
+    (the newest), and a snapshot holding a stock would have been judged on the
+    index run had that one been newer.  Coverage is a property of the
+    *evaluated underlying set*, so it is assembled per underlying — each from
+    the newest overlapping run that requested it — and pooled over exactly the
+    snapshot's symbols.  A snapshot's underlyings may therefore span runs.
+
+    Counts only: every part is an ``OptionsCoverageSummary``.
+    """
+
+    underlyings: tuple[str, ...]
+    summary: OptionsCoverageSummary | None
+    per_underlying: tuple[OptionsCoverageSummary, ...] = ()
+    run_ids: tuple[int, ...] = ()
+    missing: tuple[str, ...] = ()
+    inconsistencies: tuple[str, ...] = ()
+
+
+_POOLED_IDENTITY_FIELDS = ("provider", "cycle_rule", "ladder_id", "strike_listing_basis")
+
+
+def _run_has_underlying(run: IngestionRun, underlying: str) -> bool:
+    requested = {str(x).upper() for x in (run.symbols_requested or [])}
+    recorded = {str(k).upper() for k in (run.gaps_json or {}) if not str(k).startswith("__")}
+    return underlying in requested or underlying in recorded
+
+
+def _pooled_status(parts: Sequence[OptionsCoverageSummary]) -> str:
+    statuses = [p.status for p in parts]
+    bad = sorted({st for st in statuses if st not in ("ok", "partial")})
+    if bad:
+        return bad[0]
+    return "partial" if "partial" in statuses else "ok"
+
+
+def pool_snapshot_coverage(
+    runs_newest_first: Sequence[IngestionRun], underlyings: Sequence[str]
+) -> SnapshotCoverage:
+    """Pool per-underlying coverage over exactly ``underlyings``.  Pure; no I/O.
+
+    For each underlying the newest run that requested it (or recorded cycles for
+    it) is the one read — never an older, better-looking one.  An underlying no
+    run covers is reported in ``missing`` and contributes nothing to the pooled
+    counts; the pre-flight refuses on it.  Runs that disagree on the cycle rule,
+    ladder, provider or strike-listing basis cannot define one dataset (D1
+    §9.2), and that too is reported rather than averaged over.
+    """
+    OptionsCoverageSummary.assert_price_free()
+    wanted = tuple(sorted({u.upper().strip() for u in underlyings if u and u.strip()}))
+    parts: list[OptionsCoverageSummary] = []
+    missing: list[str] = []
+    for sym in wanted:
+        run = next((r for r in runs_newest_first if _run_has_underlying(r, sym)), None)
+        if run is None:
+            missing.append(sym)
+            continue
+        part = coverage_summary(run, underlyings=[sym])
+        if not part.underlyings:
+            # Cycles recorded for a symbol the run never listed as requested.
+            part = replace(part, underlyings=(sym,))
+        parts.append(part)
+    if not parts:
+        return SnapshotCoverage(underlyings=wanted, summary=None, missing=tuple(missing))
+
+    inconsistencies = []
+    for name in _POOLED_IDENTITY_FIELDS:
+        values = sorted({str(getattr(p, name)) for p in parts})
+        if len(values) > 1:
+            inconsistencies.append(
+                f"the coverage runs disagree on {name} ({', '.join(values)}); runs built on "
+                "different bases cannot define one options dataset (D1 §9.2)"
+            )
+    run_ids = tuple(sorted({p.run_id for p in parts if p.run_id is not None}))
+    reasons: dict[str, int] = {}
+    for p in parts:
+        for reason, n in p.exclusions_by_reason:
+            reasons[reason] = reasons.get(reason, 0) + n
+    earliest = [p.earliest_available_date for p in parts if p.earliest_available_date]
+    head = parts[0]
+    pooled = OptionsCoverageSummary(
+        provider=head.provider,
+        run_id=run_ids[0] if len(run_ids) == 1 else None,
+        # The window every contributing run covers: the intersection.
+        window_start=max(p.window_start for p in parts),
+        window_end=min(p.window_end for p in parts),
+        cycle_rule=head.cycle_rule,
+        ladder_id=head.ladder_id,
+        strike_listing_basis=head.strike_listing_basis,
+        underlyings=tuple(sym for p in parts for sym in p.underlyings),
+        cycles_total=sum(p.cycles_total for p in parts),
+        cycles_covered=sum(p.cycles_covered for p in parts),
+        cycles_excluded=sum(p.cycles_excluded for p in parts),
+        exclusions_by_reason=tuple(sorted(reasons.items())),
+        contracts_selected=sum(p.contracts_selected for p in parts),
+        contracts_fetched=sum(p.contracts_fetched for p in parts),
+        bars_written=sum(p.bars_written for p in parts),
+        bars_skipped=sum(p.bars_skipped for p in parts),
+        sessions_expected=sum(p.sessions_expected for p in parts),
+        shares_per_contract_refusals=sum(p.shares_per_contract_refusals for p in parts),
+        ladder_incomplete_cycles=sum(p.ladder_incomplete_cycles for p in parts),
+        underlyings_ok=tuple(sym for p in parts for sym in p.underlyings_ok),
+        underlyings_failed=tuple(sym for p in parts for sym in p.underlyings_failed),
+        earliest_available_date=min(earliest) if earliest else None,
+        max_total_bars=max(p.max_total_bars for p in parts),
+        max_total_bars_prior=max(p.max_total_bars_prior for p in parts),
+        pacing_s=max(p.pacing_s for p in parts),
+        status=_pooled_status(parts),
+        stopped_reason="; ".join(sorted({p.stopped_reason for p in parts if p.stopped_reason})),
+    )
+    return SnapshotCoverage(
+        underlyings=wanted,
+        summary=pooled,
+        per_underlying=tuple(parts),
+        run_ids=run_ids,
+        missing=tuple(missing),
+        inconsistencies=tuple(inconsistencies),
+    )
+
+
+def snapshot_options_coverage(
+    session: Session,
+    underlyings: Sequence[str],
+    *,
+    window_start: date | None = None,
+    window_end: date | None = None,
+    run_ids: Sequence[int] | None = None,
+) -> SnapshotCoverage:
+    """Coverage of ``underlyings`` from the stored cycle-backfill runs.  Read-only.
+
+    ``run_ids`` pins the read to named runs — the ones a snapshot's
+    ``options_scope_json.ingestion_run_ids`` recorded when it was created — so a
+    later, unrelated run cannot change what an existing snapshot is judged on.
+    Without it the candidates are every cycle-backfill run overlapping the
+    window, newest first.
+    """
+    stmt = select(IngestionRun).where(IngestionRun.kind == "options_cycle_backfill")
+    if run_ids:
+        stmt = stmt.where(IngestionRun.id.in_([int(i) for i in run_ids]))
+    if window_start is not None:
+        stmt = stmt.where(IngestionRun.requested_end >= window_start)
+    if window_end is not None:
+        stmt = stmt.where(IngestionRun.requested_start <= window_end)
+    runs = session.scalars(
+        stmt.order_by(IngestionRun.started_at.desc(), IngestionRun.id.desc())
+    ).all()
+    return pool_snapshot_coverage(runs, underlyings)
+
+
+def dataset_snapshot_coverage(
+    session: Session,
+    snapshot: DataSnapshot,
+    *,
+    window_start: date | None = None,
+    window_end: date | None = None,
+) -> SnapshotCoverage:
+    """The coverage an evaluation of ``snapshot`` is judged on: ITS symbols, and
+    the ingestion runs its scope recorded (when it recorded any)."""
+    scope = snapshot.options_scope_json or {}
+    return snapshot_options_coverage(
+        session,
+        list(snapshot.symbols_json or []),
+        window_start=window_start,
+        window_end=window_end,
+        run_ids=[int(i) for i in (scope.get("ingestion_run_ids") or [])] or None,
+    )
 
 
 def preregistration_digest(root: Path | None = None) -> str:
@@ -545,6 +719,12 @@ class CoveragePreflight:
     bar_continuity_fraction: float
     coverage_run_id: int | None
     underlyings: tuple[str, ...] = ()
+    coverage_run_ids: tuple[int, ...] = ()
+    #: ``(underlying, cycles_bracket_fraction, bar_continuity_fraction, run_id)``
+    #: — DISCLOSURE.  The floors bind on the pooled set, as gate 0.c is defined;
+    #: the per-underlying split is shown so a pooled pass cannot hide which
+    #: member carried it.
+    per_underlying: tuple[tuple[str, float, float, int | None], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -553,17 +733,76 @@ class CoveragePreflight:
             "cycles_bracket_fraction": round(self.bracket_fraction, 6),
             "bar_continuity_fraction": round(self.bar_continuity_fraction, 6),
             "coverage_run_id": self.coverage_run_id,
+            "coverage_run_ids": list(self.coverage_run_ids),
             "underlyings": list(self.underlyings),
+            "per_underlying": [
+                {
+                    "underlying": sym,
+                    "cycles_bracket_fraction": round(bracket, 6),
+                    "bar_continuity_fraction": round(continuity, 6),
+                    "coverage_run_id": run_id,
+                }
+                for sym, bracket, continuity, run_id in self.per_underlying
+            ],
         }
 
 
 def coverage_preflight(
-    summary: OptionsCoverageSummary | None,
+    coverage: OptionsCoverageSummary | SnapshotCoverage | None,
     *,
     evaluation: OptionsEvaluationConfig | None = None,
 ) -> CoveragePreflight:
-    """Is the stored options coverage above gate 0.c's and 0.d's pre-registered floors?"""
+    """Is the stored options coverage above gate 0.c's and 0.d's pre-registered floors?
+
+    Given a :class:`SnapshotCoverage` — what every evaluation path passes — the
+    two floors are asked of the pool of **the snapshot's own underlyings**, and
+    three further refusals apply: an underlying with no recorded coverage, runs
+    that disagree on a dataset identity, and an empty set.  The floors
+    themselves are read from ``OptionsEvaluationConfig`` and are the same two
+    numbers for every underlying set.  A bare ``OptionsCoverageSummary`` is
+    judged as it stands (one run, all of its underlyings).
+    """
     ev = evaluation or OptionsEvaluationConfig()
+    reasons: list[str] = []
+    run_ids: tuple[int, ...] = ()
+    per_underlying: tuple[tuple[str, float, float, int | None], ...] = ()
+    summary: OptionsCoverageSummary | None
+    if isinstance(coverage, SnapshotCoverage):
+        summary = coverage.summary
+        run_ids = coverage.run_ids
+        per_underlying = tuple(
+            (
+                p.underlyings[0] if p.underlyings else "?",
+                p.cycles_bracket_fraction,
+                p.bar_continuity_fraction,
+                p.run_id,
+            )
+            for p in coverage.per_underlying
+        )
+        if not coverage.underlyings:
+            reasons.append("the snapshot holds no underlyings to read coverage for")
+        for sym in coverage.missing:
+            reasons.append(
+                f"no options cycle-backfill run overlapping the window records coverage for "
+                f"{sym}, so gate 0.c and 0.d have no coverage to read for it — backfill it or "
+                "build the snapshot without it (docs/research/options_designs/IO2_RUNBOOK.md)"
+            )
+        reasons.extend(coverage.inconsistencies)
+        if summary is None:
+            if not reasons:
+                reasons.append("no coverage could be assembled for the snapshot's underlyings")
+            return CoveragePreflight(
+                passed=False,
+                reasons=tuple(reasons),
+                bracket_fraction=0.0,
+                bar_continuity_fraction=0.0,
+                coverage_run_id=None,
+                underlyings=coverage.underlyings,
+            )
+    else:
+        summary = coverage
+        if summary is not None and summary.run_id is not None:
+            run_ids = (summary.run_id,)
     if summary is None:
         return CoveragePreflight(
             passed=False,
@@ -576,7 +815,6 @@ def coverage_preflight(
             bar_continuity_fraction=0.0,
             coverage_run_id=None,
         )
-    reasons: list[str] = []
     if not summary.underlyings:
         reasons.append("the coverage run requested no underlyings")
     if summary.cycles_bracket_fraction < ev.gate_0c_cycles_bracket:
@@ -600,6 +838,8 @@ def coverage_preflight(
         bar_continuity_fraction=summary.bar_continuity_fraction,
         coverage_run_id=summary.run_id,
         underlyings=tuple(summary.underlyings),
+        coverage_run_ids=run_ids,
+        per_underlying=per_underlying,
     )
 
 
@@ -1390,9 +1630,9 @@ def assemble_options_evidence(
     return AssembledEvidence(
         evidence=evidence,
         per_underlying=tuple(runs),
-        coverage=latest_options_coverage_summary(
-            session, window_start=window.start, window_end=window.end
-        ),
+        coverage=dataset_snapshot_coverage(
+            session, dataset_snapshot, window_start=window.start, window_end=window.end
+        ).summary,
         clustered_d4=clustered_d4,
         clustered_f11=clustered_f11,
         boundary=boundary,
@@ -1754,6 +1994,10 @@ __all__ = [
     "UnderlyingRun",
     "assemble_options_evidence",
     "coverage_preflight",
+    "snapshot_options_coverage",
+    "pool_snapshot_coverage",
+    "dataset_snapshot_coverage",
+    "SnapshotCoverage",
     "cluster_key_cycle_only",
     "cluster_key_underlying_cycle",
     "clustered_bootstrap_ci",

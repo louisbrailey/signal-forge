@@ -916,6 +916,234 @@ def options_q_series_cmd(
     typer.echo("Reference data only. Research signal only — no order was placed.")
 
 
+@options_app.command("snapshot")
+def options_snapshot_cmd(
+    symbols: Annotated[
+        str,
+        typer.Option(help="Comma-separated underlyings the snapshot holds, e.g. SPY,QQQ,IWM."),
+    ],
+    since: Annotated[str, typer.Option(help="YYYY-MM-DD; the backfill window start.")],
+    until: Annotated[str, typer.Option(help="YYYY-MM-DD; the backfill window end.")],
+    key: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "DataSnapshot key. Default: the canonical "
+                "options_<set>_<provider>_<since>_<until>_<scopehash10>. A key given by hand "
+                "must carry the same 10-character scope hash (D3 §1 item 4)."
+            )
+        ),
+    ] = "",
+    run_id: Annotated[
+        int,
+        typer.Option(
+            "--run",
+            help=(
+                "ingestion_run id of the options_cycle_backfill run to read. Default: for "
+                "each underlying, the newest such run overlapping the window that requested it."
+            ),
+        ),
+    ] = 0,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print the scope, its hash and the key. Writes nothing."),
+    ] = True,
+    confirm: Annotated[
+        bool, typer.Option("--confirm", help="Write ONE immutable DataSnapshot row.")
+    ] = False,
+) -> None:
+    """Create the options-scoped DataSnapshot an options evaluation must name.
+
+    The scope (D1 §9) is composed from the pre-registered parameters plus the
+    coverage summary of the cycle-backfill run(s) that fetched the named
+    underlyings, restricted to those underlyings. Counts, dates and identities
+    only: no option bar is read.
+
+    ``--dry-run`` (the default) prints the scope, the scope hash, the
+    ``options_config_hash``, the coverage of the named set against gate
+    0.c/0.d's floors and the key that would be written. ``--confirm`` writes one
+    row. Refused, exiting non-zero: coverage of the named set below either
+    pre-registered floor (or absent for any underlying); coverage runs whose
+    window is not exactly ``--since``..``--until``; a key that does not carry the
+    scope hash; a key that already exists with different symbols or a different
+    scope; and, on ``--confirm``, a live worker. Re-running ``--confirm`` for an
+    identical snapshot writes nothing and says so.
+
+    Creating a snapshot spends no sealed look and evaluates nothing.
+    """
+    ensure_not_engaged()
+    import json as _json
+
+    from sqlalchemy import select
+
+    from signalforge.db.models import DataSnapshot
+    from signalforge.db.session import session_scope
+    from signalforge.research.options_evidence import coverage_preflight, snapshot_options_coverage
+    from signalforge.research.options_scope import (
+        DEFAULT_FILL_TIMING_BASIS,
+        DEFAULT_SPREAD_MODEL_ID,
+        SNAPSHOT_KEY_HASH_CHARS,
+        build_options_scope,
+        canonical_options_snapshot_key,
+        options_scope_hash,
+        scopes_match,
+    )
+    from signalforge.research.promotion import get_or_create_dataset_snapshot
+    from signalforge.scheduler import other_live_worker
+    from signalforge.worker_lock import worker_lock_holder
+
+    syms = sorted({x.strip().upper() for x in symbols.split(",") if x.strip()})
+    if not syms:
+        typer.secho("--symbols named no underlying", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+    try:
+        start, end = date.fromisoformat(since), date.fromisoformat(until)
+    except ValueError as exc:
+        typer.secho(f"--since/--until must be YYYY-MM-DD: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=2) from None
+    if start > end:
+        typer.secho(f"--since {start} is after --until {end}", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+    if confirm:
+        # --dry-run defaults to True, so --confirm must win when both are present.
+        dry_run = False
+
+    refusals: list[str] = []
+    with session_scope(write=False) as session:
+        cov = snapshot_options_coverage(
+            session,
+            syms,
+            window_start=start,
+            window_end=end,
+            run_ids=[run_id] if run_id else None,
+        )
+        pre = coverage_preflight(cov)
+        summary = cov.summary
+        if summary is None:
+            typer.secho("\nREFUSED:", fg=typer.colors.RED, bold=True)
+            for r in pre.reasons:
+                typer.secho(f"  - {r}", fg=typer.colors.RED)
+            typer.secho("no scope could be built; nothing was written.", fg=typer.colors.YELLOW)
+            raise typer.Exit(code=2)
+        refusals.extend(pre.reasons)
+        if (summary.window_start, summary.window_end) != (start, end):
+            refusals.append(
+                f"the coverage run(s) {list(cov.run_ids)} cover {summary.window_start}.."
+                f"{summary.window_end}, not the requested {start}..{end}; a snapshot's window "
+                "is the window its data was fetched for, never a relabelled one"
+            )
+        scope = build_options_scope(
+            summary,
+            spread_model_id=DEFAULT_SPREAD_MODEL_ID,
+            spread_multiplier=1.0,
+            fill_timing_basis=DEFAULT_FILL_TIMING_BASIS,
+            ingestion_run_ids=cov.run_ids,
+        )
+        scope_hash = options_scope_hash(scope)
+        canonical = canonical_options_snapshot_key(scope)
+        snap_key = key.strip() or canonical
+        if scope_hash[:SNAPSHOT_KEY_HASH_CHARS] not in snap_key:
+            refusals.append(
+                f"key {snap_key!r} does not carry this scope's hash "
+                f"({scope_hash[:SNAPSHOT_KEY_HASH_CHARS]}); the options snapshot key must carry "
+                f"the scope hash (D3 §1 item 4). Canonical key: {canonical}"
+            )
+        existing = session.scalar(select(DataSnapshot).where(DataSnapshot.key == snap_key))
+        existing_id = existing.id if existing is not None else None
+        if existing is not None:
+            have = sorted(str(x).upper() for x in existing.symbols_json)
+            if have != syms:
+                refusals.append(
+                    f"key {snap_key!r} already exists (id={existing.id}) with different symbols "
+                    f"({have}); a DataSnapshot is immutable — use a new, distinct key"
+                )
+            elif not scopes_match(existing.options_scope_json, scope):
+                refusals.append(
+                    f"key {snap_key!r} already exists (id={existing.id}) with a different "
+                    "options scope; the scope IS the dataset's identity — use a new, distinct key"
+                )
+
+    if confirm:
+        holder = worker_lock_holder()
+        live = other_live_worker()
+        if holder or live:
+            why = (
+                f"the scheduler worker holds the write lock (holder: {holder})"
+                if holder
+                else str(live)
+            )
+            refusals.append(
+                why + "; writing the snapshot opens a write transaction against the worker's "
+                "database — stop the worker first (docs/SQLITE_CONCURRENCY.md)"
+            )
+
+    typer.secho(f"options snapshot {snap_key!r}", bold=True)
+    typer.echo(f"  underlyings ({len(syms)}): {', '.join(syms)}")
+    typer.echo(f"  window: {start}..{end}   coverage run(s): {list(cov.run_ids)}")
+    typer.echo(f"  options_scope_hash:  {scope_hash}")
+    typer.echo(f"  options_config_hash: {scope['options_config_hash']}")
+    typer.echo(f"  canonical key:       {canonical}")
+    thresholds = scope["coverage_thresholds"]
+    typer.echo(
+        f"  coverage of this set: cycles {summary.cycles_covered}/{summary.cycles_total} "
+        f"({summary.cycles_bracket_fraction:.3f}, floor "
+        f"{thresholds['gate_0c_cycles_bracket']:.2f}); bars {summary.bars_written:,}/"
+        f"{summary.sessions_expected:,} ({summary.bar_continuity_fraction:.3f}, floor "
+        f"{thresholds['gate_0d_session_bars']:.2f})"
+    )
+    for sym, bracket, continuity, rid in pre.per_underlying:
+        typer.echo(f"    {sym}: cycles {bracket:.3f}, bars {continuity:.3f} (run #{rid})")
+    typer.echo("  options_scope_json:")
+    for line in _json.dumps(scope, indent=2, sort_keys=True).splitlines():
+        typer.echo(f"    {line}")
+
+    if refusals:
+        typer.secho("\nREFUSED:", fg=typer.colors.RED, bold=True)
+        for r in refusals:
+            typer.secho(f"  - {r}", fg=typer.colors.RED)
+        typer.secho("no DataSnapshot row was written.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=2)
+
+    if existing_id is not None:
+        typer.secho(
+            f"\nDataSnapshot {snap_key!r} already exists (id={existing_id}) with these exact "
+            "symbols and this exact scope; nothing to write.",
+            fg=typer.colors.GREEN,
+        )
+        return
+    if dry_run:
+        typer.secho(
+            f"\nDRY RUN — would write ONE DataSnapshot row: key {snap_key!r}, {len(syms)} "
+            "symbols, the scope above. Nothing was written. Re-run with --confirm.",
+            fg=typer.colors.YELLOW,
+        )
+        return
+
+    with session_scope(write=True) as session:
+        try:
+            snap = get_or_create_dataset_snapshot(
+                session,
+                key=snap_key,
+                symbols=syms,
+                description=(
+                    f"options-scoped snapshot: {', '.join(syms)}, {start}..{end}, "
+                    f"cycle-backfill run(s) {list(cov.run_ids)}"
+                ),
+                source_note=(
+                    f"created by 'signalforge options snapshot'; options_scope_hash {scope_hash}"
+                ),
+                options_scope=scope,
+            )
+        except ValueError as exc:
+            typer.secho(f"REFUSED: {exc}", fg=typer.colors.RED)
+            raise typer.Exit(code=2) from None
+        typer.secho(
+            f"\nwrote DataSnapshot id={snap.id} key {snap.key!r} ({len(syms)} symbols).",
+            fg=typer.colors.GREEN,
+        )
+    typer.echo("No evaluation was run and no sealed look was spent. Research data only.")
+
+
 @options_app.command("simulate")
 def options_simulate_cmd(
     strategy: Annotated[
@@ -1015,7 +1243,8 @@ def options_evaluate_promotion_cmd(
     refuses while the worker holds the SQLite write lock.
 
     Three refusals, all exiting non-zero: a missing D5 pre-registration file,
-    coverage below gate 0.c/0.d's pre-registered floors, and (``--confirm`` only)
+    coverage of the snapshot's own underlyings below gate 0.c/0.d's
+    pre-registered floors (or absent for any of them), and (``--confirm`` only)
     a worker holding the write lock. On a ``--dry-run`` the refusal is printed and
     the ladder is still shown as a diagnostic, but the exit code stays non-zero so
     nothing can mistake a refused rehearsal for a pass.
@@ -1032,7 +1261,7 @@ def options_evaluate_promotion_cmd(
     from signalforge.research.options_evidence import (
         assemble_options_evidence,
         coverage_preflight,
-        latest_options_coverage_summary,
+        dataset_snapshot_coverage,
         options_ladder_preview,
         preregistration_path,
     )
@@ -1103,9 +1332,12 @@ def options_evaluate_promotion_cmd(
                 fg=typer.colors.RED,
             )
             raise typer.Exit(code=2)
+        # Coverage is asked of THIS snapshot's underlyings (pooled over exactly
+        # its symbols, each read from the run that fetched it) — not of whichever
+        # cycle-backfill run happens to be newest.  Same two floors.
         pre = coverage_preflight(
-            latest_options_coverage_summary(
-                session, window_start=window.start, window_end=window.end
+            dataset_snapshot_coverage(
+                session, snap, window_start=window.start, window_end=window.end
             )
         )
         refusals.extend(pre.reasons)

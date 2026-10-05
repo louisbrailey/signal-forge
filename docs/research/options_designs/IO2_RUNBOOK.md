@@ -368,3 +368,100 @@ everywhere else in this runbook — a session no longer needs to be open for
 Stage B to keep making progress. Check `ps -p $(cat
 ~/Library/Logs/signalforge/io2_stage_b_loop.pid)` to confirm it is still
 alive; if not, restart it with the same command.
+
+## 12. From a finished backfill to the first dry-run evaluation (added 2026-10-04)
+
+Stage A (run 17) passes the coverage floors; Stage B (run 18) does not (0.420 / 0.644 against
+0.90 / 0.80). The operator chose §6's first permitted response — **drop the Stage B
+underlyings** — recorded in `D5a_amendment_3_index_underlyings.md`. The first evaluation
+therefore runs on SPY, QQQ, IWM. Read that amendment first; item OR-0c in it must be closed
+before any `--confirm` evaluation.
+
+The steps, in order. Every step that writes needs the worker stopped; steps 2, 4, 6a and 8 only
+read.
+
+```
+# 1. stop the worker (launchctl unload / Keep Alive panel, however it is run here)
+
+# 2. measure the merge — identical work, rolled back
+signalforge options merge --from data/io2_bulk.sqlite --dry-run
+
+# 3. merge (writes; re-keys runs 17 and 18 and prints their NEW ids)
+sqlite3 data/io2_bulk.sqlite "PRAGMA wal_checkpoint(TRUNCATE);"
+signalforge options merge --from data/io2_bulk.sqlite
+
+# 4. confirm the merged coverage matches §10's figures — use the NEW ids from step 3
+signalforge options coverage-report --run <new id of run 17>
+signalforge options coverage-report --run <new id of run 18>
+
+# 5. derive q for the evaluated underlyings and window (writes; idempotent — the series is
+#    already derived 2016-10 -> 2026-10-02 for SPY QQQ IWM AAPL MSFT NVDA on the live DB, so
+#    this reports the sessions as unchanged)
+signalforge options q-series --symbols SPY,QQQ,IWM --since 2023-09-04 --until 2026-09-04
+
+# 6a. print the scope, its hash, the coverage of THIS set and the key — writes nothing
+signalforge options snapshot --symbols SPY,QQQ,IWM \
+  --since 2023-09-04 --until 2026-09-04 --dry-run
+
+# 6b. write the one DataSnapshot row (refuses while a worker is live)
+signalforge options snapshot --symbols SPY,QQQ,IWM \
+  --since 2023-09-04 --until 2026-09-04 \
+  --key options_idx3_massive_2023-09-04_2026-09-04_6fa62e29d7 --confirm
+
+# 7. start the worker again
+
+# 8. the dry-run evaluation — no evaluation row, no sealed test, no look
+signalforge options evaluate-promotion \
+  --strategy options_short_vertical.medium_swing \
+  --snapshot-key options_idx3_massive_2023-09-04_2026-09-04_6fa62e29d7 \
+  --since 2023-09-04 --until 2026-09-04 --dry-run
+```
+
+### 12.1 The snapshot command and its key
+
+`options snapshot` composes `options_scope_json` (D1 §9) from the pre-registered parameters and
+the coverage summary of the cycle run(s) that fetched the named underlyings, restricted to those
+underlyings. It reads `ingestion_run` only — no option bar — and prints counts and identities.
+
+**Key convention:** `options_<set>_<provider>_<since>_<until>_<scopehash10>`, where `<set>` is
+`idx3` for exactly SPY/QQQ/IWM and `<n>und` otherwise, and `<scopehash10>` is the first ten hex
+characters of `options_scope_hash`. D3 §1 item 4 requires the key to carry the scope hash, so
+that a change to any identity parameter moves the key. `--key` may be omitted (the canonical key
+is used) and a hand-written key is refused unless it contains that hash. For the index set the
+key is `options_idx3_massive_2023-09-04_2026-09-04_6fa62e29d7`; step 6a prints it, and if the
+printed suffix differs, **stop** — the scope is not the one Amendment 3 describes.
+
+`--run <id>` pins the read to one run; without it each underlying is read from the newest
+overlapping cycle run that requested it. The ids used are recorded in the scope
+(`ingestion_run_ids`, provenance — not part of the hash), and an evaluation of that snapshot is
+judged on exactly those runs.
+
+It refuses, exiting 2 and writing nothing, when: the named set's pooled coverage is below 0.90 /
+0.80, or any underlying has no recorded coverage; the runs' window is not exactly
+`--since`..`--until`; the runs disagree on ladder, cycle rule, provider or strike-listing basis;
+the key lacks the scope hash; the key exists with different symbols or a different scope; or
+(`--confirm`) a worker lock or live heartbeat exists. Re-running `--confirm` for an identical
+snapshot writes nothing and says so. It spends no sealed look.
+
+### 12.2 What the pre-flight now reads
+
+`options evaluate-promotion` asks the two coverage floors of **the snapshot's own underlyings**
+— pooled over exactly its symbols, each from the run that fetched it — instead of the newest
+cycle run as a whole. The floors are the same. Continuity there is summed from the per-cycle
+bar records, which for run 17 gives **0.828** rather than the run counter's 0.851 (the counter
+includes 3,440 bars from cycle attempts that were later re-attempted); both clear 0.80. The
+per-underlying fractions are printed by step 6a: SPY 0.941 / 0.825, QQQ 0.882 / 0.854, IWM
+0.882 / 0.804.
+
+A set containing a Stage B name is refused whenever it drags the pool below a floor (e.g. adding
+AAPL gives 102/136 = 0.750). The remedy is §6's, unchanged: drop it, or pre-register a finer
+rung set and re-backfill (Amendment 3 §6).
+
+### 12.3 What step 8 does and does not do
+
+It assembles the evidence and prints the ladder through the read-only preview. It writes no
+evaluation row and no sealed test and spends no look; with any refusal it still prints the
+ladder as a diagnostic and exits non-zero. It **does** show pre-sealed diagnostics, so after it
+runs the underlying set, OR-0c and OR-F15 are frozen (Amendment 3 §5). A `--confirm` evaluation
+is a separate operator decision, needs `--grid`, needs the worker stopped, and is look 1 of the
+family.

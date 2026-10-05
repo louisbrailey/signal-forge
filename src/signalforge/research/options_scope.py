@@ -142,3 +142,35 @@ def scopes_match(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
     if a is None and b is None:
         return True
     return options_scope_hash(a) == options_scope_hash(b)
+
+
+# --------------------------------------------------------------------------- #
+# the `options snapshot` command's fixed inputs and key convention
+# --------------------------------------------------------------------------- #
+#: D2's modelled spread (NBBO is not entitled): a fraction of the last print
+#: with an absolute floor, rounded to tick away from the engine.  An identity
+#: string — the constants themselves live in ``PREREGISTERED_COST_MODEL``.
+DEFAULT_SPREAD_MODEL_ID = "d2_pct_of_last_print_abs_floor"
+#: D2 §10.1: a triggered fill is taken at the session after the signal (t+1).
+DEFAULT_FILL_TIMING_BASIS = "next_session"
+#: The Stage A index ETFs (IO2 runbook §2), which get a readable key label.
+STAGE_A_INDEX_UNDERLYINGS = ("IWM", "QQQ", "SPY")
+#: How many leading hex characters of ``options_scope_hash`` the key carries.
+SNAPSHOT_KEY_HASH_CHARS = 10
+
+
+def canonical_options_snapshot_key(scope: dict[str, Any]) -> str:
+    """``options_<set>_<provider>_<start>_<end>_<scopehash10>`` (D3 §1 item 4).
+
+    D3 requires the options snapshot key to **carry the scope hash**, so a
+    change to any identity parameter cannot reuse a key by accident: the key
+    itself moves.  ``<set>`` is ``idx3`` for exactly the Stage A index ETFs and
+    ``<n>und`` otherwise; the readable parts are a convenience, the hash suffix
+    is the identity.
+    """
+    underlyings = sorted(str(u).upper() for u in scope.get("underlyings", []))
+    label = "idx3" if tuple(underlyings) == STAGE_A_INDEX_UNDERLYINGS else f"{len(underlyings)}und"
+    window = scope.get("window", {})
+    provider = str((scope.get("reference_price") or {}).get("source", "") or "unknown")
+    digest = options_scope_hash(scope)[:SNAPSHOT_KEY_HASH_CHARS]
+    return f"options_{label}_{provider}_{window.get('start')}_{window.get('end')}_{digest}"

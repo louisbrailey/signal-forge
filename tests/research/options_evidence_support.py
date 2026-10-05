@@ -258,13 +258,24 @@ def seed_coverage_run(
     bars_written: int = 1000,
     sessions_expected: int = 1000,
     status: str = "ok",
+    window_start: date = WINDOW_START,
+    window_end: date = WINDOW_END,
+    started_at: datetime | None = None,
 ) -> IngestionRun:
-    """An ``IngestionRun`` shaped exactly as ``coverage_summary`` reads it."""
+    """An ``IngestionRun`` shaped exactly as ``coverage_summary`` reads it.
+
+    The counts are PER UNDERLYING, as a real cycle run records them: every
+    symbol gets its own ``cycles`` map, and each cycle its own ``bars_written``
+    — which is what the per-snapshot pre-flight sums.  The run-level
+    ``bars_written`` is the total across symbols, so the whole-run fractions
+    equal the per-underlying ones.
+    """
     # ``coverage_summary`` computes sessions_expected as
     # sum(cycle.sessions_expected * cycle.contracts_fetched), so one contract per
     # cycle keeps the arithmetic something a reader can check on paper.
     cycles: dict[str, dict[str, object]] = {}
     per_cycle = sessions_expected // max(cycles_total, 1)
+    bars_each, bars_extra = divmod(bars_written, max(cycles_total, 1))
     for i in range(cycles_total):
         cycles[f"2024-{i + 1:02d}-15"] = {
             "excluded": None if i < cycles_covered else "ladder_incomplete",
@@ -272,22 +283,23 @@ def seed_coverage_run(
             "selected_puts": 8,
             "contracts_fetched": 1,
             "sessions_expected": per_cycle,
+            "bars_written": bars_each + (bars_extra if i == 0 else 0),
             "shares_per_contract_refusals": 0,
         }
     run = IngestionRun(
         provider=SOURCE,
         feed_type=FeedType.OPTIONS_CHAIN,
         kind="options_cycle_backfill",
-        requested_start=WINDOW_START,
-        requested_end=WINDOW_END,
+        requested_start=window_start,
+        requested_end=window_end,
         adjusted=True,
         symbols_requested=list(symbols),
         symbols_ok=list(symbols),
         symbols_failed={},
-        bars_written=bars_written,
+        bars_written=bars_written * len(symbols),
         bars_skipped=0,
         status=status,
-        started_at=utcnow(),
+        started_at=started_at or utcnow(),
         gaps_json={
             "__run__": {
                 "cycle_rule": "monthly_third_friday",
@@ -297,7 +309,7 @@ def seed_coverage_run(
                 "max_total_bars_prior": 200_000,
                 "pacing_s": 12.0,
             },
-            symbols[0]: {"cycles": cycles},
+            **{sym: {"cycles": {k: dict(v) for k, v in cycles.items()}} for sym in symbols},
         },
     )
     session.add(run)

@@ -444,3 +444,16 @@ Baseline cell = `(0.20, 0.35, 2.0, 35, 0.50, 0.150)`. One-step neighbours: 7, un
 **R3 consequence.** This is a behavioural change and ships as a new version. Because k = 0, it
 costs **no** sealed look. v0.1.1 was never evaluated and is withdrawn, not abandoned. D5 §10's
 budget is untouched: 1 variant, hard cap 2, still available.
+
+---
+
+## Appendix (2026-10-04): pointer to Amendment 3. Moves nothing in this document.
+
+§5 says the underlying set stays as D5a left it. For the first evaluation it is now restricted to
+**SPY, QQQ, IWM** by
+
+> **`docs/research/options_designs/D5a_amendment_3_index_underlyings.md`**
+
+because the 21 Stage B underlyings fail the pre-registered coverage floors. The strategy version
+(v0.1.2), the width, the band and every number in this document are unchanged. §3.3's "of 14"
+concurrency arithmetic should be read against 3 underlyings (Amendment 3 §4.7).
