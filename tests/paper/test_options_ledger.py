@@ -226,6 +226,8 @@ def test_a_debit_vertical_reserves_nothing_because_the_cash_already_left(
         structure_type="vertical_debit",
         underlying_symbol=fx.UNDERLYING,
         contracts=1,
+        option_source=fx.OPTION_SOURCE,
+        underlying_source=fx.BAR_SOURCE,
         legs=(
             LegSpec(fx.SHORT_TICKER, "put", 430.0, fx.EXPIRY, 1, 100, "american"),
             LegSpec(fx.LONG_TICKER, "put", 428.0, fx.EXPIRY, -1, 100, "american"),
@@ -1058,6 +1060,7 @@ def test_a_name_with_no_close_is_refused_by_the_recorded_series_resolver(
             fx.FILL_SESSION,
             cost_model=fx.cost_model(),
             risk_free_rate=0.04,
+            underlying_source=fx.BAR_SOURCE,
         )
     assert exc.value.underlying == fx.UNDERLYING
 
@@ -1069,6 +1072,7 @@ def test_a_name_with_no_close_is_refused_by_the_recorded_series_resolver(
         fx.FILL_SESSION,
         cost_model=fx.cost_model(),
         risk_free_rate=0.04,
+        underlying_source=fx.BAR_SOURCE,
     )
     assert ctx.q_source == "vendor_dividends"
     assert ctx.dividend_yield == pytest.approx(1.50 / fx.SPOT)

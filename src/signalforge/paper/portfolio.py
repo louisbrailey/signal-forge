@@ -17,15 +17,49 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from signalforge.data.repository import get_daily_bars
-from signalforge.db.models import Instrument, PaperAccount, PaperPosition
-from signalforge.domain import PositionSide
+from signalforge.db.models import Instrument, PaperAccount, PaperPosition, PaperTrade
+from signalforge.domain import PaperDecision, PositionSide
 from signalforge.paper.books import book_label, equity_books
 from signalforge.paper.equity_guard import assert_equity_instrument
 from signalforge.risk.portfolio import Holding, exposure_report
 
 
-def _last_close(session: Session, symbol: str, on: date) -> float | None:
-    bars = get_daily_bars(session, symbol, on - timedelta(days=10), on)
+def _position_source(session: Session, pos: PaperPosition) -> str | None:
+    """The ``ohlcv_daily.source`` frozen into the position's acceptance snapshot.
+
+    The same provenance ``paper.ledger._position_bars`` marks from (not imported:
+    contract S14 keeps ``paper.ledger`` out of the agents layer's reach, and this
+    module is on that layer's import path). ``None`` for a legacy acceptance
+    that recorded none.
+    """
+    trade = session.scalar(
+        select(PaperTrade)
+        .where(PaperTrade.position_id == pos.id, PaperTrade.decision == PaperDecision.ACCEPTED)
+        .order_by(PaperTrade.id)
+    )
+    if trade is None:
+        return None
+    source = (trade.signal_snapshot_json.get("scan") or {}).get("source")
+    return str(source) if source else None
+
+
+def _last_close(session: Session, pos: PaperPosition, symbol: str, on: date) -> float | None:
+    """The last close from the position's RECORDED bar source — never whichever
+    source's row happens to sort last.
+
+    Same rule as the equity mark (``paper.ledger._position_bars``): read under the
+    frozen acceptance provenance, and when a legacy position recorded none, read
+    unfiltered but FAIL CLOSED the moment two sources hold a bar for the same
+    session, because then the close is ambiguous and a number would be a guess.
+    """
+    bars = get_daily_bars(
+        session, symbol, on - timedelta(days=10), on, source=_position_source(session, pos)
+    )
+    if len({bar.session_date for bar in bars}) != len(bars):
+        raise ValueError(
+            f"ambiguous paper mark sources for {symbol} (position {pos.id}): "
+            f"{sorted({bar.source for bar in bars})}; explicit provenance required"
+        )
     return float(bars[-1].close) if bars else None
 
 
@@ -59,7 +93,7 @@ def _account_snapshot(
         # ``mark_to_market``; the assertion belongs here too, and is equally a
         # no-op today (D3 §7.2).
         assert_equity_instrument(inst, "portfolio_snapshot")
-        px = _last_close(session, inst.symbol, on) or float(pos.avg_price)
+        px = _last_close(session, pos, inst.symbol, on) or float(pos.avg_price)
         d = 1 if pos.side is PositionSide.LONG else -1
         mv = px * pos.qty * d
         pnl = d * (px - float(pos.avg_price)) * pos.qty

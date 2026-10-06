@@ -210,10 +210,24 @@ def _options_eod_pricing(
     cap evaluation, which is why substituting one is not an option.)
     """
     from signalforge.config.research import OptionsEvaluationConfig
-    from signalforge.paper.options_marks import resolve_pricing_by_underlying
+    from signalforge.paper.options_marks import (
+        resolve_pricing_by_underlying,
+        resolve_underlying_sources,
+    )
     from signalforge.research.options_strategies.short_vertical import PREREGISTERED_COST_MODEL
 
     evaluation = OptionsEvaluationConfig()
+    # The spot's bar source, PER NAME, from what is recorded: open structures'
+    # ``underlying_source`` and the signal session's candidate scans. Two labels
+    # for one name is a blend and refuses that name; nothing recorded falls back
+    # to the stored bars only when exactly ONE source holds them.
+    sources = resolve_underlying_sources(
+        session,
+        underlyings,
+        as_of=as_of,
+        account_name=_options_account_name(session),
+        signal_session=_previous_trading_session(as_of),
+    )
     # An empty survey resolves to an EMPTY resolver, not to a context carrying a
     # placeholder number. Nothing is open and no options candidate exists, so no
     # leg is ever quoted; if some future caller did ask it for a name it would be
@@ -224,6 +238,7 @@ def _options_eod_pricing(
         as_of,
         cost_model=PREREGISTERED_COST_MODEL,
         risk_free_rate=evaluation.risk_free_rate,
+        sources=sources,
     )
 
 
@@ -400,6 +415,8 @@ def job_options_paper_eod() -> None:
         iv_unavailable=marks.iv_unavailable,
         unpriceable=marks.unpriceable,
         unpriceable_underlyings=marks.unpriceable_underlyings,
+        mark_refused=marks.mark_refused,
+        refused_position_ids=marks.refused_position_ids,
     )
 
     recon = _unit(
@@ -429,6 +446,8 @@ def job_options_paper_eod() -> None:
         forced_close_no_print=expiries.forced_close_no_print,
         unpriceable=expiries.unpriceable,
         unpriceable_underlyings=expiries.unpriceable_underlyings,
+        mark_refused=expiries.mark_refused,
+        refused_position_ids=expiries.refused_position_ids,
     )
 
     sim = _unit(

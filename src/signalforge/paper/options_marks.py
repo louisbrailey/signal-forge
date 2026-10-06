@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from math import isfinite
 from typing import Any, Protocol
@@ -48,12 +48,18 @@ from signalforge.backtest.options_costs import OptionCostModel
 from signalforge.data import options_calendar
 from signalforge.data.options_corporate_actions import trailing_dividend_yield
 from signalforge.db.models import (
+    AuditLog,
+    Candidate,
+    CandidateOptionStructure,
+    Instrument,
+    OHLCVDaily,
     OptionsCollateralEntry,
     OptionsMark,
     OptionsPosition,
     OptionsReconcileReport,
     OptionsTrade,
     PaperAccount,
+    ScanRun,
 )
 from signalforge.db.types import utcnow
 from signalforge.domain import PaperDecision
@@ -64,6 +70,7 @@ from signalforge.paper.options_ledger import (
     LegQuote,
     OptionExpiryUnhandled,
     OptionsPricingContext,
+    PriceSourceUnresolved,
     StructureSpec,
     _money,
     _underlying_close,
@@ -87,17 +94,25 @@ __all__ = [
     "ReconcileReport",
     "ResolvedPricing",
     "UnderlyingNotPriceable",
+    "UnderlyingSources",
     "mark_options_to_market",
     "options_portfolio_snapshot",
     "process_option_expiries",
     "reconcile_options_collateral",
     "resolve_pricing_by_underlying",
     "resolve_underlying_pricing",
+    "resolve_underlying_sources",
 ]
 
 _log = get_logger("paper.options_marks")
 
 _PHASE1_SHARES_PER_CONTRACT = 100
+
+#: ``audit_log.action`` of a mark (or expiry step) REFUSED because the structure's
+#: price reads could not name ONE source. The refusal is a row, not a log line:
+#: a structure that was not valued must be visible on the record, and reconcile
+#: check 11 then turns the missing mark into a finding.
+MARK_REFUSED_ACTION = "paper.options_mark_refused"
 
 
 # --------------------------------------------------------------------------- #
@@ -142,15 +157,21 @@ def resolve_underlying_pricing(
     *,
     cost_model: OptionCostModel,
     risk_free_rate: float,
+    underlying_source: str,
     beta_to_spy: float = 1.0,
 ) -> OptionsPricingContext:
     """Source ONE underlying's pricing context from the recorded series.
 
-    Three inputs, none of them defaulted into existence:
+    Four inputs, none of them defaulted into existence:
 
-    * the underlying's **close** for that session, from ``ohlcv_daily`` (the
-      reference price the trailing yield is expressed against, and the spot every
-      greek is taken at). Absent -> refuse, by name.
+    * ``underlying_source`` — the ONE ``ohlcv_daily.source`` label the close is
+      read under, and the label the context then carries so every greek taken
+      at this spot can be checked against the structure's recorded source.
+      Required: the live database holds the same symbol's bars under two labels,
+      so an unfiltered read is a guess. Empty -> refuse, by name.
+    * the underlying's **close** for that session, from ``ohlcv_daily`` under
+      that source (the reference price the trailing yield is expressed against,
+      and the spot every greek is taken at). Absent -> refuse, by name.
     * ``q`` — decision 11 **rank 1** only: the trailing twelve-month declared
       yield from the recorded ``dividend_event`` series for THIS name. Rank 2
       (put-call parity) is not built, and ``q = 0.0`` is forbidden, so an
@@ -161,12 +182,19 @@ def resolve_underlying_pricing(
       paper marks and the evaluations that approved the strategy cannot drift
       apart silently.
     """
-    spot = _underlying_close(session, underlying, as_of)
+    source = str(underlying_source or "").strip()
+    if not source:
+        raise UnderlyingNotPriceable(
+            underlying,
+            "no underlying-bar source was named for the close; the spot is never read "
+            "unfiltered and the highest id never wins",
+        )
+    spot = _underlying_close(session, underlying, as_of, source=source)
     if spot is None or spot <= 0.0:
         raise UnderlyingNotPriceable(
             underlying,
-            f"no ohlcv_daily close on or before {as_of.isoformat()}; a structure cannot be "
-            "valued against an unknown spot",
+            f"no ohlcv_daily close on or before {as_of.isoformat()} under source {source!r}; "
+            "a structure cannot be valued against an unknown spot",
         )
     q = trailing_dividend_yield(session, underlying, as_of, reference_close=spot)
     if q is None:
@@ -181,8 +209,129 @@ def resolve_underlying_pricing(
         risk_free_rate=risk_free_rate,
         dividend_yield=q.q,
         q_source=q.source,
+        underlying_source=source,
         beta_to_spy=beta_to_spy,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class UnderlyingSources:
+    """Per underlying, the ONE ``ohlcv_daily.source`` its spot is read under — or why not.
+
+    ``resolved`` maps a name to its label; ``refused`` maps a name to the named
+    reason no single label could be established. A name is in exactly one.
+    """
+
+    resolved: Mapping[str, str]
+    refused: Mapping[str, str]
+
+
+def resolve_underlying_sources(
+    session: Session,
+    underlyings: frozenset[str],
+    *,
+    as_of: date,
+    account_name: str,
+    signal_session: date,
+) -> UnderlyingSources:
+    """Which bar source each name's spot is read from. RECORDED, never guessed.
+
+    Two recorded witnesses per name, in this order, and they must agree:
+
+    1. the ``underlying_source`` recorded on every OPEN structure on that name in
+       the options account (written at entry from the scan's ``scan_run.source``);
+    2. the ``source`` of every ``signal_session`` scan run carrying an options
+       candidate on that name (what the auto-simulation step would open from).
+
+    Exactly one label across both -> resolved. Two or more -> refused by name:
+    a book that would need two spots for one name is a blend, and no structure
+    on it is marked (``paper.options_mark_refused``). An empty recorded label
+    refuses the same way.
+
+    When NEITHER witness exists (nothing open and nothing proposed on the name —
+    the case a caller hits only when it prices a name outside the EOD plan) the
+    stored bars themselves are consulted: if exactly ONE ``ohlcv_daily.source``
+    holds a bar for the name in the mark window that label is the answer, since
+    there is nothing to choose between; if two or more do, the name is refused —
+    which is exactly what the live database does for SPY (``massive`` and
+    ``massive_grouped``). A stored-only resolution is never a fallback for a
+    recorded one: once anything is open or proposed, only the record counts.
+    """
+    account_id = session.scalar(select(PaperAccount.id).where(PaperAccount.name == account_name))
+    day_start = datetime.combine(signal_session, time.min, tzinfo=UTC)
+    resolved: dict[str, str] = {}
+    refused: dict[str, str] = {}
+    for symbol in sorted(underlyings):
+        recorded: set[str] = set()
+        blank = False
+        if account_id is not None:
+            for label in session.scalars(
+                select(OptionsPosition.underlying_source).where(
+                    OptionsPosition.account_id == account_id,
+                    OptionsPosition.underlying_symbol == symbol,
+                    OptionsPosition.closed_at.is_(None),
+                )
+            ):
+                if str(label or "").strip():
+                    recorded.add(str(label).strip())
+                else:
+                    blank = True
+        for label in session.scalars(
+            select(ScanRun.source)
+            .join(Candidate, Candidate.scan_run_id == ScanRun.id)
+            .join(CandidateOptionStructure, CandidateOptionStructure.candidate_id == Candidate.id)
+            .where(
+                CandidateOptionStructure.underlying_symbol == symbol,
+                ScanRun.started_at >= day_start,
+                ScanRun.started_at < day_start + timedelta(days=1),
+            )
+            .distinct()
+        ):
+            if str(label or "").strip():
+                recorded.add(str(label).strip())
+            else:
+                blank = True
+        if blank:
+            refused[symbol] = (
+                "an open structure or a candidate scan on this name records NO bar source; "
+                "the spot is never read unfiltered"
+            )
+            continue
+        if len(recorded) > 1:
+            refused[symbol] = (
+                f"open structures / candidate scans on this name record {sorted(recorded)} as "
+                "bar sources; one name is never priced off two vendors' closes"
+            )
+            continue
+        if len(recorded) == 1:
+            resolved[symbol] = next(iter(recorded))
+            continue
+        stored = sorted(
+            str(s)
+            for s in session.scalars(
+                select(OHLCVDaily.source)
+                .join(Instrument, OHLCVDaily.instrument_id == Instrument.id)
+                .where(
+                    Instrument.symbol == symbol,
+                    OHLCVDaily.session_date >= as_of - timedelta(days=10),
+                    OHLCVDaily.session_date <= as_of,
+                )
+                .distinct()
+            )
+        )
+        if len(stored) == 1:
+            resolved[symbol] = stored[0]
+        elif not stored:
+            refused[symbol] = (
+                f"no ohlcv_daily close on or before {as_of.isoformat()} under any source; "
+                "nothing recorded names one either"
+            )
+        else:
+            refused[symbol] = (
+                f"ohlcv_daily holds bars for this name under {stored} and nothing recorded "
+                "names which one; the source is never guessed"
+            )
+    return UnderlyingSources(resolved=resolved, refused=refused)
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,18 +379,30 @@ def resolve_pricing_by_underlying(
     *,
     cost_model: OptionCostModel,
     risk_free_rate: float,
+    sources: UnderlyingSources,
     beta_to_spy: float = 1.0,
 ) -> ResolvedPricing:
     """Resolve every name INDEPENDENTLY; one refusal never refuses the others.
 
     A multi-underlying book is priceable — that is the whole point. Each name
-    gets its own ``q`` from its own recorded series, and a name that cannot be
-    sourced is carried as a named reason rather than as an exception that would
-    take the rest of the book down with it.
+    gets its own ``q`` from its own recorded series and its spot from its own
+    recorded bar source (``sources``, from :func:`resolve_underlying_sources`),
+    and a name that cannot be sourced — no ``q``, no close, or no ONE bar source
+    — is carried as a named reason rather than as an exception that would take
+    the rest of the book down with it.
     """
     contexts: dict[str, OptionsPricingContext] = {}
     unpriceable: dict[str, str] = {}
     for symbol in sorted(underlyings):
+        if symbol in sources.refused:
+            unpriceable[symbol] = sources.refused[symbol]
+            _log.error(
+                "paper.options_pricing_unsourceable",
+                underlying=symbol,
+                as_of=as_of.isoformat(),
+                reason=sources.refused[symbol],
+            )
+            continue
         try:
             contexts[symbol] = resolve_underlying_pricing(
                 session,
@@ -249,6 +410,7 @@ def resolve_pricing_by_underlying(
                 as_of,
                 cost_model=cost_model,
                 risk_free_rate=risk_free_rate,
+                underlying_source=sources.resolved.get(symbol, ""),
                 beta_to_spy=beta_to_spy,
             )
         except UnderlyingNotPriceable as exc:
@@ -277,6 +439,7 @@ def _q_record(pricing: OptionsPricingContext) -> dict[str, Any]:
         "risk_free_rate": pricing.risk_free_rate,
         "iv_source": pricing.iv_source,
         "greeks_source": pricing.greeks_source,
+        "underlying_source": pricing.underlying_source,
     }
 
 
@@ -303,6 +466,10 @@ class OptionsMarkResult:
     closed_position_ids: list[int] = field(default_factory=list)
     #: underlyings whose pricing inputs could not be sourced, BY NAME.
     unpriceable_underlyings: list[str] = field(default_factory=list)
+    #: structures REFUSED a mark because their price reads could not name ONE
+    #: source (``paper.options_mark_refused`` audit rows). Not marked, not closed.
+    mark_refused: int = 0
+    refused_position_ids: list[int] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -316,6 +483,9 @@ class ExpiryReport:
     realized_pnl: float = 0.0
     closed_position_ids: list[int] = field(default_factory=list)
     unpriceable_underlyings: list[str] = field(default_factory=list)
+    #: as on :class:`OptionsMarkResult`: refused for want of ONE named source.
+    mark_refused: int = 0
+    refused_position_ids: list[int] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -347,9 +517,82 @@ def _quotes(
             underlying_symbol=structure.underlying_symbol,
             as_of=as_of,
             pricing=pricing,
+            option_source=structure.option_source,
+            underlying_source=structure.underlying_source,
         )
         for leg in structure.legs
     }
+
+
+def _assert_price_sources(structure: StructureSpec, pricing: OptionsPricingContext) -> None:
+    """Every price read for ``structure`` can name its source, and the spot source
+    is the one ``pricing`` was resolved under. Raises :class:`PriceSourceUnresolved`
+    BEFORE any row is read; the caller refuses the mark and writes the audit row."""
+    if not structure.option_source.strip():
+        raise PriceSourceUnresolved(
+            f"{structure.underlying_symbol} {structure.structure_type}: the position records no "
+            "option-data source, so its legs' prints cannot be read from ONE named source"
+        )
+    if not structure.underlying_source.strip():
+        raise PriceSourceUnresolved(
+            f"{structure.underlying_symbol} {structure.structure_type}: the position records no "
+            "underlying-bar source, so its spot cannot be read from ONE named source"
+        )
+    if structure.underlying_source != pricing.underlying_source:
+        raise PriceSourceUnresolved(
+            f"{structure.underlying_symbol} {structure.structure_type}: the position records "
+            f"underlying source {structure.underlying_source!r} but this session's pricing "
+            f"context read its spot from {pricing.underlying_source!r}"
+        )
+
+
+def _refuse_mark(
+    session: Session,
+    position: OptionsPosition,
+    structure: StructureSpec,
+    *,
+    as_of: date,
+    actor: str,
+    stage: str,
+    reason: str,
+) -> None:
+    """Record that ``position`` was NOT valued on ``as_of`` and why — as a row.
+
+    Nothing else is written: no mark, no close, no release. The structure stays
+    open and unmarked, which reconcile check 11 turns into a finding, so the
+    second guard's condition AA opens nothing against the book until the
+    provenance is repaired by an operator (never by code picking a row).
+    """
+    session.add(
+        AuditLog(
+            ts=utcnow(),
+            actor=actor,
+            action=MARK_REFUSED_ACTION,
+            entity=f"options_position:{position.id}",
+            before_json={},
+            after_json={
+                "position_id": position.id,
+                "underlying": structure.underlying_symbol,
+                "structure_type": structure.structure_type,
+                "as_of": as_of.isoformat(),
+                "stage": stage,
+                "reason": reason,
+                "option_source": structure.option_source,
+                "underlying_source": structure.underlying_source,
+                "simulated": True,
+                "notice": NOTICE,
+            },
+        )
+    )
+    session.flush()
+    _log.error(
+        "paper.options_mark_refused",
+        position=position.id,
+        underlying=structure.underlying_symbol,
+        as_of=as_of.isoformat(),
+        stage=stage,
+        reason=reason,
+    )
 
 
 def _net_premium_at_print(structure: StructureSpec, quotes: dict[str, LegQuote]) -> float | None:
@@ -565,7 +808,23 @@ def mark_options_to_market(
                 reason=exc.reason,
             )
             continue
-        quotes = _quotes(session, structure, as_of=as_of, pricing=ctx)
+        try:
+            _assert_price_sources(structure, ctx)
+            quotes = _quotes(session, structure, as_of=as_of, pricing=ctx)
+        except PriceSourceUnresolved as exc:
+            # NOT marked, NOT closed, NOT guessed — and RECORDED as a row.
+            _refuse_mark(
+                session,
+                position,
+                structure,
+                as_of=as_of,
+                actor=actor,
+                stage="mark",
+                reason=str(exc),
+            )
+            result.mark_refused += 1
+            result.refused_position_ids.append(position.id)
+            continue
         priced = [t for t, q in quotes.items() if q.priced]
         net_premium = _net_premium_at_print(structure, quotes)
         greeks = structure_greeks(structure, quotes, beta_to_spy=ctx.beta_to_spy)
@@ -765,6 +1024,23 @@ def process_option_expiries(
                 reason=exc.reason,
             )
             continue
+        try:
+            _assert_price_sources(structure, ctx)
+        except PriceSourceUnresolved as exc:
+            # Settlement and force-close both read the spot and the prints; with
+            # no ONE named source neither is attempted. Recorded, left open.
+            _refuse_mark(
+                session,
+                position,
+                structure,
+                as_of=as_of,
+                actor=actor,
+                stage="expiry",
+                reason=str(exc),
+            )
+            report.mark_refused += 1
+            report.refused_position_ids.append(position.id)
+            continue
         expiry = position.expiration_date
         try:
             last_trade = options_calendar.last_trade_session(expiry)
@@ -819,7 +1095,9 @@ def process_option_expiries(
                 assignment_risk=_assignment_risk(structure, quotes),
             )
         else:
-            spot = _underlying_close(session, structure.underlying_symbol, as_of)
+            spot = _underlying_close(
+                session, structure.underlying_symbol, as_of, source=structure.underlying_source
+            )
             if spot is None:
                 raise OptionExpiryUnhandled(
                     f"position {position.id} must force-close on {as_of} but neither its legs "
@@ -875,12 +1153,15 @@ def _settle_at_expiry(
     pricing: OptionsPricingContext,
     actor: str,
 ) -> str:
-    spot = _underlying_close(session, structure.underlying_symbol, as_of)
+    spot = _underlying_close(
+        session, structure.underlying_symbol, as_of, source=structure.underlying_source
+    )
     if spot is None:
         raise OptionExpiryUnhandled(
             f"position {position.id} reached its expiry {position.expiration_date} with no "
-            "underlying close on the settlement session; Phase 1 has no assignment path and "
-            "does not guess a settlement value"
+            f"underlying close on the settlement session under source "
+            f"{structure.underlying_source!r}; Phase 1 has no assignment path and does not "
+            "guess a settlement value"
         )
     cash, premium = _intrinsic_close(structure, spot)
     worthless = abs(premium) < 1e-9
@@ -933,7 +1214,9 @@ def _pin_risk(session: Session, structure: StructureSpec, as_of: date) -> bool:
     short = structure.short_leg
     if short is None:
         return False
-    spot = _underlying_close(session, structure.underlying_symbol, as_of)
+    spot = _underlying_close(
+        session, structure.underlying_symbol, as_of, source=structure.underlying_source
+    )
     if spot is None:
         return False
     band = effective_research_config(session).options_shaping.pin_band_pct * spot
@@ -1096,6 +1379,24 @@ def reconcile_options_collateral(
     cap = cfg.options_risk.collateral_cap_dollars
     if float(observed) > cap + 1e-9:
         fail("9_collateral_within_cap", f"reserved {float(observed)} exceeds cap {cap}")
+    # 12 — every open structure records the ONE source each of its price reads
+    #      takes its rows from. A structure without them cannot be marked (the
+    #      mark is refused, not guessed), so a book holding one is not reconciled.
+    for p in open_rows:
+        missing = [
+            name
+            for name, value in (
+                ("option_source", p.option_source),
+                ("underlying_source", p.underlying_source),
+            )
+            if not str(value or "").strip()
+        ]
+        if missing:
+            fail(
+                "12_price_sources_recorded",
+                f"position {p.id} ({p.underlying_symbol}) records no {' / '.join(missing)}; "
+                "its marks are refused rather than read from an unnamed source",
+            )
 
     report = ReconcileReport(
         as_of=as_of,
