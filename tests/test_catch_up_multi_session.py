@@ -531,3 +531,174 @@ def test_new_worker_fields_live_on_settings_and_leave_every_config_hash_unchange
     assert changed.research.full_config_hash == default.research.full_config_hash
     # ...and the default scope hash is exactly the hash of a bare ResearchConfig
     assert default.research.config_hash == ResearchConfig().config_hash
+
+
+# --------------------------------------------------------------------------- #
+# 5. incident 2026-10-05: host slept mid-ingest
+# --------------------------------------------------------------------------- #
+class _ReadingsClock:
+    """Deterministic raw clock source: returns ``readings`` in order, then
+    repeats the last one."""
+
+    def __init__(self, *readings: float) -> None:
+        self.readings = list(readings)
+
+    def __call__(self) -> float:
+        if len(self.readings) > 1:
+            return self.readings.pop(0)
+        return self.readings[0]
+
+
+def test_a_wall_clock_jump_with_no_monotonic_progress_trips_the_deadline_between_symbols(
+    db_url: str, monkeypatch: pytest.MonkeyPatch, fetched: list[str]
+) -> None:
+    """``time.monotonic`` does not advance while a Mac sleeps. The host slept
+    ~3 h mid-ingest on 2026-10-05 and the 45-minute deadline never expired.
+    The deadline clock must count wall-clock time too."""
+    assert sched._clock is sched._deadline_clock  # the default, not a test stub
+    # monotonic frozen at its base: zero elapsed, forever
+    monkeypatch.setattr(sched, "_mono_source", lambda: sched._MONO_BASE)
+    # wall clock: lock taken (0), first poll before symbol 1 (0), then the
+    # machine wakes up 3 hours later before symbol 2
+    monkeypatch.setattr(
+        sched,
+        "_wall_source",
+        _ReadingsClock(sched._WALL_BASE, sched._WALL_BASE, sched._WALL_BASE + 3 * 3600.0),
+    )
+
+    with pytest.raises(sched.IngestDeadlineExceeded) as excinfo:
+        sched.guarded("daily_eod_update", sched.job_daily_eod_update)()
+
+    assert len(fetched) == 1  # stopped BETWEEN symbols, after the one that completed
+    assert "deadline exceeded after 1/" in str(excinfo.value)
+    assert not sched._EOD_UPDATE_LOCK.locked()
+    with session_scope() as session:
+        (run,) = list(session.scalars(select(IngestionRun)))
+        assert run.status == sched.INGEST_STATUS_STOPPED
+        assert run.gaps_json["deadline"]["symbols_done"] == 1
+
+
+def test_deadline_clock_is_the_larger_of_monotonic_and_wall_elapsed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sched, "_mono_source", lambda: sched._MONO_BASE + 10.0)
+    monkeypatch.setattr(sched, "_wall_source", lambda: sched._WALL_BASE + 3600.0)
+    assert sched._deadline_clock() == 3600.0  # a sleep counts in full
+    # a wall clock stepped backwards (NTP) cannot shrink the budget
+    monkeypatch.setattr(sched, "_wall_source", lambda: sched._WALL_BASE - 3600.0)
+    assert sched._deadline_clock() == 10.0
+
+
+def test_guarded_writes_a_running_row_first_and_finishes_the_same_row(db_url: str) -> None:
+    seen: list[tuple[int, str, datetime | None]] = []
+
+    def _body() -> None:
+        (row,) = _job_rows("traced")
+        seen.append((row.id, row.status, row.finished_at))
+
+    sched.guarded("traced", _body)()
+    (row,) = _job_rows("traced")
+    assert seen == [(row.id, sched.JOB_RUN_RUNNING, None)]  # visible while in flight
+    assert row.status == "ok" and row.finished_at is not None  # same row, now finished
+
+    def _boom() -> None:
+        raise RuntimeError("provider down")
+
+    with pytest.raises(RuntimeError):
+        sched.guarded("traced_fail", _boom)()
+    (row,) = _job_rows("traced_fail")
+    assert row.status == "failed" and "provider down" in row.detail
+
+
+def test_a_killed_job_leaves_a_running_row_and_startup_marks_it_interrupted(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SIGTERM/SIGKILL/host sleep: ``guarded()`` never gets to write the final
+    status (a ``BaseException`` stands in for the process dying). The row
+    with its start time is the only trace, and the next worker start-up turns
+    it into an explicit ``interrupted`` outcome."""
+
+    def _killed() -> None:
+        raise SystemExit(143)
+
+    with pytest.raises(SystemExit):
+        sched.guarded("daily_eod_update", _killed)()
+    (row,) = _job_rows("daily_eod_update")
+    assert row.status == sched.JOB_RUN_RUNNING and row.finished_at is None
+    started = row.started_at
+
+    # a row started AFTER this process started belongs to a live job: untouched
+    future = datetime.now(UTC) + timedelta(hours=1)
+    with session_scope(write=True) as session:
+        session.add(JobRun(name="live_job", started_at=future, status=sched.JOB_RUN_RUNNING))
+
+    monkeypatch.setattr(sched, "_last_scan_age", lambda: timedelta(0))  # fresh: no ingest
+    monkeypatch.setattr(sched, "job_catch_up_missed_sessions", lambda: None)
+    sched.run_catch_up()  # the worker start-up path
+
+    (row,) = _job_rows("daily_eod_update")
+    assert row.status == sched.JOB_RUN_INTERRUPTED
+    assert row.detail == "worker restarted"
+    assert row.started_at == started and row.finished_at is not None
+    (live,) = _job_rows("live_job")
+    assert live.status == sched.JOB_RUN_RUNNING
+
+
+def test_running_and_interrupted_rows_are_not_eod_evidence(db_url: str) -> None:
+    late = _CUTOFF + timedelta(minutes=121)
+    _add_job_run("daily_eod_update", _CUTOFF + timedelta(minutes=1), status="running")
+    _add_job_run("approved_scope_scan", _CUTOFF + timedelta(minutes=2), status="interrupted")
+    gap, why = sched.eod_gap(late)
+    assert gap is True and "no ok EOD run ever" in why
+
+    # /ops: shown as the last attempt, never as a success
+    from signalforge.app.views import ops_status_context
+
+    with get_sessionmaker()() as session:
+        ctx = ops_status_context(session)
+    jobs = {j["name"]: j for j in ctx["jobs"]}
+    assert jobs["daily_eod_update"]["status"] == "running"
+    assert jobs["daily_eod_update"]["last_success_at"] is None
+    assert jobs["approved_scope_scan"]["status"] == "interrupted"
+    assert jobs["approved_scope_scan"]["last_success_at"] is None
+
+
+def test_catch_up_losing_the_lock_race_skips_quietly_without_announcing_a_run(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cron EOD update takes the lock between catch-up's ``locked()`` peek
+    and its own acquire. Before: ``catch_up.running`` was logged and the EOD
+    body silently skipped. Now catch-up holds the lock itself, so it logs
+    ``catch_up.skipped`` and runs nothing."""
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched._log, "warning", lambda event, **kw: events.append(("warning", event)), raising=False
+    )
+    monkeypatch.setattr(
+        sched._log, "info", lambda event, **kw: events.append(("info", event)), raising=False
+    )
+    steps: list[bool] = []
+    monkeypatch.setattr(sched, "_eod_update_steps", lambda *, ingest: steps.append(ingest))
+    monkeypatch.setattr(sched, "_safe_missed_sessions", lambda: [])
+
+    def _pending_and_race(now: datetime | None = None) -> tuple[bool, str]:
+        assert sched._EOD_UPDATE_LOCK.acquire(blocking=False)  # the cron job wins
+        return True, "owed"
+
+    monkeypatch.setattr(sched, "catch_up_pending", _pending_and_race)
+    try:
+        sched.job_catch_up()
+    finally:
+        sched._EOD_UPDATE_LOCK.release()
+
+    assert steps == []
+    assert ("info", "catch_up.skipped") in events
+    assert ("warning", "catch_up.running") not in events
+
+    # and with the lock free, the SAME path runs the chain under catch-up's own lock
+    events.clear()
+    monkeypatch.setattr(sched, "catch_up_pending", lambda now=None: (True, "owed"))
+    sched.job_catch_up()
+    assert steps == [True]
+    assert ("warning", "catch_up.running") in events
+    assert not sched._EOD_UPDATE_LOCK.locked()

@@ -118,28 +118,107 @@ def _scrub_detail(text: str) -> str:
     return out
 
 
+JOB_RUN_RUNNING = "running"
+JOB_RUN_INTERRUPTED = "interrupted"
+INTERRUPTED_REASON = "worker restarted"
+#: ``JobRun`` statuses that are a TRACE of an attempt, never evidence of an
+#: outcome: ``running`` (in flight, or the process died mid-job) and
+#: ``interrupted`` (a ``running`` row found at worker start-up, i.e. the job
+#: was killed — host sleep, SIGKILL, crash — before it could finish).
+JOB_RUN_NOT_EVIDENCE = (JOB_RUN_RUNNING, JOB_RUN_INTERRUPTED)
+
+
 def _record_job_run(name: str, started: datetime, status: str, detail: str = "") -> None:
-    """Persist one ``JobRun`` row (ok / failed / skipped) for the Operational
-    Status page. Best-effort: never masks the job's own outcome."""
+    """Persist one finished ``JobRun`` row (ok / failed / skipped) for the
+    Operational Status page. Best-effort: never masks the job's own outcome."""
+    _finish_job_run(None, name, started, status, detail)
+
+
+def _start_job_run(name: str, started: datetime) -> int | None:
+    """Incident 2026-10-05: write the ``JobRun`` row *before* the job body runs,
+    with status ``running``, so a job killed mid-flight (host sleep, SIGKILL)
+    still leaves a dated trace on /ops instead of nothing at all. Returns the
+    row id for ``_finish_job_run``; ``None`` when the write failed (the finish
+    then inserts a fresh finished row, as before)."""
+    try:
+        from signalforge.db.models import JobRun
+        from signalforge.db.session import session_scope
+
+        def _write() -> int:
+            with session_scope(write=True) as session:
+                row = JobRun(
+                    name=name, started_at=started, finished_at=None, status=JOB_RUN_RUNNING
+                )
+                session.add(row)
+                session.flush()
+                return int(row.id)
+
+        return retry_on_lock(_write, attempts=4, backoff_s=(0.2, 0.5, 1.0), label="job_run")
+    except Exception as exc:
+        _log.warning("job.run_start_record_failed", job=name, error=repr(exc)[:160])
+        return None
+
+
+def _finish_job_run(
+    row_id: int | None, name: str, started: datetime, status: str, detail: str = ""
+) -> None:
+    """Update the ``running`` row written by ``_start_job_run`` to its final
+    status (same row, same id); insert a finished row when there is none."""
     try:
         from signalforge.db.models import JobRun
         from signalforge.db.session import session_scope
 
         def _write() -> None:
             with session_scope(write=True) as session:
-                session.add(
-                    JobRun(
-                        name=name,
-                        started_at=started,
-                        finished_at=datetime.now(UTC),
-                        status=status,
-                        detail=_scrub_detail(detail)[:300],
-                    )
-                )
+                row = session.get(JobRun, row_id) if row_id is not None else None
+                if row is None:
+                    row = JobRun(name=name, started_at=started)
+                    session.add(row)
+                row.finished_at = datetime.now(UTC)
+                row.status = status
+                row.detail = _scrub_detail(detail)[:300]
 
         retry_on_lock(_write, attempts=4, backoff_s=(0.2, 0.5, 1.0), label="job_run")
     except Exception as exc:
         _log.warning("job.run_record_failed", job=name, status=status, error=repr(exc)[:160])
+
+
+def mark_interrupted_job_runs(process_started: datetime | None = None) -> int:
+    """Worker start-up: every ``running`` ``JobRun`` row older than this process
+    belongs to a job that never finished (the previous worker was killed or the
+    host slept through it). Mark them ``interrupted`` with the reason
+    ``worker restarted`` so /ops shows a dated, explicit outcome rather than a
+    job that looks like it is still in flight. Best-effort; returns the count."""
+    process_started = process_started or datetime.now(UTC)
+    try:
+        from sqlalchemy import select
+
+        from signalforge.db.models import JobRun
+        from signalforge.db.session import session_scope
+
+        def _write() -> int:
+            with session_scope(write=True) as session:
+                rows = list(
+                    session.scalars(
+                        select(JobRun).where(
+                            JobRun.status == JOB_RUN_RUNNING,
+                            JobRun.started_at < process_started,
+                        )
+                    )
+                )
+                for row in rows:
+                    row.status = JOB_RUN_INTERRUPTED
+                    row.finished_at = process_started
+                    row.detail = INTERRUPTED_REASON
+                return len(rows)
+
+        n = retry_on_lock(_write, attempts=4, backoff_s=(0.2, 0.5, 1.0), label="job_run")
+        if n:
+            _log.warning("job.interrupted_runs_marked", count=n, reason=INTERRUPTED_REASON)
+        return int(n)
+    except Exception as exc:
+        _log.warning("job.interrupted_runs_mark_failed", error=repr(exc)[:160])
+        return 0
 
 
 def guarded(name: str, fn: JobFn) -> JobFn:
@@ -154,6 +233,9 @@ def guarded(name: str, fn: JobFn) -> JobFn:
             _record_job_run(name, started, "skipped", f"kill switch engaged: {exc.state.reason}")
             return
         _log.info("job.start", job=name)
+        # In-flight trace (incident 2026-10-05): the row exists from the first
+        # moment, so a job the OS kills leaves ``running`` + its start time.
+        row_id = _start_job_run(name, started)
         try:
             # Only TRANSIENT SQLite lock contention is retried (bounded); any
             # other error, and the lock error once attempts are exhausted,
@@ -165,13 +247,13 @@ def guarded(name: str, fn: JobFn) -> JobFn:
                     fn, attempts=JOB_LOCK_ATTEMPTS, backoff_s=JOB_LOCK_BACKOFF_S, label=name
                 )
             _log.info("job.done", job=name)
-            _record_job_run(name, started, "ok")
+            _finish_job_run(row_id, name, started, "ok")
         except Exception as exc:
             reason = repr(exc)
             if isinstance(exc, LockRetryExhausted) or is_lock_error(exc):
                 reason = f"database lock contention: {exc}"
             _log.exception("job.failed", job=name)
-            _record_job_run(name, started, "failed", reason)
+            _finish_job_run(row_id, name, started, "failed", reason)
             _record_job_failure(name, reason)
             raise
 
@@ -464,11 +546,31 @@ def job_approved_scope_scan() -> None:
 # and an intraday scan straddling the EOD rescan would read half-updated data).
 _EOD_UPDATE_LOCK = threading.Lock()
 
-# Monotonic clock for the ingest deadline — a module attribute so a test can
-# inject a deterministic one. ``_EOD_UNIT_STARTED_AT`` is the clock reading at
-# the moment the EOD lock was taken (None when no locked unit is running); it
-# is only ever written by the thread that holds ``_EOD_UPDATE_LOCK``.
-_clock: Callable[[], float] = time.monotonic
+# Clock for the ingest deadline — a module attribute so a test can inject a
+# deterministic one. ``_EOD_UNIT_STARTED_AT`` is the clock reading at the
+# moment the EOD lock was taken (None when no locked unit is running); it is
+# only ever written by the thread that holds ``_EOD_UPDATE_LOCK``.
+#
+# Incident 2026-10-05: ``time.monotonic`` does NOT advance while a Mac sleeps,
+# so with the host asleep mid-ingest the 45-minute deadline could never expire
+# and the locked unit resumed hours later as if no time had passed. The
+# deadline clock is therefore the LARGER of the elapsed monotonic time and the
+# elapsed wall-clock time since import: a sleep counts in full (wall clock),
+# while a wall clock stepped backwards (NTP) cannot shrink the budget
+# (monotonic). ``_mono_source`` / ``_wall_source`` are the injectable raw
+# sources; ``_clock`` stays injectable as a single reading for the older tests.
+_mono_source: Callable[[], float] = time.monotonic
+_wall_source: Callable[[], float] = time.time
+_MONO_BASE: float = time.monotonic()
+_WALL_BASE: float = time.time()
+
+
+def _deadline_clock() -> float:
+    """Seconds since import, advancing at least as fast as the wall clock."""
+    return max(_mono_source() - _MONO_BASE, _wall_source() - _WALL_BASE)
+
+
+_clock: Callable[[], float] = _deadline_clock
 _EOD_UNIT_STARTED_AT: float | None = None
 
 INGEST_STATUS_STOPPED = "stopped"
@@ -1360,6 +1462,8 @@ def job_catch_up() -> None:
     processed twice."""
     global _EOD_UNIT_STARTED_AT
     if _EOD_UPDATE_LOCK.locked():
+        # Cheap early exit (no DB reads). NOT the guard: the real guard is the
+        # non-blocking acquire below, which this job holds itself.
         _log.info("catch_up.skipped", reason="an EOD update is running right now")
         return
     owed = _safe_missed_sessions()
@@ -1367,10 +1471,11 @@ def job_catch_up() -> None:
     if not pending and not owed:
         _log.info("catch_up.not_pending", reason=reason)
         return
-    if not owed:
-        _log.warning("catch_up.running", reason=reason)
-        job_daily_eod_update()
-        return
+    # Incident 2026-10-05: this used to call ``job_daily_eod_update()`` after a
+    # ``locked()`` peek, so a cron EOD update starting in between logged
+    # ``catch_up.running`` here and then silently skipped inside — a misleading
+    # trace. The lock is taken HERE, non-blocking, before anything is
+    # announced, and the EOD chain runs under it directly.
     if not _EOD_UPDATE_LOCK.acquire(blocking=False):
         _log.info("catch_up.skipped", reason="an EOD update is running right now")
         return
@@ -1405,7 +1510,8 @@ def eod_gap(now: datetime | None = None) -> tuple[bool, str]:
     Evidence is a ``JobRun`` with status ok started at/after the session's
     17:30 ET cutoff, for the EOD chain itself or its approved-scope step (the
     30-minute ``catch_up`` row is NOT evidence: it is written ``ok`` even when
-    it found nothing to do)."""
+    it found nothing to do; nor are ``running`` / ``interrupted`` rows, which
+    trace an attempt, not an outcome — ``JOB_RUN_NOT_EVIDENCE``)."""
     from sqlalchemy import select
 
     from signalforge.config import get_settings
@@ -1478,6 +1584,9 @@ def _last_scan_age() -> timedelta | None:
 
 def run_catch_up(stale_after_hours: int = 18) -> None:
     """On startup, run ingest+scan once if the last scan is missing or stale."""
+    # Any ``running`` job_run row at this point was left by a previous worker
+    # process that never finished the job (incident 2026-10-05).
+    mark_interrupted_job_runs()
     age = _last_scan_age()
     if age is None or age > timedelta(hours=stale_after_hours):
         _log.info(

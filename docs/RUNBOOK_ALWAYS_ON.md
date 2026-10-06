@@ -369,6 +369,61 @@ asleep or a worker that is not running still runs nothing (see "Why a sleeping
 laptop cannot run scheduled jobs"); the gap check makes that visible, it does
 not prevent it.
 
+### 2026-10-05 — host slept mid-ingest: wall-clock deadline, in-flight trace
+
+**Incident.** The Mac was running on battery and went to sleep while the
+post-close `daily_eod_update` was fetching bars. Three things went wrong:
+
+1. **The 45-minute deadline never expired.** The deadline clock was
+   `time.monotonic`, which on macOS does **not** advance while the machine is
+   asleep. The locked unit woke hours later with, as far as it could tell, a
+   few minutes used, and carried on holding `_EOD_UPDATE_LOCK`.
+2. **The killed run left no trace.** `guarded()` wrote its `job_run` row only
+   at the *end* of a job, and `job_ingest` writes its `IngestionRun` summary
+   after the symbol loop — so a worker killed mid-job left neither, and
+   `/ops` showed nothing at all for the attempt.
+3. **A misleading `catch_up.running` warning.** `job_catch_up` peeked at
+   `_EOD_UPDATE_LOCK.locked()`, logged `catch_up.running`, then called
+   `job_daily_eod_update()`, which took the lock itself and — when the cron job
+   had slipped in between — silently skipped. Benign race, confusing log.
+
+**Fix 1 — wall-clock deadline.** The deadline clock is now the *larger* of the
+elapsed monotonic time and the elapsed wall-clock time since the worker
+imported the scheduler: a sleep counts in full against the budget, while a
+wall clock stepped backwards (NTP) cannot shrink it. Polling is unchanged —
+between symbols only — so on wake-up the ingest finishes the symbol in flight,
+stops, records the `stopped` run and releases the lock; the 30-minute
+`catch_up` resumes it as before. `EOD_INGEST_DEADLINE_MINUTES` and every
+config/scope hash are unchanged.
+
+**Fix 2 — in-flight `job_run` trace.** `guarded()` now writes the `job_run`
+row with status **`running`** *before* the job body and updates that **same
+row** to `ok` / `failed` / `skipped` at the end. A job the OS kills therefore
+leaves a `running` row with its start time. On worker start-up, every
+`running` row older than the new process is marked **`interrupted`** with the
+reason `worker restarted`. `/ops` shows both as the last attempt; neither is
+ever a success, and `eod_gap` / the EOD-gap readiness check ignore them (only
+`ok` rows are evidence). The 2 h catch-up back-off applies to `failed` rows
+only, so an interrupted EOD update is retried at the next 30-minute tick.
+
+**Fix 3 — catch-up holds the lock itself.** `job_catch_up` takes
+`_EOD_UPDATE_LOCK` non-blocking before announcing anything and runs the EOD
+chain under it directly. Losing the race now logs `catch_up.skipped` (info)
+and runs nothing; `catch_up.running` is logged only when the chain really
+runs.
+
+**Operator action.** Keep the Mac on AC power while the worker runs — the
+`pmset -c` settings above apply to the charger profile only, so on battery the
+machine sleeps normally and no code change can run jobs through that. The io2
+operating loop is already run under `caffeinate -is` (operator-side; not in
+this repository); this incident does **not** add a `pmset` change for the
+battery profile — that is an operator decision (it
+trades battery life for uptime), not something the worker should make. After
+a sleep, expect on `/ops`: an `interrupted — worker restarted` row for the
+killed job (if the worker was restarted) or a `failed … deadline exceeded`
+row (if it woke and tripped the deadline), a `stopped` ingestion run, and the
+catch-up resuming within 30 minutes.
+
 ### Manual smoke test (do this before installing launchd)
 
 Run each step in its own terminal at the repo root; stop anything from `make dev`
