@@ -93,8 +93,13 @@ def availability(**overrides) -> OptionsDataAvailability:
     base: dict[str, object] = {
         "horizon": Horizon.MEDIUM_SWING,
         "min_dte_at_entry_declared": 7,
-        "underlyings": (UnderlyingCoverage("SPY", "massive", WINDOW.start, WINDOW.end, 0),),
+        "underlyings": (
+            UnderlyingCoverage(
+                "SPY", "massive", WINDOW.start, WINDOW.end, 0, option_source="massive_options"
+            ),
+        ),
         "required_source": "massive",
+        "required_option_source": "massive_options",
         "cycles_eligible": 100,
         "cycles_bracketed": 95,
         "bracket_fraction_matrix": {

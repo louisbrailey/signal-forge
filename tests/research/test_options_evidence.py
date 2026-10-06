@@ -41,6 +41,7 @@ from signalforge.research.options_evidence import (
 from signalforge.research.options_gates import OPTIONS_LADDER_SHAPE
 from tests.research.options_evidence_support import (
     EXPIRIES,
+    OPTION_SOURCE,
     SOURCE,
     WINDOW_END,
     WINDOW_START,
@@ -242,7 +243,9 @@ def test_preregistration_digest_is_empty_when_the_file_is_missing(tmp_path) -> N
 def test_chain_loader_builds_a_series_indexed_by_the_underlying(session: Session) -> None:
     seed_everything(session)
     w = window()
-    chain = load_option_chain_series(session, "SPY", start=w.start, end=w.end, source=SOURCE)
+    chain = load_option_chain_series(
+        session, "SPY", start=w.start, end=w.end, source=SOURCE, option_source=OPTION_SOURCE
+    )
     assert chain is not None
     assert chain.underlying == "SPY"
     assert len(chain) > 50
@@ -254,7 +257,10 @@ def test_chain_loader_builds_a_series_indexed_by_the_underlying(session: Session
 def test_chain_loader_returns_none_without_rows(session: Session) -> None:
     w = window()
     assert (
-        load_option_chain_series(session, "NOPE", start=w.start, end=w.end, source=SOURCE) is None
+        load_option_chain_series(
+            session, "NOPE", start=w.start, end=w.end, source=SOURCE, option_source=OPTION_SOURCE
+        )
+        is None
     )
 
 
@@ -419,7 +425,15 @@ def test_pooling_keeps_every_trade_and_sums_the_counters(session: Session) -> No
     w = window()
     strat = StubOptionsStrategy()
     runs = [
-        run_underlying(session, strat, s, window=w, source=SOURCE, dte_targets=[35])
+        run_underlying(
+            session,
+            strat,
+            s,
+            window=w,
+            source=SOURCE,
+            option_source=OPTION_SOURCE,
+            dte_targets=[35],
+        )
         for s in ("SPY", "QQQ")
     ]
     duals = [r.dual for r in runs if r.dual is not None]

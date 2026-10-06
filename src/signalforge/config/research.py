@@ -517,6 +517,19 @@ class OptionsEvaluationConfig(BaseModel):
     gate_0c_cycles_bracket: PositiveFloat = 0.90
     gate_0d_session_bars: PositiveFloat = 0.80
     require_shares_per_contract: PositiveInt = 100
+    # Gate 0.i's risk-limit set (D4 §2.8a / §2.9b): the per-structure and
+    # aggregate max-loss caps the evaluated population must FIT.  They are inside
+    # this object — and therefore inside ``options_config_hash``, the options
+    # scope hash and the mandatory snapshot key — so a cap cannot move without
+    # minting a new snapshot and therefore a new sealed look.  The values are the
+    # operator's OP-1 confirmation (2026-09-23, ``DECISIONS_2026-09-12_wave3.md``
+    # addendum 3; D5a Amendment 2): $900 / $3,600.  They must equal
+    # ``OptionsGateThresholds``' values of the same names — gate 0.i checks that
+    # the limits it applied ARE the hashed ones, not merely that fields exist.
+    # ``OptionsRiskLimits`` (the paper book's refusal-only caps) stays outside
+    # every hash, as D3 §1.4 requires; this is the EVALUATION's declared copy.
+    options_per_structure_max_loss: PositiveFloat = 900.0
+    options_total_open_max_loss: PositiveFloat = 3_600.0
 
     @property
     def options_config_hash(self) -> str:

@@ -1099,6 +1099,10 @@ def options_snapshot_cmd(
     typer.echo(f"  window: {start}..{end}   coverage run(s): {list(cov.run_ids)}")
     typer.echo(f"  options_scope_hash:  {scope_hash}")
     typer.echo(f"  options_config_hash: {scope['options_config_hash']}")
+    typer.echo(
+        f"  option-data source:  {scope['option_data']['source']} "
+        f"(underlying bars: {scope['reference_price']['source']})"
+    )
     typer.echo(f"  canonical key:       {canonical}")
     thresholds = scope["coverage_thresholds"]
     typer.echo(
@@ -1399,6 +1403,28 @@ def options_evaluate_promotion_cmd(
         options_config_hash = str(
             (snap.options_scope_json or {}).get("options_config_hash", "") or ""
         )
+        # The option rows' source is read from recorded provenance, never guessed
+        # and never the underlying-bar source.  Without one there is no chain to
+        # load, so not even a diagnostic dry run can proceed.
+        try:
+            option_source = _oe.resolve_option_data_source(session, snap)
+        except _oe.OptionSourceUnresolved as exc:
+            option_source = ""
+            refusals.append(str(exc))
+        # D4 §2.9b: the snapshot key is bound to ``options_config_hash``, which
+        # carries gate 0.i's risk limits.  A snapshot minted under a different
+        # hash is a different pre-registration; it is superseded, not reused.
+        from signalforge.config.research import OptionsEvaluationConfig as _OptionsEvalCfg
+
+        current_hash = _OptionsEvalCfg().options_config_hash
+        if options_config_hash != current_hash:
+            refusals.append(
+                f"DataSnapshot {snapshot_key!r} records options_config_hash "
+                f"{options_config_hash[:12] or '(none)'}, but the evaluation config in force "
+                f"hashes to {current_hash[:12]}; the snapshot key is not bound to this "
+                "config (gate 0.i's risk limits included). Build a new snapshot with "
+                "'signalforge options snapshot' — the old one is superseded, never relabelled"
+            )
 
     # OR-0c guard.  Pooled is what ``pre.passed`` computed; the per-symbol reading
     # is ``pre.members_below_floor``.  A dry run only warns.  A --confirm run can
@@ -1444,6 +1470,13 @@ def options_evaluate_promotion_cmd(
         if confirm:
             typer.secho(
                 "no evidence was assembled, no row was written and no sealed look was spent.",
+                fg=typer.colors.YELLOW,
+            )
+            raise typer.Exit(code=2)
+        if not option_source:
+            typer.secho(
+                "no option-data source is named, so no chain can be loaded and no evidence "
+                "assembled — not even as a diagnostic.",
                 fg=typer.colors.YELLOW,
             )
             raise typer.Exit(code=2)

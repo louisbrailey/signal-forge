@@ -59,7 +59,11 @@ from signalforge.config.paths import data_dir
 from signalforge.data.options_corporate_actions import Q_SERIES_SOURCE, q_series_digest
 from signalforge.db.models import DataSnapshot
 from signalforge.observability import get_logger
-from signalforge.research.options_evidence import OptionsStrategy, run_underlying
+from signalforge.research.options_evidence import (
+    OptionsStrategy,
+    resolve_option_data_source,
+    run_underlying,
+)
 from signalforge.research.options_gates import (
     OptionsGateThresholds,
     OptionsSensitivitySummary,
@@ -381,6 +385,7 @@ def _evaluate_point(
     symbols: Sequence[str],
     window: OptionsWindow,
     source: str,
+    option_source: str,
     warmup: int,
 ) -> tuple[int, float, float, int]:
     """``(n_trades, expectancy_r, win_rate, skipped_concurrency)`` on the PRE-SEALED slice.
@@ -408,6 +413,7 @@ def _evaluate_point(
             sym,
             window=presealed_window,
             source=source,
+            option_source=option_source,
             dte_targets=[int(params.get("dte_target", 35))],
             include_mechanical=False,
             warmup=warmup,
@@ -453,8 +459,14 @@ def run_options_sensitivity(
     assumption or a changed dividend ``q`` series on the evaluated underlyings
     and pre-sealed span all invalidate it, and nothing else can.  A hit returns
     the stored report with ``cache_hit=True`` and runs no backtest at all.
+
+    ``source`` is the underlying-bar source; the option-data source is read from
+    the snapshot's recorded provenance and its absence is a refusal
+    (``OptionSourceUnresolved``), exactly as in the evidence assembler — every
+    grid point of a mis-sourced run would otherwise report zero trades silently.
     """
     th = thresholds or OptionsGateThresholds()
+    option_source = resolve_option_data_source(session, dataset_snapshot)
     key = cache_key(
         version=version,
         snapshot_key=dataset_snapshot.key,
@@ -490,6 +502,7 @@ def run_options_sensitivity(
             symbols=symbols,
             window=window,
             source=source,
+            option_source=option_source,
             warmup=warmup,
         )
         grid.append(
@@ -515,6 +528,7 @@ def run_options_sensitivity(
                 symbols=symbols,
                 window=window,
                 source=source,
+                option_source=option_source,
                 warmup=warmup,
             )
             oat.append(
