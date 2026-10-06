@@ -214,7 +214,9 @@ class OperationsAgent(ResearchAgent):
                     "status": last.status,
                     "started_at": last.started_at.isoformat(),
                     "finished_at": last.finished_at.isoformat() if last.finished_at else None,
-                    "detail": last.detail if last.status in ("failed", "skipped") else "",
+                    "detail": (
+                        last.detail if last.status in ("failed", "skipped", "interrupted") else ""
+                    ),
                     "last_success_at": last_ok.started_at.isoformat() if last_ok else None,
                     "next_run": next_runs.get(jn),
                     "source": "signalforge.db.models.JobRun",

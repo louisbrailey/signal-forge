@@ -147,7 +147,7 @@
       <tr class="border-t border-slate-100 align-top">
         <td class="py-1 pr-3 font-mono">{{ j.name }}</td>
         <td class="pr-3">
-          {% if j.status == 'ok' %}{{ pill(true, 'ok') }}{% elif j.status == 'never' %}<span class="text-slate-400">never</span>{% elif j.status == 'skipped' %}<span class="rounded bg-amber-100 px-1.5 py-0.5 text-amber-800">skipped</span>{% else %}{{ pill(false, '', j.status) }}{% endif %}
+          {% if j.status == 'ok' %}{{ pill(true, 'ok') }}{% elif j.status == 'never' %}<span class="text-slate-400">never</span>{% elif j.status == 'skipped' %}<span class="rounded bg-amber-100 px-1.5 py-0.5 text-amber-800">skipped</span>{% elif j.status == 'running' %}<span class="rounded bg-sky-100 px-1.5 py-0.5 text-sky-800">running</span>{% else %}{{ pill(false, '', j.status) }}{% endif %}
           {% if j.started_at %}<span class="text-slate-500">{{ j.started_at[:16] }}</span>{% if j.duration_s is not none %} <span class="text-slate-400">{{ j.duration_s }}s</span>{% endif %}{% endif %}
         </td>
         <td class="pr-3 text-slate-500">{{ (j.last_success_at or '—')[:16] }}{% if j.last_success_duration_s is not none %} <span class="text-slate-400">{{ j.last_success_duration_s }}s</span>{% endif %}</td>

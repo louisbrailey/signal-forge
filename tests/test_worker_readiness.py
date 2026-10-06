@@ -173,11 +173,14 @@ def test_catch_up_pending_resumes_after_the_backoff_window(db_url: str) -> None:
 # job_catch_up
 # --------------------------------------------------------------------------- #
 def test_job_catch_up_runs_the_eod_update_when_pending(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[str] = []
+    # Since 2026-10-05 catch-up holds the EOD lock itself and runs the chain
+    # directly (``_eod_update_steps``) rather than via ``job_daily_eod_update``.
+    calls: list[bool] = []
     monkeypatch.setattr(sched, "catch_up_pending", lambda: (True, "x"))
-    monkeypatch.setattr(sched, "job_daily_eod_update", lambda: calls.append("ran"))
+    monkeypatch.setattr(sched, "_eod_update_steps", lambda *, ingest: calls.append(ingest))
     job_catch_up()
-    assert calls == ["ran"]
+    assert calls == [True]
+    assert not sched._EOD_UPDATE_LOCK.locked()
 
 
 def test_job_catch_up_does_nothing_when_not_pending(monkeypatch: pytest.MonkeyPatch) -> None:

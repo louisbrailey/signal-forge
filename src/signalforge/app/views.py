@@ -874,8 +874,12 @@ def ops_status_context(session: Session) -> dict[str, Any]:
                 "duration_s": _dur(last),
                 "last_success_at": last_ok.started_at.isoformat() if last_ok else None,
                 "last_success_duration_s": _dur(last_ok),
+                # ``running`` / ``interrupted`` are a trace of an attempt, not an
+                # outcome (incident 2026-10-05): shown, never counted as success.
                 "failure_reason": (
-                    last.detail if last and last.status in ("failed", "skipped") else ""
+                    last.detail
+                    if last and last.status in ("failed", "skipped", "interrupted")
+                    else ""
                 ),
                 "detail": last.detail if last else "",
                 "next_run": None,  # filled from the worker heartbeat below
