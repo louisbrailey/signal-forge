@@ -38,7 +38,7 @@ implemented here, and every reservation records its formula inputs in
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
@@ -79,6 +79,7 @@ __all__ = [
     "OptionExpiryUnhandled",
     "OptionsAutoSimulateForbidden",
     "OptionsPricingContext",
+    "PriceSourceUnresolved",
     "StructureSpec",
     "accept_options_candidate",
     "assert_options_auto_simulate_allowed",
@@ -147,6 +148,19 @@ class OptionExpiryUnhandled(RuntimeError):
     structure found past its last trade session with no settlement basis is an
     unhandled state, and inventing a settlement price for it would be inventing
     a P&L.
+    """
+
+
+class PriceSourceUnresolved(ValueError):
+    """A price read was asked for without ONE named source, or against the wrong one.
+
+    ``option_aggregate_daily`` and ``ohlcv_daily`` both hold rows for the same
+    ticker and session under more than one ``source`` label (``massive`` /
+    ``massive_grouped`` for bars, ``massive_options`` for prints, fixtures in
+    tests). Reading by ticker + date alone and letting the highest id win is a
+    guess about which vendor's print is the mark. This is raised instead, and the
+    caller REFUSES the mark (``paper.options_mark_refused``) or the entry
+    (condition AC) rather than pick a row.
     """
 
 
@@ -244,6 +258,13 @@ class StructureSpec:
     underlying_symbol: str
     contracts: int
     legs: tuple[LegSpec, ...]
+    #: Price-source provenance (PR #14 review). Both are REQUIRED, with no
+    #: default: ``option_source`` names the ``option_aggregate_daily.source`` the
+    #: legs' prints are read under and ``underlying_source`` the
+    #: ``ohlcv_daily.source`` the spot is read under. An empty label is a read
+    #: that cannot name its source, and every read refuses it.
+    option_source: str
+    underlying_source: str
 
     @property
     def expiration(self) -> date:
@@ -268,11 +289,23 @@ class StructureSpec:
         return sum(abs(leg.qty_signed) for leg in self.legs) * self.contracts
 
 
-def structure_from_candidate(row: CandidateOptionStructure) -> StructureSpec:
+def structure_from_candidate(
+    row: CandidateOptionStructure, *, option_source: str, underlying_source: str
+) -> StructureSpec:
+    """The proposed structure, carrying the sources its prices MUST be read from.
+
+    Both labels are the caller's to resolve — the guard reads them from the scan
+    (``scan_run.source``) and the scan's DataSnapshot
+    (``resolve_option_data_source``) — and are passed through untouched, empty
+    included: an empty label refuses at the first read, by name, rather than here
+    where the refusal could not say which condition it is.
+    """
     return StructureSpec(
         structure_type=row.structure_type,
         underlying_symbol=row.underlying_symbol,
         contracts=row.contracts,
+        option_source=option_source,
+        underlying_source=underlying_source,
         legs=tuple(
             LegSpec(
                 option_ticker=str(leg["option_ticker"]),
@@ -290,10 +323,18 @@ def structure_from_candidate(row: CandidateOptionStructure) -> StructureSpec:
 
 
 def structure_from_position(position: OptionsPosition) -> StructureSpec:
+    """The open structure, with the sources RECORDED on the row at entry.
+
+    A position opened before the provenance columns existed carries ``""`` for
+    both, and the marks refuse it (``paper.options_mark_refused``) rather than
+    read whichever vendor's row happens to have the highest id.
+    """
     return StructureSpec(
         structure_type=position.structure_type,
         underlying_symbol=position.underlying_symbol,
         contracts=position.contracts,
+        option_source=str(position.option_source or "").strip(),
+        underlying_source=str(position.underlying_source or "").strip(),
         legs=tuple(
             LegSpec(
                 option_ticker=leg.option_ticker,
@@ -324,6 +365,11 @@ class OptionsPricingContext:
     risk_free_rate: float
     dividend_yield: float
     q_source: str
+    #: The ``ohlcv_daily.source`` the spot in this context was read from, and the
+    #: ONLY source any greek computed under it may take its spot from. Required,
+    #: no default: a quote whose structure records a different underlying source
+    #: is refused (:class:`PriceSourceUnresolved`), never priced off this spot.
+    underlying_source: str
     iv_source: str = IvSource.LOCAL_BS_INVERTED.value
     greeks_source: str = "local_bs_inversion"
     #: Phase 1 records unit beta rather than inventing one. D3 §5.2 wants the SPY
@@ -348,26 +394,52 @@ class LegQuote:
         return self.print_close is not None
 
 
-def _underlying_close(session: Session, symbol: str, on: date) -> float | None:
+def _require_source(kind: str, source: str, *, what: str) -> str:
+    """One named, non-empty source label, or a refusal that says which read lacked it."""
+    label = str(source or "").strip()
+    if not label:
+        raise PriceSourceUnresolved(
+            f"{what}: no {kind} source is recorded, so the read cannot name the source it "
+            "takes its price from; it is never defaulted and the highest id never wins"
+        )
+    return label
+
+
+def _underlying_close(session: Session, symbol: str, on: date, *, source: str) -> float | None:
+    """The underlying's last close on or before ``on`` from ONE named ``ohlcv_daily.source``.
+
+    ``source`` is required. The live database holds the same symbol's bars under
+    more than one label (``massive`` and ``massive_grouped``), so an unfiltered
+    read returns whichever label's row sorts last — a guess. ``None`` means that
+    source has no bar in the window, which is a fact, not a cue to try another.
+    """
     from signalforge.data.repository import get_daily_bars
 
-    bars = get_daily_bars(session, symbol, on - timedelta(days=10), on)
+    label = _require_source("underlying-bar", source, what=f"{symbol} close on {on}")
+    bars = get_daily_bars(session, symbol, on - timedelta(days=10), on, source=label)
     return float(bars[-1].close) if bars else None
 
 
-def _option_print(session: Session, option_ticker: str, on: date) -> float | None:
-    """``OptionAggregateDaily.close`` for that contract on that session.
+def _option_print(session: Session, option_ticker: str, on: date, *, source: str) -> float | None:
+    """``OptionAggregateDaily.close`` for that contract on that session from ONE named source.
+
+    ``source`` is required and matched exactly: ``(option_ticker, session_date,
+    source)`` is unique, so there is at most one row and nothing to order by. The
+    PR #14 review found this read selecting by ticker + date alone with the
+    highest id winning, which under two vendors' rows is a coin toss for the mark.
 
     ``None`` is a FIRST-CLASS liquidity fact (D2 §3): it is never coerced to
-    0.0, to the previous session's close, or to a model price.
+    0.0, to the previous session's close, to a model price, or to another
+    source's print.
     """
+    label = _require_source("option-data", source, what=f"{option_ticker} print on {on}")
     row = session.scalar(
         select(OptionAggregateDaily)
         .where(
             OptionAggregateDaily.option_ticker == option_ticker,
             OptionAggregateDaily.session_date == on,
+            OptionAggregateDaily.source == label,
         )
-        .order_by(OptionAggregateDaily.id.desc())
         .limit(1)
     )
     return float(row.close) if row is not None else None
@@ -380,6 +452,8 @@ def leg_quote(
     underlying_symbol: str,
     as_of: date,
     pricing: OptionsPricingContext,
+    option_source: str,
+    underlying_source: str,
 ) -> LegQuote:
     """The leg's print and its LOCALLY INVERTED greeks (never vendor greeks).
 
@@ -388,9 +462,23 @@ def leg_quote(
     and the caller records ``iv_unavailable`` — realised volatility is **never** a
     fallback (map §2.4b: it values short premium below its worth and manufactures
     the very edge the strategy claims).
+
+    Both sources are REQUIRED. The print is read from ``option_source`` and the
+    spot from ``underlying_source`` — the labels recorded on the structure — and
+    ``underlying_source`` must be the one ``pricing``'s own spot was taken from,
+    or the greeks would mix two vendors' closes. Either absent or mismatched
+    raises :class:`PriceSourceUnresolved`; nothing is read.
     """
-    px = _option_print(session, leg.option_ticker, as_of)
-    spot = _underlying_close(session, underlying_symbol, as_of)
+    opt_src = _require_source("option-data", option_source, what=leg.option_ticker)
+    und_src = _require_source("underlying-bar", underlying_source, what=underlying_symbol)
+    if pricing.underlying_source != und_src:
+        raise PriceSourceUnresolved(
+            f"{leg.option_ticker}: the structure records underlying source {und_src!r} but the "
+            f"pricing context's spot was read from {pricing.underlying_source!r}; a greek is "
+            "never computed off one vendor's spot for a structure recorded against another's"
+        )
+    px = _option_print(session, leg.option_ticker, as_of, source=opt_src)
+    spot = _underlying_close(session, underlying_symbol, as_of, source=und_src)
     if px is None or spot is None or spot <= 0.0:
         return LegQuote(leg.option_ticker, px, spot, None, None, None)
     t_years = max((leg.expiration - as_of).days, 0) / 365.0
@@ -1050,6 +1138,58 @@ class OptionsEntryPlan:
     dte_at_entry: int
 
 
+def _entry_price_sources(
+    session: Session, run: Any, pricing: OptionsPricingContext
+) -> tuple[str, str]:
+    """Condition AC: ``(option_source, underlying_source)`` for an entry, or a refusal.
+
+    * ``underlying_source`` is ``scan_run.source`` — the bar label the signal was
+      computed from and condition H scope-matched against the approval. It must
+      equal ``pricing.underlying_source``, the label the context's spot was read
+      from (the EOD chain resolves it from this same scan; a caller that resolved
+      it elsewhere is refused rather than trusted).
+    * ``option_source`` is resolved from the scan's DataSnapshot by
+      ``research.options_evidence.resolve_option_data_source`` — the two-source
+      pattern of PR #14: two recorded witnesses that must agree, never a fallback
+      to the bar label. A scan that pins no snapshot cannot name one and is
+      refused.
+    """
+    from signalforge.db.models import DataSnapshot
+    from signalforge.research.options_evidence import (
+        OptionSourceUnresolved,
+        resolve_option_data_source,
+    )
+
+    underlying_source = str(run.source or "").strip()
+    if not underlying_source:
+        raise OptionsAutoSimulateForbidden(
+            "AC", f"scan run {run.id} records no bar source; the spot cannot name its source"
+        )
+    if str(pricing.underlying_source or "").strip() != underlying_source:
+        raise OptionsAutoSimulateForbidden(
+            "AC",
+            f"the pricing context's spot was read from {pricing.underlying_source!r} but scan "
+            f"run {run.id} was computed from {underlying_source!r}; one structure is never "
+            "priced across two bar sources",
+        )
+    snap = (
+        session.get(DataSnapshot, run.dataset_snapshot_id)
+        if run.dataset_snapshot_id is not None
+        else None
+    )
+    if snap is None:
+        raise OptionsAutoSimulateForbidden(
+            "AC",
+            f"scan run {run.id} pins no DataSnapshot, so the option-data source of its legs' "
+            "prints cannot be resolved; it is never guessed and never the bar source",
+        )
+    try:
+        option_source = resolve_option_data_source(session, snap)
+    except OptionSourceUnresolved as exc:
+        raise OptionsAutoSimulateForbidden("AC", str(exc)) from None
+    return option_source, underlying_source
+
+
 def _theta(net_credit: float, costs_round_trip: float, r_dollars: float) -> float | None:
     """``(net credit - modelled round-trip costs) / R`` (D3 §5.3 axis 3)."""
     if r_dollars <= 0:
@@ -1125,7 +1265,9 @@ def assert_options_auto_simulate_allowed(
     if ver is None or ver.status is not StrategyStatus.PAPER_APPROVED:
         raise OptionsAutoSimulateForbidden("F", "strategy version is not PAPER_APPROVED")
     shaping = OptionsStructureLimits.from_spec_json(ver.spec_json, cfg.options_shaping)
-    structure = structure_from_candidate(row)
+    # The sources are resolved at AC, below, once the scan is known; until then
+    # the structure carries none and no price is read from it.
+    structure = structure_from_candidate(row, option_source="", underlying_source="")
     # G — exactly ONE approved structure type per version (gate 0.5).
     if structure.structure_type != shaping.structure_type:
         raise OptionsAutoSimulateForbidden(
@@ -1194,19 +1336,33 @@ def assert_options_auto_simulate_allowed(
             )
     # N — account targeting, before anything is written anywhere.
     account = resolve_options_account(session, account_name=account_name)
+    # AC — price-source provenance, BEFORE the first price is read. The legs'
+    # prints are read from the ONE option-data source the scan's DataSnapshot
+    # records (never guessed, never the bar label) and the spot from the scan's
+    # own bar source — which must be the source the pricing context's spot was
+    # read from, or the greeks would mix two vendors' closes. Both labels are
+    # then recorded on the position, so every later mark reads the same rows.
+    assert run is not None  # H refused otherwise
+    option_source, underlying_source = _entry_price_sources(session, run, pricing)
+    structure = replace(structure, option_source=option_source, underlying_source=underlying_source)
     # M — every leg must print on the FILL session. A missing bar is a NON-ENTRY,
     # never a synthetic fill, and it is a property of the session the guard is
     # running on, so it consults nothing in the future.
-    quotes = {
-        leg.option_ticker: leg_quote(
-            session,
-            leg,
-            underlying_symbol=structure.underlying_symbol,
-            as_of=fill_session,
-            pricing=pricing,
-        )
-        for leg in structure.legs
-    }
+    try:
+        quotes = {
+            leg.option_ticker: leg_quote(
+                session,
+                leg,
+                underlying_symbol=structure.underlying_symbol,
+                as_of=fill_session,
+                pricing=pricing,
+                option_source=structure.option_source,
+                underlying_source=structure.underlying_source,
+            )
+            for leg in structure.legs
+        }
+    except PriceSourceUnresolved as exc:
+        raise OptionsAutoSimulateForbidden("AC", str(exc)) from None
     missing = [t for t, q in quotes.items() if not q.priced]
     if missing:
         raise OptionsAutoSimulateForbidden(
@@ -1403,6 +1559,9 @@ def options_candidate_snapshot(
         "contracts": structure.contracts,
         "legs": legs,
         "strike_width": structure.strike_width,
+        # Price-source provenance: which rows every print and spot were read from.
+        "option_source": structure.option_source,
+        "underlying_source": structure.underlying_source,
         "disclosures": list(DISCLOSURES),
         "options_scope_hash": options_scope_hash(cfg),
         "options_shaping_hash": (
@@ -1520,7 +1679,9 @@ def record_options_decision(
     )
     if row is None:
         raise ValueError(f"candidate {candidate_id} carries no options structure")
-    structure = structure_from_candidate(row)
+    # A non-ACCEPTED decision reads no price, so it resolves no source; the
+    # snapshot records the structure with the labels blank rather than invented.
+    structure = structure_from_candidate(row, option_source="", underlying_source="")
     snapshot = options_candidate_snapshot(
         session,
         cand,
@@ -1625,6 +1786,20 @@ def accept_options_candidate(
             f"collateral {plan.collateral_required:.2f} exceeds spendable cash "
             f"{float(account.spendable_cash):.2f}",
         )
+    # AC — the plan must carry the sources its prices were read from, because
+    # they are written on the position and every later mark reads by them.
+    if not structure.option_source.strip() or not structure.underlying_source.strip():
+        raise OptionsAutoSimulateForbidden(
+            "AC",
+            "the plan records no price-source provenance (option_source="
+            f"{structure.option_source!r}, underlying_source={structure.underlying_source!r})",
+        )
+    if structure.underlying_source != pricing.underlying_source:
+        raise OptionsAutoSimulateForbidden(
+            "AC",
+            f"the plan's spot source {structure.underlying_source!r} is not the pricing "
+            f"context's {pricing.underlying_source!r}",
+        )
 
     now = utcnow()
     inst = session.get(Instrument, cand.instrument_id)
@@ -1654,6 +1829,8 @@ def accept_options_candidate(
         iv_source=pricing.iv_source,
         q_source=pricing.q_source,
         greeks_source=pricing.greeks_source,
+        option_source=structure.option_source[:40],
+        underlying_source=structure.underlying_source[:40],
     )
     session.add(position)
     session.flush()

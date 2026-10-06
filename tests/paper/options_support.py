@@ -76,6 +76,12 @@ FILL_SESSION = date(2026, 2, 18)
 OPTIONS_ACCOUNT = "options"
 OPTIONS_ACCOUNT_CASH = Decimal("25000")
 
+#: The ONE source label every fixture row is written under — bars, contracts and
+#: prints alike — and therefore the label every read must name. Rows seeded under
+#: any other label (see ``test_options_price_sources``) must never be read.
+BAR_SOURCE = "fixture"
+OPTION_SOURCE = "fixture"
+
 
 def cost_model(*, spread_multiplier: float = 1.0) -> OptionCostModel:
     """A deliberately cheap, explicit model. No field is defaulted (D2 §7.4): a
@@ -99,6 +105,7 @@ def pricing(
     beta_to_spy: float = 1.0,
     dividend_yield: float = 0.013,
     q_source: str = "fixture:trailing_12m_yield",
+    underlying_source: str = BAR_SOURCE,
 ) -> OptionsPricingContext:
     """ONE underlying's context — what the guard and the acceptance take.
 
@@ -112,6 +119,7 @@ def pricing(
         risk_free_rate=0.04,
         dividend_yield=dividend_yield,
         q_source=q_source,
+        underlying_source=underlying_source,
         beta_to_spy=beta_to_spy,
     )
 
@@ -175,12 +183,24 @@ def equity_account(session: Session, *, cash: Decimal = Decimal("30000")) -> Pap
     return acct
 
 
-def underlying(session: Session, *, symbol: str = UNDERLYING, close: float = SPOT) -> Instrument:
+def underlying(
+    session: Session,
+    *,
+    symbol: str = UNDERLYING,
+    close: float = SPOT,
+    source: str = BAR_SOURCE,
+    instrument: Instrument | None = None,
+) -> Instrument:
     """The UNDERLYING instrument, typed 'etf' — which is exactly why the equity
-    guard's instrument-type check cannot discriminate an options candidate."""
-    inst = Instrument(symbol=symbol, name=symbol, instrument_type="etf", sector="Broad Market")
-    session.add(inst)
-    session.flush()
+    guard's instrument-type check cannot discriminate an options candidate.
+
+    ``source`` labels the bars; pass ``instrument`` to add a SECOND source's bars
+    to an instrument that already exists."""
+    inst = instrument
+    if inst is None:
+        inst = Instrument(symbol=symbol, name=symbol, instrument_type="etf", sector="Broad Market")
+        session.add(inst)
+        session.flush()
     d = SIGNAL_SESSION - timedelta(days=20)
     while d <= EXPIRY + timedelta(days=5):
         session.add(
@@ -193,7 +213,7 @@ def underlying(session: Session, *, symbol: str = UNDERLYING, close: float = SPO
                 close=close,
                 volume=80_000_000,
                 adj_close=close,
-                source="fixture",
+                source=source,
                 latency_category=LatencyCategory.HISTORICAL,
                 is_simulated=True,
                 ingested_at=datetime.now(UTC),
@@ -238,9 +258,12 @@ def option_prints(
     long_close: float = 0.70,
     skip: tuple[str, ...] = (),
     symbol: str = UNDERLYING,
+    source: str = OPTION_SOURCE,
 ) -> None:
     """Write one daily bar per contract per session. ``skip`` names tickers that
-    DO NOT print — absence is a first-class liquidity fact, never a zero."""
+    DO NOT print — absence is a first-class liquidity fact, never a zero.
+    ``source`` labels the rows; a second call with another label seeds a rival
+    vendor's prints for the same tickers and sessions."""
     short_ticker, long_ticker = tickers_for(symbol)
     for d in sessions:
         for ticker, close in ((short_ticker, short_close), (long_ticker, long_close)):
@@ -256,7 +279,7 @@ def option_prints(
                     low=close,
                     close=close,
                     volume=1_000.0,
-                    source="fixture",
+                    source=source,
                     latency_category=LatencyCategory.HISTORICAL,
                     ingested_at=datetime.now(UTC),
                     quality_flags=[],
@@ -419,6 +442,7 @@ def approve_scope(
     *,
     snapshot_key: str = "fixture-options-snapshot",
     universe: tuple[str, ...] = (UNDERLYING,),
+    option_source: str | None = OPTION_SOURCE,
 ) -> None:
     """Make the five-part equity scope match pass for this candidate's scan.
 
@@ -428,6 +452,11 @@ def approve_scope(
 
     ``universe`` is EXACT, not a superset: the scan and the evaluation must name
     the same symbols, so a two-name book has to pass both names here.
+
+    ``option_source`` is what the snapshot's ``options_scope_json`` RECORDS as the
+    source of its option rows — the one witness ``resolve_option_data_source``
+    reads when no cycle-backfill run is pinned, and what the guard's condition
+    AC writes onto the position. ``None`` records nothing, so AC refuses.
     """
     from sqlalchemy import select
 
@@ -436,7 +465,13 @@ def approve_scope(
 
     snap = session.scalar(select(DataSnapshot).where(DataSnapshot.key == snapshot_key))
     if snap is None:
-        snap = DataSnapshot(key=snapshot_key, symbols_json=list(universe))
+        snap = DataSnapshot(
+            key=snapshot_key,
+            symbols_json=list(universe),
+            options_scope_json=(
+                {"option_data": {"source": option_source}} if option_source else None
+            ),
+        )
         session.add(snap)
         session.flush()
     run = session.get(ScanRun, cand.scan_run_id)
