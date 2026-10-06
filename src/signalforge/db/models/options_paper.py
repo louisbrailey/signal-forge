@@ -171,6 +171,16 @@ class OptionsPosition(Base, IntPK, CreatedAt):
     iv_source: Mapped[str] = mapped_column(String(32), default="")
     q_source: Mapped[str] = mapped_column(String(48), default="")
     greeks_source: Mapped[str] = mapped_column(String(32), default="")
+    #: Price-source provenance, recorded at entry and REQUIRED by every later
+    #: read: ``option_source`` is the ONE ``option_aggregate_daily.source`` label
+    #: the legs' prints are read under (resolved from the scan's DataSnapshot by
+    #: ``research.options_evidence.resolve_option_data_source``), and
+    #: ``underlying_source`` is the ``ohlcv_daily.source`` label of the scan that
+    #: produced the candidate (``scan_run.source``, the scope-matched one). A mark
+    #: never reads a row from any other source; an empty label is a refusal
+    #: (``paper.options_mark_refused``), never a highest-id-wins guess.
+    option_source: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    underlying_source: Mapped[str] = mapped_column(String(40), default="", server_default="")
 
     legs: Mapped[list[OptionsPositionLeg]] = relationship(
         back_populates="position", cascade="all, delete-orphan"
