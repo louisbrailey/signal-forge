@@ -134,6 +134,8 @@ pre-flight now judges a snapshot on its own underlyings, at the same floors.
 | OR-F15 | Band population (put-only vs pooled) | Open, unchanged |
 | IMPL-3.3 | 4-structure concurrency cap | Open, unchanged |
 
+*Decision memo: `options_designs/OR-0c_DECISION_MEMO_2026-10-06.md` (states both readings, the numbers, and how to record either decision; decides nothing).*
+
 *OR-0c is enforced in code (2026-10-04; Amendment 3 §3 item 7, runbook §12.4):
 `options evaluate-promotion --confirm` refuses a snapshot with a member below a floor on its own
 numbers unless the command carries `--accept-pooled-coverage OR-0c` and this file contains a
