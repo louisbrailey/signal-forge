@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 
 from signalforge.data.calendar import sessions as _sessions
+from signalforge.data.options_calendar import monthly_expiry as _monthly_expiry
 
 # --------------------------------------------------------------------------- #
 # Pre-registered constants (D1 §12). None of these may be LOOSENED after a
@@ -59,6 +60,13 @@ LADDER_17: tuple[float, ...] = (
     0.150,
 )
 CYCLE_RULE_MONTHLY_THIRD_FRIDAY = "monthly_third_friday"
+# How a cycle keyed on the third Friday resolves when that Friday is not an
+# XNYS session (Good Friday 2025-04-18, Juneteenth 2026-06-19): the exchange
+# lists the PRECEDING session, and the as-of listing is queried on that date.
+# Recorded in run provenance so a dataset built on unadjusted calendar Fridays
+# (which came back ``no_contracts_returned`` for those cycles) is never mistaken
+# for one built on listed expiries.
+CYCLE_EXPIRY_ADJUSTMENT = "holiday_preceding_session"
 
 # Frozen exclusion vocabulary (D1 §8.2) — the coverage summary is machine
 # comparable only if these strings never drift.
@@ -105,7 +113,11 @@ STRIKE_LISTING_BASES: tuple[str, ...] = (BASIS_VENDOR_AS_OF, BASIS_FIRST_BAR_PRO
 # cycles
 # --------------------------------------------------------------------------- #
 def third_friday(year: int, month: int) -> date:
-    """The monthly expiry: the third Friday of the calendar month."""
+    """The calendar third Friday of the month, WITHOUT holiday adjustment.
+
+    This is the cycle's *rule*, not the date the exchange lists. Use
+    :func:`cycle_expiry` for the listed expiry a backfill must request.
+    """
     fridays = [
         date(year, month, d)
         for d in range(1, _calendar.monthrange(year, month)[1] + 1)
@@ -114,8 +126,21 @@ def third_friday(year: int, month: int) -> date:
     return fridays[2]
 
 
+def cycle_expiry(year: int, month: int) -> date:
+    """The monthly expiry the exchange actually lists for ``(year, month)``.
+
+    The third Friday when it is an XNYS session, otherwise the preceding
+    session (``options_calendar.monthly_expiry``). Requesting the unadjusted
+    Friday from an as-of listing returns no contracts for that cycle, which the
+    coverage summary then reports as ``no_contracts_returned`` with zero rungs
+    seen — a silent hole, not an error.
+    """
+    return _monthly_expiry(year, month)
+
+
 def monthly_cycles(window_start: date, window_end: date, *, dte_entry_max: int) -> tuple[date, ...]:
-    """Third-Friday expiries whose DTE-max entry date falls inside the window.
+    """Monthly (third-Friday rule, holiday-adjusted) expiries whose DTE-max
+    entry date falls inside the window.
 
     The ``window_start + dte_entry_max`` floor drops the leading cycles whose
     entry search would begin before the window opens — including them would
@@ -126,7 +151,7 @@ def monthly_cycles(window_start: date, window_end: date, *, dte_entry_max: int) 
     out: list[date] = []
     y, m = window_start.year, window_start.month
     while date(y, m, 1) <= window_end:
-        e = third_friday(y, m)
+        e = cycle_expiry(y, m)
         if window_start + timedelta(days=dte_entry_max) <= e <= window_end:
             out.append(e)
         y, m = (y + 1, 1) if m == 12 else (y, m + 1)

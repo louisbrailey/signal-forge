@@ -24,6 +24,26 @@ def test_third_friday_including_a_month_whose_first_day_is_a_friday() -> None:
             assert 15 <= d.day <= 21
 
 
+def test_holiday_third_fridays_resolve_to_the_listed_preceding_session() -> None:
+    """Good Friday 2025-04-18 and Juneteenth 2026-06-19 are calendar third
+    Fridays but not XNYS sessions. The exchange lists the preceding session;
+    requesting the Friday from an as-of listing returned no contracts for all
+    three index ETFs (ingestion_run 44), so the cycle key must be the listed
+    date. ``third_friday`` keeps the unadjusted rule date."""
+    assert oc.third_friday(2025, 4) == date(2025, 4, 18)
+    assert oc.cycle_expiry(2025, 4) == date(2025, 4, 17)
+    assert oc.third_friday(2026, 6) == date(2026, 6, 19)
+    assert oc.cycle_expiry(2026, 6) == date(2026, 6, 18)
+    # an ordinary month is unchanged
+    assert oc.cycle_expiry(2023, 11) == oc.third_friday(2023, 11) == date(2023, 11, 17)
+
+    cycles = oc.monthly_cycles(date(2023, 9, 4), date(2026, 9, 4), dte_entry_max=60)
+    assert date(2025, 4, 17) in cycles and date(2025, 4, 18) not in cycles
+    assert date(2026, 6, 18) in cycles and date(2026, 6, 19) not in cycles
+    assert len(cycles) == 34  # the adjustment moves cycles, it never adds or drops one
+    assert oc.CYCLE_EXPIRY_ADJUSTMENT == "holiday_preceding_session"
+
+
 def test_the_d1_window_yields_the_34_pre_registered_cycles() -> None:
     cycles = oc.monthly_cycles(date(2023, 9, 4), date(2026, 9, 4), dte_entry_max=60)
     assert len(cycles) == 34
