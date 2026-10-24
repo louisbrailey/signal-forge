@@ -197,16 +197,13 @@ def run_scan(
     end = as_of or date.today()
     required_bar_date = None
     if as_of is None and not intraday and provider != "fixture":
-        from zoneinfo import ZoneInfo
+        from signalforge.data.calendar import last_closed_session
 
-        from signalforge.data.calendar import sessions
-
-        local_now = started.astimezone(ZoneInfo("America/New_York"))
-        cutoff_date = local_now.date()
-        if (local_now.hour, local_now.minute) < (17, 30):
-            cutoff_date -= timedelta(days=1)
-        completed = sessions(cutoff_date - timedelta(days=14), cutoff_date)
-        required_bar_date = completed[-1] if completed else cutoff_date
+        # The newest session whose close has passed — the SAME bar paper
+        # acceptance requires. Between the close and publication this excludes
+        # every symbol as stale instead of emitting candidates on the previous
+        # session that acceptance would then refuse (incident 2026-10-22).
+        required_bar_date = last_closed_session(started)
     start = end - timedelta(days=365 * 6)
 
     # Regime always comes from the daily proxy (it does not flip intraday).

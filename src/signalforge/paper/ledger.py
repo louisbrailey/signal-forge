@@ -16,7 +16,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from signalforge.data.calendar import rth_bounds_utc, sessions
+from signalforge.data.calendar import last_closed_session, rth_bounds_utc, sessions
 from signalforge.data.repository import get_daily_bars
 from signalforge.db.models import (
     AppSetting,
@@ -189,14 +189,9 @@ def record_decision(
 
 
 def _completed_market_date(now: datetime) -> date:
-    completed = [
-        d
-        for d in sessions(now.date() - timedelta(days=14), now.date())
-        if (bounds := rth_bounds_utc(d)) is not None and bounds[1] <= now
-    ]
-    if not completed:
-        raise ValueError("no completed market session")
-    return completed[-1]
+    # Shared with the scanner's stale-data exclusion so the two can never
+    # disagree about which session is current (incident 2026-10-22).
+    return last_closed_session(now)
 
 
 def _mark_quality_ok(bar: OHLCVDaily) -> bool:
