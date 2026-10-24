@@ -12,6 +12,17 @@
 </div>
 {% endif %}
 
+<details class="my-4 rounded border p-4"><summary>Verified subscription endpoint access</summary>
+<p class="text-sm">Sampled access only. A successful request does not verify real-time delivery or strategy profitability.</p>
+<table class="text-sm w-full"><thead><tr><th>Feed</th><th>Status</th><th>Latency</th><th>Checked UTC</th></tr></thead><tbody>
+{% for check in subscription_checks %}<tr><td>{{ check.feed }}</td><td>{{ 'Available' if check.available else check.error_category }}</td><td>{{ check.latency_category }}</td><td>{{ check.checked_at }}</td></tr>{% else %}<tr><td>No verification recorded.</td></tr>{% endfor %}
+</tbody></table></details>
+<section class="my-4 rounded border p-4 overflow-x-auto">
+<h2 class="font-semibold">Cross-asset research context · END-OF-DAY</h2>
+<p class="text-sm">Context only; does not change entries, rankings or risk. ESZ6 is a pinned December 2026 contract, not a continuous series. FX/metal bars are quote-derived; indices have no traded volume. Research signal only — no order was placed.</p>
+<table class="text-sm w-full"><thead><tr><th>Symbol</th><th>Close</th><th>Bar-to-bar %</th><th>Observation UTC</th><th>Source</th><th>Status</th></tr></thead><tbody>
+{% for row in cross_asset_context %}<tr><td>{{ row.symbol }}</td><td>{{ row.close if row.close is not none else '—' }}</td><td>{{ '%.2f'|format(row.change_pct) if row.change_pct is not none else '—' }}</td><td>{{ row.timestamp or '—' }}</td><td>{{ row.source }}</td><td>{{ row.status }}{% if row.error_category %}: {{ row.error_category }}{% endif %}</td></tr>{% endfor %}
+</tbody></table></section>
 <section class="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
   {{ killswitch_card(kill_switch, csrf_token) }}
 

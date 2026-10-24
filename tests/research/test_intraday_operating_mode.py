@@ -65,7 +65,7 @@ def test_off_schedules_no_intraday_job(db_url: str) -> None:
 
     names = [s.name for s in default_job_specs()]
     assert "intraday_scan" not in names
-    # the pre-existing job list, unchanged and in its original order
+    # Daily context is read-only; it does not enable intraday trading.
     assert names == [
         "daily_eod_update",
         "universe_update",
@@ -76,6 +76,7 @@ def test_off_schedules_no_intraday_job(db_url: str) -> None:
         "feed_probe",
         "health_check",
         "news_poll",
+        "market_context",
         "daily_briefing",
         "alerts",
         "strategy_health",

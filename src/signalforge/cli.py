@@ -228,6 +228,15 @@ def data_coverage(
     typer.echo(f"  {'TOTAL':8} {total:6d}  across {len(rows)}/{len(syms)} symbols")
 
 
+@providers_app.command("refresh-context")
+def providers_refresh_context() -> None:
+    """Refresh bounded FX/metal/index context; no signals, alerts or trades."""
+    from signalforge.data.market_context import refresh
+
+    count = refresh()
+    typer.echo(f"Recorded {count} context responses. Research signal only — no order was placed.")
+
+
 @providers_app.command("verify")
 def providers_verify(
     no_store: Annotated[

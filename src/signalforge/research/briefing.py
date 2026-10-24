@@ -8,7 +8,7 @@ orchestrated one level up, in :mod:`signalforge.briefing`.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, time
 from typing import Any
 
 from sqlalchemy import select
@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from signalforge import RESEARCH_ONLY_NOTICE
 from signalforge.data.feeds import feed_status_report
+from signalforge.data.market_context import read_context
 from signalforge.db.models import Instrument, OHLCVDaily, PaperPosition, ScanRun
 from signalforge.db.types import utcnow
 from signalforge.domain import PositionSide, QualityGate
@@ -157,6 +158,9 @@ def build_briefing_facts(
 
     return {
         "generated_at": utcnow().isoformat(),
+        "cross_asset_context": read_context(
+            session, as_of=min(utcnow(), datetime.combine(on, time.max, UTC))
+        ),
         "config_hash": cfg.config_hash,
         "market": _market_status(session, on),
         "feeds": feeds["feeds"],
@@ -206,6 +210,13 @@ def render_briefing_text(facts: dict[str, Any]) -> str:
             f"  - {f['provider']}/{f['feed_type']} · {f['latency_category']}"
             f"{' · SIMULATED' if f['is_simulated'] else ''}"
             f"{' · STALE' if f['is_stale'] else ''}"
+        )
+
+    lines.append("## Cross-asset context (END-OF-DAY; not a trade input)")
+    for row in facts.get("cross_asset_context", []):
+        lines.append(
+            f"- {row['symbol']}: {row['close']} · {row['timestamp']} · "
+            f"{row['source']} · {row['status']}"
         )
 
     pa = facts["paper_account"]

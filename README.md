@@ -130,3 +130,10 @@ data/                local runtime state — gitignored
 Secrets come only from `.env` / the environment, are wrapped in `SecretStr`,
 redacted from logs, and never persisted or shown in the UI (Settings shows
 set / not-set only). See [SECURITY.md](SECURITY.md).
+
+## Subscription context
+
+See [Subscription workflow](docs/SUBSCRIPTION_WORKFLOW.md) for verified endpoint access,
+currency/gold/index/futures context, conservative latency labels and research limits.
+Run `uv run signalforge providers refresh-context` to update the bounded context panel
+and briefing inputs. It does not create trades or change strategy decisions.

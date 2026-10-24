@@ -449,6 +449,14 @@ def job_feed_probe() -> None:
         _log.warning("feed.stale", providers=stale)
 
 
+def job_market_context() -> None:
+    from signalforge.config import get_settings
+    from signalforge.data.market_context import refresh
+
+    if get_settings().market_data_provider == "massive":
+        refresh()
+
+
 def job_daily_briefing() -> None:
     from signalforge.briefing import build_and_store_briefing
     from signalforge.db.session import session_scope
@@ -954,6 +962,7 @@ def default_job_specs() -> list[JobSpec]:
             30,
             "Poll licensed news (config-gated OFF; U.S. sessions only; not on the decision path)",
         ),
+        JobSpec("market_context", job_market_context, 24 * 60, "Bounded cross-asset context"),
         JobSpec("daily_briefing", job_daily_briefing, 24 * 60, "Build the daily research briefing"),
         JobSpec(
             "alerts", job_alerts, 60, "Evaluate and dispatch alerts (policy-gated, OFF by default)"
