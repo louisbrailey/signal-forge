@@ -29,7 +29,8 @@ from signalforge.observability import get_logger
 if TYPE_CHECKING:  # typing only — the runtime import stays inside the job bodies
     from sqlalchemy.orm import Session
 
-    from signalforge.db.models import IngestionRun
+    from signalforge.data.adapters.base import MarketDataAdapter
+    from signalforge.db.models import IngestionRun, JobRun
 
 _log = get_logger("scheduler")
 
@@ -301,6 +302,7 @@ def job_ingest() -> None:
     end = date.today()
     start = end - timedelta(days=400)
     adapter = get_primary_adapter(settings)
+    _require_session_published(adapter)
 
     # Overall wall-clock deadline (incident 2026-09-28). The clock starts when
     # the EOD lock was taken (``_EOD_UNIT_STARTED_AT``), or now for a direct
@@ -553,6 +555,8 @@ def job_approved_scope_scan() -> None:
 # while the post-close ingest+rescan is in flight (they write the same tables,
 # and an intraday scan straddling the EOD rescan would read half-updated data).
 _EOD_UPDATE_LOCK = threading.Lock()
+# universe_update waits (blocking) for the EOD unit rather than overlapping it.
+UNIVERSE_WAIT_FOR_EOD_S = 2 * 60 * 60.0
 
 # Clock for the ingest deadline — a module attribute so a test can inject a
 # deterministic one. ``_EOD_UNIT_STARTED_AT`` is the clock reading at the
@@ -583,6 +587,48 @@ _EOD_UNIT_STARTED_AT: float | None = None
 
 INGEST_STATUS_STOPPED = "stopped"
 INGEST_DEADLINE_KEY = "deadline"  # inside IngestionRun.gaps_json
+
+
+class ProviderBarsNotPublished(RuntimeError):
+    """The provider has not yet published the last completed session's daily
+    bar. Nothing was fetched or written; the next catch-up retries after the
+    short ``NOT_PUBLISHED_RETRY_BACKOFF``."""
+
+
+# Incident 2026-10-19/22: the provider published the day's bars hours after the
+# 17:30 ET EOD job. The ingest then fetched all ~150 symbols (30 min of rate
+# limit), wrote 0 bars, and still recorded an ``ok`` run — so catch-up treated
+# the session as covered, the scans excluded every symbol as stale, and nothing
+# retried until the next evening. One probe request now gates the whole pass.
+PUBLICATION_PROBE_SYMBOL = "SPY"
+NOT_PUBLISHED_RETRY_BACKOFF = timedelta(minutes=25)  # < the 30-minute catch-up interval
+
+
+def _require_session_published(adapter: MarketDataAdapter, now: datetime | None = None) -> None:
+    """Raise :class:`ProviderBarsNotPublished` unless the provider already has
+    the last completed session's bar for the probe symbol. The fixture adapter
+    is exempt, exactly as the scanner's completed-bar requirement is."""
+    if adapter.provider_name == "fixture":
+        return
+    expected = last_completed_session(now)
+    bars = adapter.fetch_daily_bars(
+        PUBLICATION_PROBE_SYMBOL, expected - timedelta(days=7), expected
+    )
+    newest = max((bar.session_date for bar in bars), default=None)
+    if newest is None or newest < expected:
+        raise ProviderBarsNotPublished(
+            f"{adapter.provider_name} has not published the {expected.isoformat()} daily bar "
+            f"yet ({PUBLICATION_PROBE_SYMBOL} newest: {newest.isoformat() if newest else 'none'}); "
+            "retrying on the next catch-up"
+        )
+
+
+def _retry_backoff(failed: JobRun) -> timedelta:
+    """How long catch-up waits after ``failed``: short when the provider simply
+    had not published yet (a one-request probe), long for a real failure."""
+    if str(failed.detail or "").startswith(ProviderBarsNotPublished.__name__):
+        return NOT_PUBLISHED_RETRY_BACKOFF
+    return CATCH_UP_RETRY_BACKOFF
 
 
 class IngestDeadlineExceeded(RuntimeError):
@@ -769,12 +815,24 @@ def job_universe_update() -> None:
     from signalforge.settings_store import effective_research_config
     from signalforge.universe.pipeline import run_universe_update
 
-    with session_scope(write=True) as session:
-        cfg = effective_research_config(session).universe_pipeline
-        if not cfg.enabled:
-            _log.info("universe.update.skipped_disabled")
-            return
-        run_universe_update(session, cfg=cfg)
+    # Incident 2026-10-14..24: after the host woke, this job fired together with
+    # the EOD update / catch-up. Both spend the same provider rate limit (this
+    # one got HTTP 429) and this one holds a write transaction, so the EOD
+    # ingest failed with "database is locked". It now WAITS for the EOD unit.
+    if not _EOD_UPDATE_LOCK.acquire(timeout=UNIVERSE_WAIT_FOR_EOD_S):
+        raise RuntimeError(
+            f"universe update skipped: EOD update still running after "
+            f"{UNIVERSE_WAIT_FOR_EOD_S / 60:g} min"
+        )
+    try:
+        with session_scope(write=True) as session:
+            cfg = effective_research_config(session).universe_pipeline
+            if not cfg.enabled:
+                _log.info("universe.update.skipped_disabled")
+                return
+            run_universe_update(session, cfg=cfg)
+    finally:
+        _EOD_UPDATE_LOCK.release()
 
 
 def job_agents_daily() -> None:
@@ -1188,7 +1246,7 @@ def catch_up_pending(now: datetime | None = None) -> tuple[bool, str]:
         )
     if last_ok is not None and last_ok >= cutoff:
         return False, f"daily bars for {expected.isoformat()} ingested at {last_ok.isoformat()}"
-    if last_fail is not None and now - last_fail.started_at < CATCH_UP_RETRY_BACKOFF:
+    if last_fail is not None and now - last_fail.started_at < _retry_backoff(last_fail):
         return (
             False,
             f"catch-up owed for {expected.isoformat()} but backing off after a failed attempt "
@@ -1316,9 +1374,8 @@ def missed_sessions(now: datetime | None = None) -> tuple[list[date], str]:
             .limit(1)
         )
     names = ", ".join(d.isoformat() for d in owed)
-    if (
-        last_fail is not None
-        and timedelta(0) <= now - last_fail.started_at < CATCH_UP_RETRY_BACKOFF
+    if last_fail is not None and timedelta(0) <= now - last_fail.started_at < _retry_backoff(
+        last_fail
     ):
         return [], (
             f"missed sessions ({names}) owed but backing off after a failed attempt at "
@@ -1449,7 +1506,7 @@ def job_catch_up_missed_sessions() -> None:
     if not owed:
         return
     if not _EOD_UPDATE_LOCK.acquire(blocking=False):
-        _log.info("catch_up.skipped", reason="an EOD update is running right now")
+        _log.info("catch_up.skipped", reason="an EOD or universe update is running right now")
         return
     try:
         _EOD_UNIT_STARTED_AT = _clock()
@@ -1473,7 +1530,7 @@ def job_catch_up() -> None:
     if _EOD_UPDATE_LOCK.locked():
         # Cheap early exit (no DB reads). NOT the guard: the real guard is the
         # non-blocking acquire below, which this job holds itself.
-        _log.info("catch_up.skipped", reason="an EOD update is running right now")
+        _log.info("catch_up.skipped", reason="an EOD or universe update is running right now")
         return
     owed = _safe_missed_sessions()
     pending, reason = catch_up_pending()
@@ -1486,7 +1543,7 @@ def job_catch_up() -> None:
     # trace. The lock is taken HERE, non-blocking, before anything is
     # announced, and the EOD chain runs under it directly.
     if not _EOD_UPDATE_LOCK.acquire(blocking=False):
-        _log.info("catch_up.skipped", reason="an EOD update is running right now")
+        _log.info("catch_up.skipped", reason="an EOD or universe update is running right now")
         return
     try:
         # ONE deadline clock for the whole locked unit: the missed sessions'

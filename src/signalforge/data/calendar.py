@@ -6,7 +6,7 @@ classify an intraday timestamp as pre-market / regular hours / post-market.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
 
 import pandas as pd
@@ -58,6 +58,24 @@ def rth_bounds_utc(d: date) -> tuple[datetime, datetime] | None:
     open_ts = pd.Timestamp(sched.iloc[0]["market_open"]).tz_convert("UTC")
     close_ts = pd.Timestamp(sched.iloc[0]["market_close"]).tz_convert("UTC")
     return open_ts.to_pydatetime(), close_ts.to_pydatetime()
+
+
+def last_closed_session(now: datetime) -> date:
+    """The newest XNYS session whose regular-hours close is at or before ``now``.
+
+    The ONE definition of "the current completed bar" shared by the scanner's
+    stale-data exclusion and paper acceptance's freshness guard (incident
+    2026-10-22: the scanner used a 17:30 ET cutoff while acceptance used the
+    16:00 close, so a scan between the two produced candidates on the previous
+    session that acceptance then had to refuse). Early closes use their real
+    close. ``now`` must be timezone-aware.
+    """
+    d = now.astimezone(UTC).date()
+    for candidate in reversed(sessions(d - timedelta(days=14), d)):
+        bounds = rth_bounds_utc(candidate)
+        if bounds is not None and bounds[1] <= now:
+            return candidate
+    raise ValueError("no completed market session in the last 14 days")
 
 
 @lru_cache(maxsize=4096)
