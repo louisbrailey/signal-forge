@@ -33,4 +33,25 @@ uv run python scripts/kronos_shadow.py \
   --symbols SPY QQQ IWM --max-calls 25
 ```
 
-Add `--watch` to keep observing new completed bars. No launchd installation or continuous run is enabled by this commit; the requested model-topology clarification is pending. Query `forecasts` in the separate ledger for status/payload; `trade_approved` is always false. A failed runtime check is not a forecast failure score. This first implementation has no calibration, outcome evaluator, automatic strategy backtest, cross-asset support or claim of independent model verification.
+Add `--watch` to keep observing new completed bars. Omitting `--symbols` reads the configured
+watchlist from the read-only source database each cycle. Each ticker argument is validated;
+a space-separated string passed as one argument is rejected before recording an attempt.
+The deploy template `deploy/launchd/com.signalforge.kronos.plist` uses one persistent ledger,
+`data/kronos-shadow-daily.sqlite`. Do not create another ledger to bypass its daily budget.
+The authenticated `/kronos` page reads its heartbeat, attempt counts and latest statuses,
+refreshing every minute without running inference. The daemon checks every five minutes;
+the Mac must remain awake. A kill switch stops inference and work, while the daemon sleeps
+until it is released. A missing heartbeat or one older than ten minutes is visibly stale.
+
+Prospective mode requires the latest completed exchange session. For explicit diagnostic
+replay only, `--replay-latest` permits older inputs and records `historical_replay`,
+`data_stale`, latest available and expected session. Replay cannot be combined with watch.
+Earlier unlabelled outputs are `legacy_unclassified`, never prospective evidence. Keep
+these separate from new evaluation cohorts. Local diagnostics included an invalid combined
+ticker argument and alphabetically selected stale instruments; those failures do not show
+a broken model. A successful forecast does not establish model skill.
+
+Query `forecasts` in the separate ledger for status/payload; `trade_approved` is always false.
+A failed runtime check is not a forecast failure score. This implementation has no calibration,
+outcome evaluator, automatic strategy backtest, cross-asset support or claim of independent
+model verification. The negative ADR0004 outcome still applies.

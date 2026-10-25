@@ -12,6 +12,42 @@ def test_kronos_page_labels(registered_client):
     assert "HISTORICAL REPLAY" in r.text
     assert "pretraining" in r.text.lower()
     assert "No replay experiments recorded" in r.text
+    assert "Background research queue" in r.text
+    assert "No heartbeat recorded" in r.text
+    assert "Attempts today: 0 / 25" in r.text
+
+
+def test_shadow_page_uses_persisted_monitor_status(registered_client, monkeypatch):
+    from signalforge.app.routers import kronos
+
+    monkeypatch.setattr(
+        kronos,
+        "shadow_status",
+        lambda: {
+            "status": "not_running_or_stale",
+            "heartbeat": "2026-01-01T00:00:00+00:00",
+            "counts": {"failed": 1},
+            "attempts_today": 25,
+            "rows": [
+                {
+                    "symbol": "SPY",
+                    "origin": "2026-01-01",
+                    "generated": "2026-01-05",
+                    "status": "failed",
+                    "reason": "stale_history",
+                    "mode": "historical_replay",
+                    "source": "massive",
+                    "latency": "END_OF_DAY",
+                    "stale": True,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(kronos, "replay", lambda *a: (_ for _ in ()).throw(AssertionError()))
+    response = registered_client.get("/kronos")
+    assert "stale_history" in response.text
+    assert "Attempts today: 25 / 25" in response.text
+    assert "not_running_or_stale" in response.text
 
 
 def test_kronos_post_csrf_and_watchlist(registered_client):

@@ -124,3 +124,97 @@ def test_malformed_stop_state_fails_closed(tmp_path):
         assert script.stopped(p)
     p.write_text('{"active": false}')
     assert not script.stopped(p)
+
+
+def test_combined_tickers_rejected_before_ledger(db_url, tmp_path):
+    from argparse import Namespace
+    from pathlib import Path
+
+    from sqlalchemy.engine import make_url
+
+    script = load_script()
+    args = Namespace(
+        source_db=Path(make_url(db_url).database),
+        output_db=tmp_path / "shadow.sqlite",
+        symbols=["SPY QQQ"],
+        max_calls=25,
+    )
+    with pytest.raises(ValueError, match="separate valid"):
+        script.run(args)
+    assert not args.output_db.exists()
+
+
+@pytest.mark.parametrize("replay_mode", [False, True])
+def test_old_data_requires_explicit_replay(db_url, stored, tmp_path, monkeypatch, replay_mode):
+    import json
+    import sqlite3
+    from argparse import Namespace
+    from pathlib import Path
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.orm import Session
+
+    engine = create_engine(db_url)
+    with Session(engine) as s:
+        instrument = Instrument(symbol="TEST", instrument_type="stock")
+        s.add(instrument)
+        s.flush()
+        for old in stored.scalars(select(OHLCVDaily)):
+            values = {
+                c.name: getattr(old, c.name)
+                for c in OHLCVDaily.__table__.columns
+                if c.name not in ("id", "instrument_id")
+            }
+            s.add(OHLCVDaily(instrument_id=instrument.id, **values))
+        s.commit()
+    script = load_script()
+    monkeypatch.setattr(script, "last_closed_session", lambda now: date(2026, 10, 23))
+    calls = []
+
+    def forecast(*args, **kwargs):
+        calls.append(args)
+        return {"trade_approved": False}
+
+    monkeypatch.setattr(script, "forecast", forecast)
+    args = Namespace(
+        source_db=Path(make_url(db_url).database),
+        output_db=tmp_path / "shadow.sqlite",
+        kill_switch=tmp_path / "kill.json",
+        symbols=["TEST"],
+        max_calls=25,
+        horizon=5,
+        replay_latest=replay_mode,
+    )
+    script.run(args)
+    with sqlite3.connect(args.output_db) as db:
+        status, raw = db.execute("SELECT status,payload FROM forecasts").fetchone()
+    payload = json.loads(raw)
+    if replay_mode:
+        assert len(calls) == 1
+        assert status == "complete"
+        assert payload["mode"] == "historical_replay"
+        assert payload["data_stale"] is True
+    else:
+        assert calls == []
+        assert status == "failed"
+        assert payload["reason"] == "stale_history"
+    engine.dispose()
+
+
+def test_monitor_empty_corrupt_and_legacy_ledger(tmp_path):
+    import sqlite3
+
+    from signalforge.kronos.monitor import shadow_status
+
+    path = tmp_path / "shadow.sqlite"
+    assert shadow_status(path)["status"] == "not_started"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE forecasts (symbol,origin,generated_at,status,payload)")
+        db.execute("INSERT INTO forecasts VALUES ('SPY','2026-01-01','2026-01-02','complete','{}')")
+    report = shadow_status(path)
+    assert report["status"] == "not_running_or_stale"
+    assert report["rows"][0]["mode"] == "legacy_unclassified"
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE forecasts SET payload='['")
+    assert shadow_status(path)["status"] == "unavailable_or_invalid"
