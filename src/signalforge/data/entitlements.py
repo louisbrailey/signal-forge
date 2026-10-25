@@ -34,7 +34,7 @@ LatencyLabel = str  # REALTIME | DELAYED | END_OF_DAY | HISTORICAL | none
 @dataclass(frozen=True, slots=True)
 class EndpointCheck:
     feed: str
-    subscription: str  # stocks_developer | options_developer | benzinga_news | discord
+    subscription: str  # stocks | options | benzinga_news | discord
     endpoint: str  # path only, no query secrets
     source: str  # provider name
     checked_at: str  # ISO-8601 UTC
@@ -215,15 +215,46 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
     today = date.today()
     d9 = today - timedelta(days=int(9 * 365.25))
 
+    recent = f"{today - timedelta(days=7)}/{today - timedelta(days=1)}"
     checks: list[EndpointCheck] = []
     with httpx.Client() as client:
+        for sub, feed, path in (
+            (
+                "currencies",
+                "currencies_daily",
+                f"/v2/aggs/ticker/C:EURUSD/range/1/day/{recent}?limit=5",
+            ),
+            (
+                "indices",
+                "indices_daily",
+                f"/v2/aggs/ticker/I:SPX/range/1/day/{recent}?limit=5",
+            ),
+            ("futures", "futures_contracts", "/futures/v1/contracts?ticker=ESZ6&limit=1"),
+            (
+                "futures",
+                "futures_session_bars",
+                "/futures/v1/aggs/ESZ6?resolution=1session&limit=5&sort=window_start.desc",
+            ),
+        ):
+            checks.append(
+                _check(
+                    client,
+                    stock_key,
+                    feed=feed,
+                    subscription=sub,
+                    endpoint_display=path.split("?")[0],
+                    path=path,
+                    latency="HISTORICAL",
+                    source=provider,
+                )
+            )
         # ---- Stocks Developer -------------------------------------------------
         checks.append(
             _check(
                 client,
                 stock_key,
                 feed="stocks_daily_bars",
-                subscription="stocks_developer",
+                subscription="stocks",
                 endpoint_display="/v2/aggs/ticker/{sym}/range/1/day/{from}/{to}",
                 path="/v2/aggs/ticker/AAPL/range/1/day/2024-01-02/2024-01-08?adjusted=true&limit=5",
                 latency="END_OF_DAY",
@@ -235,7 +266,7 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
                 client,
                 stock_key,
                 feed="stocks_history_10y",
-                subscription="stocks_developer",
+                subscription="stocks",
                 endpoint_display="/v2/aggs/ticker/{sym}/range/1/day/{~9y}/{...}",
                 path=f"/v2/aggs/ticker/AAPL/range/1/day/{d9}/{d9 + timedelta(days=10)}"
                 "?adjusted=true&limit=5",
@@ -248,7 +279,7 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
                 client,
                 stock_key,
                 feed="stocks_intraday_aggs_5m",
-                subscription="stocks_developer",
+                subscription="stocks",
                 endpoint_display="/v2/aggs/ticker/{sym}/range/5/minute/{from}/{to}",
                 path=f"/v2/aggs/ticker/AAPL/range/5/minute/{today - timedelta(days=4)}/"
                 f"{today - timedelta(days=1)}?adjusted=true&limit=5",
@@ -261,7 +292,7 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
                 client,
                 stock_key,
                 feed="stocks_last_trade",
-                subscription="stocks_developer",
+                subscription="stocks",
                 endpoint_display="/v2/last/trade/{sym}",
                 path="/v2/last/trade/AAPL",
                 latency="DELAYED",
@@ -273,7 +304,7 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
                 client,
                 stock_key,
                 feed="stocks_nbbo_quotes",
-                subscription="stocks_developer",
+                subscription="stocks",
                 endpoint_display="/v3/quotes/{sym}",
                 path="/v3/quotes/AAPL?limit=1",
                 latency="DELAYED",
@@ -288,7 +319,7 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
                 client,
                 opt_key,
                 feed="options_contracts",
-                subscription="options_developer",
+                subscription="options",
                 endpoint_display="/v3/reference/options/contracts",
                 path="/v3/reference/options/contracts?underlying_ticker=SPY&limit=1",
                 latency="HISTORICAL",
@@ -300,7 +331,7 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
                 client,
                 opt_key,
                 feed="options_chain_snapshot",
-                subscription="options_developer",
+                subscription="options",
                 endpoint_display="/v3/snapshot/options/{underlying}",
                 path="/v3/snapshot/options/SPY?limit=1",
                 latency="DELAYED",
@@ -312,7 +343,7 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
                 client,
                 opt_key,
                 feed="options_contract_snapshot",
-                subscription="options_developer",
+                subscription="options",
                 endpoint_display="/v3/snapshot/options/{underlying}/{contract}",
                 path=f"/v3/snapshot/options/SPY/{oc}" if oc else "/v3/snapshot/options/SPY/O:NONE",
                 latency="DELAYED",
@@ -324,7 +355,7 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
                 client,
                 opt_key,
                 feed="options_historical_aggs",
-                subscription="options_developer",
+                subscription="options",
                 endpoint_display="/v2/aggs/ticker/{O:contract}/range/1/day/{from}/{to}",
                 path=(
                     (
@@ -343,7 +374,7 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
                 client,
                 opt_key,
                 feed="options_delayed_trades",
-                subscription="options_developer",
+                subscription="options",
                 endpoint_display="/v3/trades/{O:contract}",
                 path=f"/v3/trades/{oc}?limit=2" if oc else "/v3/trades/O:NONE",
                 latency="DELAYED",
@@ -355,7 +386,7 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
                 client,
                 opt_key,
                 feed="options_last_trade",
-                subscription="options_developer",
+                subscription="options",
                 endpoint_display="/v2/last/trade/{O:contract}",
                 path=f"/v2/last/trade/{oc}" if oc else "/v2/last/trade/O:NONE",
                 latency="DELAYED",
@@ -367,7 +398,7 @@ def verify_entitlements(settings: Settings | None = None) -> EntitlementReport:
                 client,
                 opt_key,
                 feed="options_quotes_bidask",
-                subscription="options_developer",
+                subscription="options",
                 endpoint_display="/v3/quotes/{O:contract}",
                 path=f"/v3/quotes/{oc}?limit=2" if oc else "/v3/quotes/O:NONE",
                 latency="DELAYED",
@@ -538,7 +569,7 @@ def _benzinga_news_check(client: httpx.Client, key: str, provider: str) -> Endpo
     available = newest is not None and newest >= now_dt - timedelta(days=_BENZINGA_FRESH_DAYS)
     if available:
         detail = (
-            f"live via /benzinga/v2/news — {total} sampled articles, "
+            f"available via /benzinga/v2/news — {total} sampled articles, "
             f"newest {bz_date} ({age_days}d old)"
         )
     else:
@@ -600,7 +631,7 @@ def _greeks_iv_oi(
         out.append(
             EndpointCheck(
                 feed=feed,
-                subscription="options_developer",
+                subscription="options",
                 endpoint=f"/v3/snapshot/options/{{underlying}} :: {field_names[0]}",
                 source=provider,
                 checked_at=now,

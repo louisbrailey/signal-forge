@@ -548,3 +548,9 @@ name = "Kronos cannot reach trading, credentials, providers or alerts"
 type = "forbidden"
 source_modules = ["signalforge.kronos"]
 forbidden_modules = ["signalforge.paper", "signalforge.execution", "signalforge.alerts", "signalforge.llm", "signalforge.data.adapters", "signalforge.research.scan"]
+
+[[tool.importlinter.contracts]]
+name = "Cross-asset context cannot drive signals, risk or paper execution"
+type = "forbidden"
+source_modules = ["signalforge.research.strategies", "signalforge.risk", "signalforge.paper", "signalforge.execution", "signalforge.backtest"]
+forbidden_modules = ["signalforge.data.market_context"]

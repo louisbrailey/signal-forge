@@ -14,10 +14,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from signalforge.data.feeds import feed_status_report
+from signalforge.data.market_context import read_context
 from signalforge.data.series import PriceSeries
 from signalforge.db.models import (
     Candidate,
     EarningsEvent,
+    EntitlementCheck,
     Instrument,
     JournalEntry,
     PaperTrade,
@@ -129,7 +131,20 @@ def overview_context(session: Session) -> dict[str, Any]:
 
     ks = get_kill_switch().state()
     last_bar = session.scalar(select(Instrument.symbol).where(Instrument.symbol == "SPY"))
+    latest_check = session.scalar(
+        select(EntitlementCheck).order_by(EntitlementCheck.checked_at.desc()).limit(1)
+    )
+    subscription_checks = (
+        list(
+            session.scalars(
+                select(EntitlementCheck).where(EntitlementCheck.batch_id == latest_check.batch_id)
+            )
+        )
+        if latest_check
+        else []
+    )
     return {
+        "subscription_checks": subscription_checks,
         "feeds": feeds["feeds"],
         "any_stale": any_stale,
         "live_alerts_enabled": not any_stale,
@@ -140,6 +155,7 @@ def overview_context(session: Session) -> dict[str, Any]:
         "warnings": warnings,
         "kill_switch": ks,
         "market_proxy_present": last_bar is not None,
+        "cross_asset_context": read_context(session),
         "config_hash": cfg.config_hash,
         "news": _news_items(session, None, 6),
     }

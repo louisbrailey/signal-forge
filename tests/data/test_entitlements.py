@@ -164,7 +164,7 @@ def test_verify_entitlements_groups_and_classifies(monkeypatch: pytest.MonkeyPat
     report = verify_entitlements(_settings(monkeypatch))
 
     subs = {c.subscription for c in report.checks}
-    assert subs == {"stocks_developer", "options_developer", "benzinga_news"}
+    assert subs == {"stocks", "options", "benzinga_news", "currencies", "indices", "futures"}
 
     # stocks: bars + history entitled, NBBO not
     assert report.available("stocks_daily_bars")
@@ -199,7 +199,7 @@ def test_benzinga_news_available_only_when_feed_is_currently_delivering_it(
     assert bz.available is True
     assert bz.latency_category == "DELAYED"
     assert bz.endpoint == "/benzinga/v2/news"
-    assert "live via /benzinga/v2/news" in bz.detail
+    assert "available via /benzinga/v2/news" in bz.detail
 
     # Benzinga items present but 81 days stale -> NOT available
     _mock(monkeypatch, benzinga_age_days=81)
