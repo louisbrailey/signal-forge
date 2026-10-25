@@ -11,6 +11,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +53,7 @@ def environment() -> dict[str, str]:
     }
 
 
-def run_worker(payload: bytes) -> bytes:
+def run_worker(payload: bytes, cancelled: Callable[[], bool] | None = None) -> bytes:
     """Cap combined stdout/stderr while streaming; kill/reap on every failure."""
     process = subprocess.Popen(  # noqa: S603
         [str(PYTHON), "-I", str(Path(__file__).with_name("worker.py")), str(HOME)],
@@ -75,6 +76,8 @@ def run_worker(payload: bytes) -> bytes:
             selector.register(process.stderr, selectors.EVENT_READ)
             pending = memoryview(payload)
             while selector.get_map():
+                if cancelled is not None and cancelled():
+                    raise KronosError("Local inference cancelled")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise KronosError("Local model timed out")
@@ -109,7 +112,11 @@ def run_worker(payload: bytes) -> bytes:
 
 
 def infer(
-    history: list[dict[str, Any]], dates: list[str], mode: dict[str, Any] | None = None
+    history: list[dict[str, Any]],
+    dates: list[str],
+    mode: dict[str, Any] | None = None,
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[list[float]]:
     """Run one bounded inference. ``mode`` is study-only; ``None`` is production (eval)."""
     try:
@@ -135,7 +142,9 @@ def infer(
         except BlockingIOError:
             raise KronosError("Kronos replay is busy") from None
         try:
-            result = json.loads(run_worker(payload))
+            result = json.loads(
+                run_worker(payload) if cancelled is None else run_worker(payload, cancelled)
+            )
             # The worker reports the mode it actually ran in; never trust it silently.
             if result["eval"] is not resolved["eval"]:
                 raise KronosError("Local inference ran in an unexpected model mode")
