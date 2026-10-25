@@ -108,7 +108,13 @@ def run_universe_update(
     market_cap_requests: int = 250,
 ) -> UniverseUpdateReport:
     cfg = cfg or effective_research_config(session).universe_pipeline
-    client = client or GroupedDailyClient(spacing_s=cfg.request_spacing_s)
+    # The bulk client shares ONE provider key (and rate limit) with the
+    # per-symbol ingest, so it can never pace faster than that adapter does.
+    # A 2.0s spacing against a 5-requests/minute key is what made every run
+    # since 2026-10-14 fail its reference walk with HTTP 429.
+    client = client or GroupedDailyClient(
+        spacing_s=max(cfg.request_spacing_s, get_settings().market_data_min_request_spacing_s)
+    )
     now = now or datetime.now(UTC)
     t0 = time.monotonic()
     deadline = t0 + cfg.max_runtime_seconds

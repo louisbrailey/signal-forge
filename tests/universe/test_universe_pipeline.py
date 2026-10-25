@@ -715,3 +715,64 @@ def test_job_universe_update_is_a_noop_when_pipeline_disabled(
 
     row = session.scalar(select(AuditLog).where(AuditLog.action == "universe.update"))
     assert row is None
+
+
+def test_backfill_tops_up_new_sessions_once_the_target_is_already_met(
+    session: Session,
+) -> None:
+    """Incident 2026-09-09..10-24: with the archive at its 420-file target the
+    walk never ran, so no session after 2026-09-08 was fetched and the grouped
+    feed went stale. A full archive must still pick up newer sessions."""
+    api1 = FakeMassiveAPI()
+    for d in (date(2026, 9, 9), date(2026, 9, 8), date(2026, 9, 7)):
+        api1.grouped[d.isoformat()] = _grouped_ok([_bar("AAPL", 100.0)])
+    old_now = datetime(2026, 9, 10, 15, 0, tzinfo=ZoneInfo("America/New_York"))
+    first = backfill(
+        session,
+        api1.client(),
+        sessions=3,
+        runtime_budget_s=60.0,
+        storage_budget_bytes=10**9,
+        now=old_now,
+    )
+    assert first.sessions_archived == 3
+
+    api2 = FakeMassiveAPI()
+    for d in (date(2026, 9, 11), date(2026, 9, 10)):
+        api2.grouped[d.isoformat()] = _grouped_ok([_bar("AAPL", 100.0)])
+    rep = backfill(
+        session,
+        api2.client(),
+        sessions=3,  # target already met before this run
+        runtime_budget_s=60.0,
+        storage_budget_bytes=10**9,
+        now=_BACKFILL_NOW,
+    )
+
+    assert set(api2.grouped_calls) == {"2026-09-11", "2026-09-10"}
+    assert rep.fetched == 2
+    assert rep.skipped_existing == 1  # stops at the newest archived session
+    assert rep.stopped_reason == ""
+
+
+def test_pipeline_bulk_client_never_paces_faster_than_the_shared_provider_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bulk client and the per-symbol ingest share one key and one rate
+    limit; a 2.0s bulk spacing against a 5/min key failed every run with 429."""
+    import signalforge.universe.pipeline as pipeline
+
+    seen: dict[str, float] = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_client(*, spacing_s: float) -> None:
+        seen["spacing_s"] = spacing_s
+        raise _Stop
+
+    monkeypatch.setattr(pipeline, "GroupedDailyClient", _fake_client)
+    cfg = pipeline.UniversePipelineConfig(request_spacing_s=2.0)
+    with pytest.raises(_Stop):
+        pipeline.run_universe_update(None, cfg=cfg)  # type: ignore[arg-type]
+    assert seen["spacing_s"] >= pipeline.get_settings().market_data_min_request_spacing_s

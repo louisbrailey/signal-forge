@@ -31,6 +31,7 @@ _log = get_logger("universe.bulk")
 _BASE_URL = "https://api.massive.com"
 _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 _MAX_ATTEMPTS = 4
+_RATE_LIMIT_BACKOFF_S = 61.0
 _MIN_LOOKBACK_DAYS = 3 * 366  # floor; the walk-back window scales with the requested sessions
 DEFAULT_SOURCE = "massive_grouped"
 
@@ -99,11 +100,15 @@ class GroupedDailyClient:
             last_status = resp.status_code
             if resp.status_code in _RETRY_STATUS and attempt < _MAX_ATTEMPTS:
                 retry_after = resp.headers.get("retry-after", "")
-                delay = (
-                    float(retry_after)
-                    if retry_after.replace(".", "", 1).isdigit()
-                    else min(30.0, 1.5 * 2 ** (attempt - 1))
-                )
+                if retry_after.replace(".", "", 1).isdigit():
+                    delay = float(retry_after)
+                elif resp.status_code == 429:
+                    # The key's limit is per rolling minute and is shared with
+                    # the EOD ingest; a short backoff just spends the remaining
+                    # attempts inside the same window.
+                    delay = _RATE_LIMIT_BACKOFF_S
+                else:
+                    delay = min(30.0, 1.5 * 2 ** (attempt - 1))
                 time.sleep(delay)
                 continue
             break
@@ -304,7 +309,13 @@ def backfill(
 ) -> BackfillReport:
     """Walk back from the last completed session until ``sessions`` OK files
     exist, stopping cleanly at the runtime or storage budget. Re-runs resume
-    (existing ok/empty rows are skipped without a request)."""
+    (existing ok/empty rows are skipped without a request).
+
+    The walk always TOPS UP first: it fetches every session newer than the
+    most recent archived one before the ``sessions`` target is consulted.
+    Incident 2026-09-09..10-24: the loop was gated on ``len(have) < sessions``
+    alone, so once the archive held 420 files no new session was ever fetched,
+    the archive froze at 2026-09-08 and the screen kept re-reading it."""
     t0 = time.monotonic()
     deadline = deadline if deadline is not None else t0 + runtime_budget_s
     rep = BackfillReport()
@@ -318,13 +329,17 @@ def backfill(
     d = _last_completed_session_et(now)
     walked = 0
     max_walk = max(_MIN_LOOKBACK_DAYS, int(sessions * 1.6) + 30)  # ~252 sessions/365 days
-    while len(have) < sessions and walked < max_walk:
+    # Topped up once the walk reaches an already-archived session; an empty
+    # index has nothing newer to top up to.
+    topped_up = not any(v in ("ok", "empty") for v in known.values())
+    while (len(have) < sessions or not topped_up) and walked < max_walk:
         walked += 1
         cur = d
         d -= timedelta(days=1)
         if cur.weekday() >= 5:
             continue
         if known.get(cur) in ("ok", "empty"):
+            topped_up = True
             rep.skipped_existing += 1
             if known[cur] == "ok":
                 have.add(cur)
