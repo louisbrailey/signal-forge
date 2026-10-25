@@ -100,6 +100,12 @@ def _run(args: argparse.Namespace) -> int:
         for symbol in symbols:
             if calls >= args.max_calls or stopped(args.kill_switch):
                 break
+            if output.stat().st_size > 256 * 1024 * 1024:
+                break
+            ledger.execute(
+                "INSERT OR REPLACE INTO health VALUES (1, ?)", (datetime.now(UTC).isoformat(),)
+            )
+            ledger.commit()
             with Session(engine) as session:
                 instrument = session.scalar(select(Instrument).where(Instrument.symbol == symbol))
                 latest = session.scalar(
