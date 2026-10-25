@@ -10,14 +10,14 @@ import json
 import os
 import sqlite3
 import time
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from signalforge.data.calendar import last_closed_session
-from signalforge.db.models import Candidate, Instrument
+from signalforge.db.models import Candidate, Instrument, OHLCVDaily
 from signalforge.kronos.shadow import forecast, inputs, partition
 
 
@@ -66,7 +66,7 @@ def _run(args) -> int:
         "SELECT COUNT(*) FROM forecasts WHERE generated_at LIKE ?", (today + "%",)
     ).fetchone()[0]
     engine = create_engine(f"sqlite+pysqlite:///file:{source}?mode=ro&uri=true")
-    cutoff = last_closed_session(datetime.now(UTC))
+    calendar_cutoff = last_closed_session(datetime.now(UTC))
     try:
         # Check independently generated candidates first; this never accepts/rejects one.
         with Session(engine) as session:
@@ -86,6 +86,22 @@ def _run(args) -> int:
         for symbol in symbols:
             if calls >= args.max_calls or stopped(args.kill_switch):
                 break
+            with Session(engine) as session:
+                instrument = session.scalar(
+                    select(Instrument).where(Instrument.symbol == symbol)
+                )
+                cutoff = session.scalar(
+                    select(func.max(OHLCVDaily.session_date)).where(
+                        OHLCVDaily.instrument_id == instrument.id if instrument else False,
+                        OHLCVDaily.source == "massive",
+                        OHLCVDaily.session_date <= calendar_cutoff,
+                    )
+                )
+            # Tests and replay callers may provide a synthetic input function
+            # without persisted bars; the real input validator still rejects
+            # missing history before inference.
+            if not isinstance(cutoff, date):
+                cutoff = calendar_cutoff
             if ledger.execute(
                 "SELECT 1 FROM forecasts WHERE symbol=? AND origin=? AND horizon=?",
                 (symbol, str(cutoff), args.horizon),
