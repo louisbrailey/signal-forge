@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from signalforge.app.routers.dashboard import DbDep, Guard, UserDep, _page
 from signalforge.db.models import AuditLog
 from signalforge.db.session import set_write_intent
+from signalforge.kronos.monitor import shadow_status
 from signalforge.kronos.service import KronosUnavailable, replay, runtime_status
 from signalforge.settings_store import effective_research_config
 
@@ -51,6 +52,7 @@ def _context(
         "recent": recent,
         "chart": _chart(result) if result else None,
         "symbols": effective_research_config(db).universe,
+        "shadow": shadow_status(),
     }
 
 

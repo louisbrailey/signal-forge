@@ -2,6 +2,17 @@
 {% block title %}Kronos Research · Signal Forge{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-bold">Kronos Research</h1>
+<section id="shadow-panel" class="my-4 border rounded p-4 overflow-x-auto" hx-get="/kronos" hx-trigger="every 60s" hx-select="#shadow-panel" hx-swap="outerHTML">
+<h2 class="text-xl font-semibold">Background research queue</h2>
+<p>Status: <strong>{{ shadow.status }}</strong> · Last check: {{ shadow.heartbeat or 'No heartbeat recorded' }} UTC.</p>
+<p>Configured stock/ETF watchlist · 25 logical partitions · one model · up to 25 attempts per UTC day. Checks every five minutes while the Mac is awake. Completed daily bars only.</p>
+<p>Totals: {{ shadow.counts }}. Legacy records are unclassified and cannot support prospective performance claims. A running queue does not establish forecasting skill.</p>
+<p>Attempts today: {{ shadow.attempts_today|default(0) }} / 25. Once the daily budget is used, the service waits for the next UTC day. Failed attempts also count.</p>
+{% for item in shadow.exclusions|default([]) %}<p role="status">{{ item.symbol }}: excluded — {{ item.reason }}; latest {{ item.latest }}, expected {{ item.expected }}. Retried when data arrives; no inference performed.</p>{% endfor %}
+<table class="w-full text-left text-sm"><thead><tr><th>Symbol</th><th>Input session</th><th>Generated UTC</th><th>Status / reason</th><th>Mode</th><th>Source / latency</th><th>Stale at generation</th></tr></thead><tbody>
+{% for row in shadow.rows %}<tr class="border-t"><td>{{ row.symbol }}</td><td>{{ row.origin }}</td><td>{{ row.generated }}</td><td>{{ row.status }} {{ row.reason }}</td><td>{{ row.mode }}</td><td>{{ row.source }} / {{ row.latency }}</td><td>{{ row.stale }}</td></tr>{% else %}<tr><td colspan="7">No shadow records available.</td></tr>{% endfor %}</tbody></table>
+<p>Unvalidated research. Research signal only — no order was placed.</p>
+</section>
 <div class="my-4 border border-amber-400 bg-amber-50 rounded p-4"><strong>HISTORICAL REPLAY · experimental AI research</strong><p>{{ runtime.notice }}</p><p>Research signal only — no order was placed.</p></div>
 <p>{{ runtime.model }} · {{ 'Local runtime present (inference not yet verified)' if runtime.configured else 'Local runtime unavailable' }} · Offline CPU inference. No model prediction changes entries, exits, ranking, or sizing.</p>
 <form class="my-5 flex flex-wrap gap-3 items-end" action="/kronos/replay" method="post">
