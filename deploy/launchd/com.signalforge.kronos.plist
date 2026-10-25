@@ -11,6 +11,10 @@
 <string>--kill-switch</string><string>data/kill_switch.json</string>
 <string>--watch</string><string>--max-calls</string><string>25</string>
 </array>
+<key>EnvironmentVariables</key><dict>
+<key>PATH</key><string>/Users/louisbrailey/Projects/signal-forge/.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+<key>PYTHONUNBUFFERED</key><string>1</string>
+</dict>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>
 <key>ThrottleInterval</key><integer>60</integer>

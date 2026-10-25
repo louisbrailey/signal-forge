@@ -34,9 +34,13 @@ def plist(request: pytest.FixtureRequest) -> tuple[Path, dict[str, Any]]:
     return path, _load(path)
 
 
-def test_exactly_two_plists_are_present() -> None:
+def test_expected_services_are_present() -> None:
     names = {p.name for p in PLIST_PATHS}
-    assert names == {"com.signalforge.api.plist", "com.signalforge.worker.plist"}
+    assert names == {
+        "com.signalforge.api.plist",
+        "com.signalforge.worker.plist",
+        "com.signalforge.kronos.plist",
+    }
 
 
 def test_plist_parses_and_label_matches_filename(plist: tuple[Path, dict[str, Any]]) -> None:
