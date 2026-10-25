@@ -66,6 +66,10 @@ def _run(args: argparse.Namespace) -> int:
         symbol TEXT, origin TEXT, horizon INTEGER, generated_at TEXT, status TEXT,
         payload TEXT, PRIMARY KEY(symbol, origin, horizon))""")
     ledger.execute("CREATE TABLE IF NOT EXISTS health (id INTEGER PRIMARY KEY, checked_at TEXT)")
+    ledger.execute(
+        "CREATE TABLE IF NOT EXISTS input_checks "
+        "(symbol TEXT PRIMARY KEY, checked_at TEXT, reason TEXT, latest TEXT, expected TEXT)"
+    )
     ledger.execute("INSERT OR REPLACE INTO health VALUES (1, ?)", (datetime.now(UTC).isoformat(),))
     ledger.commit()
     today = datetime.now(UTC).date().isoformat()
@@ -107,6 +111,36 @@ def _run(args: argparse.Namespace) -> int:
                 )
             replay_mode = getattr(args, "replay_latest", False)
             cutoff = latest if replay_mode and isinstance(latest, date) else calendar_cutoff
+            # Missing publication is retryable on the next cycle. It is not a model
+            # attempt and must not reserve/dedupe this origin before its bars arrive.
+            try:
+                with Session(engine) as session:
+                    history = inputs(session, symbol, cutoff)
+            except ValueError:
+                reason = (
+                    "missing_history"
+                    if latest is None
+                    else (
+                        "stale_history"
+                        if latest < calendar_cutoff and not replay_mode
+                        else "invalid_or_incomplete_history"
+                    )
+                )
+                ledger.execute(
+                    "INSERT OR REPLACE INTO input_checks VALUES (?,?,?,?,?)",
+                    (
+                        symbol,
+                        datetime.now(UTC).isoformat(),
+                        reason,
+                        str(latest) if latest else None,
+                        str(calendar_cutoff),
+                    ),
+                )
+                ledger.commit()
+                print(f"{symbol}: excluded ({reason}); Research signal only — no order was placed.")
+                continue
+            ledger.execute("DELETE FROM input_checks WHERE symbol=?", (symbol,))
+            ledger.commit()
             if ledger.execute(
                 "SELECT 1 FROM forecasts WHERE symbol=? AND origin=? AND horizon=?",
                 (symbol, str(cutoff), args.horizon),
@@ -121,8 +155,6 @@ def _run(args: argparse.Namespace) -> int:
             ledger.commit()
             calls += 1
             try:
-                with Session(engine) as session:
-                    history = inputs(session, symbol, cutoff)
                 if stopped(args.kill_switch):
                     raise ValueError("kill switch engaged")
                 result = forecast(

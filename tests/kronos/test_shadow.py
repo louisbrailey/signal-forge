@@ -188,17 +188,24 @@ def test_old_data_requires_explicit_replay(db_url, stored, tmp_path, monkeypatch
     )
     script.run(args)
     with sqlite3.connect(args.output_db) as db:
-        status, raw = db.execute("SELECT status,payload FROM forecasts").fetchone()
-    payload = json.loads(raw)
+        record = db.execute("SELECT status,payload FROM forecasts").fetchone()
+        exclusions = db.execute("SELECT reason FROM input_checks").fetchall()
     if replay_mode:
+        status, raw = record
+        payload = json.loads(raw)
         assert len(calls) == 1
         assert status == "complete"
         assert payload["mode"] == "historical_replay"
         assert payload["data_stale"] is True
     else:
         assert calls == []
-        assert status == "failed"
-        assert payload["reason"] == "stale_history"
+        assert record is None
+        assert exclusions == [("stale_history",)]
+        # Once publication arrives, the same session can be processed rather
+        # than being permanently deduplicated as a failed forecast.
+        monkeypatch.setattr(script, "inputs", lambda *a: [])
+        script.run(args)
+        assert len(calls) == 1
     engine.dispose()
 
 

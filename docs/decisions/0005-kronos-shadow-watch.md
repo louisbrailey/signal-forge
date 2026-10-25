@@ -51,6 +51,11 @@ these separate from new evaluation cohorts. Local diagnostics included an invali
 ticker argument and alphabetically selected stale instruments; those failures do not show
 a broken model. A successful forecast does not establish model skill.
 
+Missing, stale or invalid inputs are recorded as per-symbol input exclusions before a model
+attempt is reserved. They are checked again next cycle when data may have arrived, without
+spending inference budget or permanently deduplicating that session. Actual inference
+failures and interrupted attempts still consume the daily limit and are never silently retried.
+
 Query `forecasts` in the separate ledger for status/payload; `trade_approved` is always false.
 A failed runtime check is not a forecast failure score. This implementation has no calibration,
 outcome evaluator, automatic strategy backtest, cross-asset support or claim of independent

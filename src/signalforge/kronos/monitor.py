@@ -37,6 +37,16 @@ def shadow_status(path: Path | None = None) -> dict[str, Any]:
                 "SELECT COUNT(*) FROM forecasts WHERE generated_at LIKE ?",
                 (datetime.now(UTC).date().isoformat() + "%",),
             ).fetchone()[0]
+            try:
+                report["exclusions"] = [
+                    dict(zip(("symbol", "reason", "latest", "expected"), r, strict=True))
+                    for r in db.execute(
+                        "SELECT symbol,reason,latest,expected FROM input_checks "
+                        "ORDER BY symbol LIMIT 250"
+                    )
+                ]
+            except sqlite3.OperationalError:
+                report["exclusions"] = []
             for symbol, origin, generated, status, raw in db.execute(
                 "SELECT symbol,origin,generated_at,status,substr(payload,1,131072) "
                 "FROM forecasts ORDER BY generated_at DESC LIMIT 25"
