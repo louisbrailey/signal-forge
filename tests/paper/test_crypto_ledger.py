@@ -18,7 +18,7 @@ from signalforge.paper import crypto_ledger as cl
 from signalforge.research.fx.harness import CRYPTO_MARKET, load_series
 from signalforge.research.fx.strategies import CRYPTO_STRATEGIES
 
-KEY = "crypto_donchian_55"
+STRATEGY = "crypto_donchian_55"
 D0 = date(2020, 1, 1)
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -57,7 +57,7 @@ def _sealed(session: Session, verdict: str = "SEALED_PASS") -> CurrencySealedTes
     row = CurrencySealedTest(
         market="Crypto",
         version=CRYPTO_MARKET.version,
-        strategy_key=KEY,
+        strategy_key=STRATEGY,
         sealed_from=date(2025, 1, 1),
         sealed_to=date(2025, 12, 31),
         pairs=["BTCUSD"],
@@ -71,7 +71,7 @@ def _sealed(session: Session, verdict: str = "SEALED_PASS") -> CurrencySealedTes
 
 def _engine_trades(session: Session, after: date) -> list:
     s = load_series(session, "BTCUSD", CRYPTO_MARKET)
-    strat = next(x for x in CRYPTO_STRATEGIES if x.key == KEY)
+    strat = next(x for x in CRYPTO_STRATEGIES if x.key == STRATEGY)
     out = run_backtest(
         s,
         strat.signal,
@@ -84,30 +84,30 @@ def _engine_trades(session: Session, after: date) -> list:
 
 def test_a_book_needs_a_sealed_pass(session: Session) -> None:
     with pytest.raises(cl.PaperBookRefused, match="no sealed test"):
-        cl.start_book(session, KEY, now=NOW)
+        cl.start_book(session, STRATEGY, now=NOW)
     _sealed(session, "SEALED_FAIL")
     with pytest.raises(cl.PaperBookRefused, match="SEALED_FAIL"):
-        cl.start_book(session, KEY, now=NOW)
+        cl.start_book(session, STRATEGY, now=NOW)
 
 
 def test_book_start_is_fixed_and_unique(session: Session) -> None:
     _sealed(session)
-    book = cl.start_book(session, KEY, now=NOW)
+    book = cl.start_book(session, STRATEGY, now=NOW)
     assert book.start_date == date(2026, 1, 1)
     assert book.observation_end == date(2026, 1, 1) + timedelta(days=cl.OBSERVATION_DAYS)
     assert book.pairs == ["BTCUSD"]
     with pytest.raises(cl.PaperBookRefused, match="already exists"):
-        cl.start_book(session, KEY, now=NOW)
+        cl.start_book(session, STRATEGY, now=NOW)
 
 
 def test_cycles_match_the_backtest_engine_exactly_as_bars_arrive(session: Session) -> None:
     closes = _closes()
     _sealed(session)
-    book = cl.start_book(session, KEY, now=datetime(2020, 6, 1, tzinfo=UTC))
+    book = cl.start_book(session, STRATEGY, now=datetime(2020, 6, 1, tzinfo=UTC))
     # bars arrive in three batches; the book must end identical to one replay
     for lo, hi in ((0, 400), (400, 650), (650, len(closes))):
         _add_bars(session, closes, lo, hi)
-        cl.run_cycle(session, KEY, now=NOW)
+        cl.run_cycle(session, STRATEGY, now=NOW)
 
     expected = _engine_trades(session, book.start_date)
     rows = list(session.scalars(select(CryptoPaperTrade).order_by(CryptoPaperTrade.entry_date)))
@@ -130,24 +130,24 @@ def test_cycles_match_the_backtest_engine_exactly_as_bars_arrive(session: Sessio
 def test_only_trades_entered_after_the_start_date_count(session: Session) -> None:
     _add_bars(session, _closes())
     _sealed(session)
-    cl.start_book(session, KEY, now=datetime(2030, 1, 1, tzinfo=UTC))
-    rep = cl.run_cycle(session, KEY, now=NOW)
+    cl.start_book(session, STRATEGY, now=datetime(2030, 1, 1, tzinfo=UTC))
+    rep = cl.run_cycle(session, STRATEGY, now=NOW)
     assert rep.opened == [] and session.scalars(select(CryptoPaperTrade)).all() == []
 
 
 def test_kill_switch_blocks_opening_but_not_closing(session: Session) -> None:
     closes = _closes()
     _sealed(session)
-    cl.start_book(session, KEY, now=datetime(2020, 6, 1, tzinfo=UTC))
+    cl.start_book(session, STRATEGY, now=datetime(2020, 6, 1, tzinfo=UTC))
     _add_bars(session, closes, 0, 500)
-    cl.run_cycle(session, KEY, now=NOW)
+    cl.run_cycle(session, STRATEGY, now=NOW)
     before = {r.entry_date: r.status for r in session.scalars(select(CryptoPaperTrade))}
     open_before = [d for d, s in before.items() if s == "OPEN"]
 
     get_kill_switch().engage(reason="test", actor="test")
     try:
         _add_bars(session, closes, 500, len(closes))
-        rep = cl.run_cycle(session, KEY, now=NOW)
+        rep = cl.run_cycle(session, STRATEGY, now=NOW)
     finally:
         get_kill_switch().release(reason="test", actor="test")
 
@@ -163,8 +163,8 @@ def test_kill_switch_blocks_opening_but_not_closing(session: Session) -> None:
 def test_closed_trades_are_immutable_and_disagreement_is_flagged(session: Session) -> None:
     _add_bars(session, _closes())
     _sealed(session)
-    cl.start_book(session, KEY, now=datetime(2020, 6, 1, tzinfo=UTC))
-    cl.run_cycle(session, KEY, now=NOW)
+    cl.start_book(session, STRATEGY, now=datetime(2020, 6, 1, tzinfo=UTC))
+    cl.run_cycle(session, STRATEGY, now=NOW)
     row = session.scalar(
         select(CryptoPaperTrade).where(CryptoPaperTrade.status == "CLOSED").limit(1)
     )
@@ -173,20 +173,20 @@ def test_closed_trades_are_immutable_and_disagreement_is_flagged(session: Sessio
     tampered = row.exit_price
     session.commit()
 
-    rep = cl.run_cycle(session, KEY, now=NOW)
+    rep = cl.run_cycle(session, STRATEGY, now=NOW)
 
     session.refresh(row)
     assert row.exit_price == tampered  # never overwritten
     assert row.divergence and rep.divergences
-    assert cl.status(session, KEY)["divergences"]
+    assert cl.status(session, STRATEGY)["divergences"]
 
 
 def test_status_reports_the_record_against_the_sealed_result(session: Session) -> None:
     _add_bars(session, _closes())
     _sealed(session)
-    cl.start_book(session, KEY, now=datetime(2020, 6, 1, tzinfo=UTC))
-    cl.run_cycle(session, KEY, now=NOW)
-    st = cl.status(session, KEY)
+    cl.start_book(session, STRATEGY, now=datetime(2020, 6, 1, tzinfo=UTC))
+    cl.run_cycle(session, STRATEGY, now=NOW)
+    st = cl.status(session, STRATEGY)
     assert st["sealed_expectancy_r"] == 0.9
     assert st["closed_trades"] >= 1
     assert "No order was placed" in st["notice"]
@@ -204,14 +204,14 @@ def test_scheduled_cycle_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> N
 def test_a_trade_declined_under_the_kill_switch_is_never_opened_later(session: Session) -> None:
     closes = _closes()
     _sealed(session)
-    cl.start_book(session, KEY, now=datetime(2020, 6, 1, tzinfo=UTC))
+    cl.start_book(session, STRATEGY, now=datetime(2020, 6, 1, tzinfo=UTC))
     _add_bars(session, closes, 0, 500)
-    cl.run_cycle(session, KEY, now=NOW)
+    cl.run_cycle(session, STRATEGY, now=NOW)
 
     get_kill_switch().engage(reason="test", actor="test")
     try:
         _add_bars(session, closes, 500, len(closes))
-        rep = cl.run_cycle(session, KEY, now=NOW)
+        rep = cl.run_cycle(session, STRATEGY, now=NOW)
     finally:
         get_kill_switch().release(reason="test", actor="test")
     declined = {
@@ -222,12 +222,12 @@ def test_a_trade_declined_under_the_kill_switch_is_never_opened_later(session: S
     }
     assert declined and len(declined) == len(rep.skipped_open_kill_switch)
 
-    rep2 = cl.run_cycle(session, KEY, now=NOW)  # switch released: replay sees them again
+    rep2 = cl.run_cycle(session, STRATEGY, now=NOW)  # switch released: replay sees them again
 
     assert rep2.opened == [] and rep2.skipped_open_kill_switch == []
     for d in declined:
         row = session.scalar(select(CryptoPaperTrade).where(CryptoPaperTrade.entry_date == d))
         assert row is not None and row.status == "SKIPPED" and row.pnl_r is None
-    st = cl.status(session, KEY)
+    st = cl.status(session, STRATEGY)
     assert st["skipped_kill_switch"] == len(declined)
     assert all(o["entry_date"] not in {d.isoformat() for d in declined} for o in st["open"])
