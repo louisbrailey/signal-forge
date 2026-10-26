@@ -152,3 +152,23 @@ def test_crypto_research_uses_its_own_table_costs_and_version(session: Session) 
     assert all(k.startswith("crypto_") for k in (s.key for s in CRYPTO_STRATEGIES))
     # crypto rows never leak into the FX loader
     assert len(h.load_series(session, "BTCUSD")) == 0
+
+
+def test_fx2_rule_and_holding_cost_gate() -> None:
+    from signalforge.research.fx.strategies import FX2_STRATEGIES, FX2_STRATEGY_VERSION
+
+    (s,) = FX2_STRATEGIES
+    assert FX2_STRATEGY_VERSION == "FX-2" and s.key == "fx_donchian_55_trail20"
+    series = _series("EURUSD", _random_walk(9))
+    fired = [s.signal(series.head(t), t) for t in range(s.warmup, len(series) - 1)]
+    sigs = [x for x in fired if x is not None]
+    assert s.trail_channel == 20
+    assert sigs and all(x.time_stop_bars == 250 for x in sigs)
+
+    data = {"EURUSD": series, "GBPUSD": _series("GBPUSD", _random_walk(10))}
+    seal = h.sealed_start(data, 365)
+    res = h.evaluate_strategy(s, data, seal_from=seal, gates=h.FX2_GATES, market=h.FX2_MARKET)
+    assert res.holding_stress_expectancy_r is not None
+    assert res.holding_stress_expectancy_r <= res.pooled["expectancy_r"] + 1e-12
+    off = h.evaluate_strategy(s, data, seal_from=seal, gates=h.FxGates(), market=h.FX2_MARKET)
+    assert off.holding_stress_expectancy_r is None  # FX-1 gates never apply the stress

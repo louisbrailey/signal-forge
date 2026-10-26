@@ -41,6 +41,8 @@ from signalforge.db.models import CryptoBarDaily, FxBarDaily
 from signalforge.research.fx.strategies import (
     CRYPTO_STRATEGIES,
     CRYPTO_STRATEGY_VERSION,
+    FX2_STRATEGIES,
+    FX2_STRATEGY_VERSION,
     FX_STRATEGIES,
     FX_STRATEGY_VERSION,
     FxStrategy,
@@ -99,6 +101,16 @@ FX_MARKET = ResearchMarket(
     ingest_hint="run forex-ingest",
     caveat="Swap/carry not modelled.",
 )
+FX2_MARKET = ResearchMarket(
+    name="FX",
+    version=FX2_STRATEGY_VERSION,
+    model=FxBarDaily,
+    source=FX_SOURCE,
+    spreads=FX_SPREAD_BPS,
+    default_spread_bps=DEFAULT_SPREAD_BPS,
+    ingest_hint="run forex-ingest",
+    caveat="Swap approximated by a 1 bp/day holding-cost stress gate, not modelled exactly.",
+)
 CRYPTO_MARKET = ResearchMarket(
     name="Crypto",
     version=CRYPTO_STRATEGY_VERSION,
@@ -126,6 +138,25 @@ class FxGates:
     min_stress_expectancy_r: float = 0.0
     min_positive_pair_frac: float = 0.5
     slippage_bps: float = 1.0
+    # Holding-cost stress (added for FX-2; 0 disables it, which is FX-1).
+    # Each trade is charged this many bps of price per bar held, in R.
+    holding_cost_bps_per_day: float = 0.0
+    min_holding_stress_expectancy_r: float = 0.0
+
+
+# FX-2's pre-registered gates: every FX-1 gate, plus 1 bp/day holding cost.
+FX2_GATES = FxGates(holding_cost_bps_per_day=1.0)
+
+
+def holding_cost_r(trade: SimTrade, bps_per_day: float, fallback_risk_frac: float) -> float:
+    """Holding cost of one trade in R: bars held x bps of price, divided by
+    the trade's risk as a fraction of price (pnl_pct / pnl_r)."""
+    if bps_per_day <= 0:
+        return 0.0
+    risk_frac = abs(trade.pnl_pct / trade.pnl_r) if trade.pnl_r else fallback_risk_frac
+    if risk_frac <= 0:
+        return 0.0
+    return trade.bars_held * bps_per_day / 10_000.0 / risk_frac
 
 
 @dataclass(slots=True)
@@ -149,8 +180,34 @@ class StrategyResult:
     ci_expectancy_r: dict[str, float] = field(default_factory=dict)
     fold_expectancy_r: list[float] = field(default_factory=list)
     stress_expectancy_r: float = 0.0
+    holding_stress_expectancy_r: float | None = None
     verdict: str = "DEV_FAIL"
     reasons: list[str] = field(default_factory=list)
+
+
+def backtest(
+    strat: FxStrategy,
+    series: PriceSeries,
+    *,
+    cost_model: CostModel,
+    spread_bps: float,
+) -> Any:
+    """Run one strategy: the frozen equity engine, or the FX trailing-exit
+    twin when the strategy declares a trailing channel (FX-2)."""
+    if strat.trail_channel is None:
+        return run_backtest(
+            series, strat.signal, cost_model=cost_model, spread_bps=spread_bps, warmup=strat.warmup
+        )
+    from signalforge.research.fx.trail_engine import run_backtest_trailing
+
+    return run_backtest_trailing(
+        series,
+        strat.signal,
+        trail_channel=strat.trail_channel,
+        cost_model=cost_model,
+        spread_bps=spread_bps,
+        warmup=strat.warmup,
+    )
 
 
 def load_series(session: Session, pair: str, market: ResearchMarket | None = None) -> PriceSeries:
@@ -193,18 +250,12 @@ def evaluate_strategy(
         if len(dev) < strat.warmup + 50:
             continue
         spread = mk.spread(pair)
-        base = run_backtest(
-            dev, strat.signal, cost_model=cm, spread_bps=spread, warmup=strat.warmup
-        )
+        base = backtest(strat, dev, cost_model=cm, spread_bps=spread)
         wf = run_walkforward(
             dev, strat.signal, n_folds=gates.n_folds, train_frac=gates.train_frac, outcome=base
         )
-        stress = run_backtest(
-            dev,
-            strat.signal,
-            cost_model=cm,
-            spread_bps=spread * gates.stress_spread_multiplier,
-            warmup=strat.warmup,
+        stress = backtest(
+            strat, dev, cost_model=cm, spread_bps=spread * gates.stress_spread_multiplier
         )
         pair_oos = [t for t in base.trades if wf.oos_start <= t.entry_date <= wf.oos_end]
         pair_stress = [t for t in stress.trades if wf.oos_start <= t.entry_date <= wf.oos_end]
@@ -229,6 +280,13 @@ def evaluate_strategy(
     res.ci_expectancy_r = bootstrap_ci([t.pnl_r for t in oos])["expectancy_r"]
     res.fold_expectancy_r = [compute_metrics(ft).expectancy_r for ft in fold_trades]
     res.stress_expectancy_r = compute_metrics(stress_oos).expectancy_r
+    if gates.holding_cost_bps_per_day > 0 and oos:
+        fracs = sorted(abs(t.pnl_pct / t.pnl_r) for t in oos if t.pnl_r)
+        fallback = fracs[len(fracs) // 2] if fracs else 0.0
+        charged = [
+            t.pnl_r - holding_cost_r(t, gates.holding_cost_bps_per_day, fallback) for t in oos
+        ]
+        res.holding_stress_expectancy_r = sum(charged) / len(charged)
 
     reasons = []
     if pooled.n_trades < gates.min_oos_trades:
@@ -248,6 +306,14 @@ def evaluate_strategy(
         reasons.append(
             f"{gates.stress_spread_multiplier:g}x-spread expectancy "
             f"{res.stress_expectancy_r:.3f}R < {gates.min_stress_expectancy_r}R"
+        )
+    if (
+        res.holding_stress_expectancy_r is not None
+        and res.holding_stress_expectancy_r < gates.min_holding_stress_expectancy_r
+    ):
+        reasons.append(
+            f"{gates.holding_cost_bps_per_day:g}bp/day holding-cost expectancy "
+            f"{res.holding_stress_expectancy_r:.3f}R < {gates.min_holding_stress_expectancy_r}R"
         )
     traded = [p for p in res.pairs if p.oos_trades]
     pos_frac = (sum(1 for p in traded if p.oos_expectancy_r > 0) / len(traded)) if traded else 0.0
@@ -269,6 +335,18 @@ def run_fx_research(
     strategies: Sequence[FxStrategy] = FX_STRATEGIES,
 ) -> dict[str, Any]:
     return run_research(session, pairs, market=FX_MARKET, gates=gates, strategies=strategies)
+
+
+def run_fx2_research(
+    session: Session,
+    pairs: Sequence[str],
+    *,
+    gates: FxGates | None = None,
+    strategies: Sequence[FxStrategy] = FX2_STRATEGIES,
+) -> dict[str, Any]:
+    return run_research(
+        session, pairs, market=FX2_MARKET, gates=gates or FX2_GATES, strategies=strategies
+    )
 
 
 def run_crypto_research(
