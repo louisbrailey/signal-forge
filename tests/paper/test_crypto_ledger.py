@@ -261,3 +261,16 @@ def test_crypto_chart_open_marks_have_unique_timestamps(session: Session) -> Non
         times = [point["time"] for point in series["data"]]
         assert times == sorted(set(times))
     assert chart["series"][1]["data"] == [{"time": book.last_bar_date.isoformat(), "value": 0.5}]
+
+
+def test_crypto_chart_does_not_append_pre_start_bar(session: Session) -> None:
+    from signalforge.app.charts import crypto_paper_curve
+
+    _sealed(session)
+    book = cl.start_book(session, STRATEGY, now=NOW)
+    book.last_bar_date = NOW.date() - timedelta(days=1)
+    session.commit()
+    chart = crypto_paper_curve(session, STRATEGY)
+    assert chart["as_of"] == book.last_bar_date.isoformat()
+    assert chart["series"][0]["data"] == [{"time": NOW.date().isoformat(), "value": 0.0}]
+    assert chart["series"][1]["data"] == []
