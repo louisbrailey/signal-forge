@@ -223,10 +223,24 @@ def test_f15_the_call_mirror_enters_nothing_at_the_v012_band(sigma: float) -> No
     "sell puts, or stand aside".  Recorded so it is a prediction, not a discovery.
     """
     chain, under = build_chain(sigma=sigma)
-    for floor in CREDIT_TO_WIDTH_QUANTILES.values():
+    for floor in (0.140, 0.150, 0.155):  # the v0.1.2 put-only band, kept as history
         strat = strategy(min_credit_to_width=floor)
         strat.proxy_regimes = _regimes(dict.fromkeys(range(len(SESSIONS)), Trend.BEAR))
         assert strat(chain.head(SIGNAL_IDX), under.head(SIGNAL_IDX), SIGNAL_IDX) is None
+
+
+def test_v013s_pooled_band_makes_the_bear_mirror_reachable() -> None:
+    """**D5a Amendment 4 (OR-F15)**: the point of the pooled band.  At its OAT
+    loosening (0.110) the call mirror is no longer structurally unreachable on
+    every fixture cell; Amendment 2 §4.6 predicts a thin bear bucket, not an empty
+    one."""
+    entered = 0
+    for sigma in (0.15, 0.20, 0.30, 0.40, 0.60):
+        chain, under = build_chain(sigma=sigma)
+        strat = strategy(min_credit_to_width=CREDIT_TO_WIDTH_QUANTILES["p25"])
+        strat.proxy_regimes = _regimes(dict.fromkeys(range(len(SESSIONS)), Trend.BEAR))
+        entered += strat(chain.head(SIGNAL_IDX), under.head(SIGNAL_IDX), SIGNAL_IDX) is not None
+    assert entered >= 1
 
 
 def test_a_neutral_regime_sells_the_put_side_like_a_bull_one() -> None:
@@ -468,10 +482,12 @@ ENTRY_COSTS = PREREGISTERED_COST_MODEL.commission(2) + PREREGISTERED_COST_MODEL.
 DECLARED_UNDERLYINGS = 14
 
 
-def _short_strike(spot: float, sigma: float, q: float) -> int:
+def _short_strike(spot: float, sigma: float, q: float, *, call: bool = False) -> int:
+    strikes = (
+        range(int(spot), int(spot * 1.40) + 1) if call else range(int(spot * 0.60), int(spot) + 1)
+    )
     deltas = {
-        k: abs(bs.greeks(spot, float(k), YEARS, R, sigma, call=False, q=q).delta)
-        for k in range(int(spot * 0.60), int(spot) + 1)
+        k: abs(bs.greeks(spot, float(k), YEARS, R, sigma, call=call, q=q).delta) for k in strikes
     }
     return min(
         (k for k, d in deltas.items() if d <= 0.35 and abs(d - 0.20) <= 0.05),
@@ -479,15 +495,17 @@ def _short_strike(spot: float, sigma: float, q: float) -> int:
     )
 
 
-def _adverse_ratio(spot: float, sigma: float, width: float, *, q: float | None = None) -> float:
+def _adverse_ratio(
+    spot: float, sigma: float, width: float, *, q: float | None = None, call: bool = False
+) -> float:
     """The adverse credit-to-width ratio D5a §2.3 tabulates, from the SHIPPED cost
     model rather than a re-implementation of it."""
     q = STAGE_A_Q.get(spot, Q) if q is None else q
     cm = PREREGISTERED_COST_MODEL
-    ks = _short_strike(spot, sigma, q)
-    kl = ks - width
-    ps = bs.price(spot, float(ks), YEARS, R, sigma, call=False, q=q)
-    pl = bs.price(spot, kl, YEARS, R, sigma, call=False, q=q)
+    ks = _short_strike(spot, sigma, q, call=call)
+    kl = ks + width if call else ks - width
+    ps = bs.price(spot, float(ks), YEARS, R, sigma, call=call, q=q)
+    pl = bs.price(spot, kl, YEARS, R, sigma, call=call, q=q)
     sell = max(
         cm.round_to_tick(max(ps - cm.spread(ps, moneyness=ks / spot, dte=35), 0.0), side=Side.SELL),
         0.0,
@@ -515,8 +533,8 @@ def _target_win_usd(spot: float, sigma: float, width: float) -> float:
     return 0.5 * credit - friction
 
 
-def _design_space(width: float) -> list[float]:
-    return [_adverse_ratio(s, g, width) for s in (660.0, 590.0, 240.0) for g in IV_GRID]
+def _design_space(width: float, *, call: bool = False) -> list[float]:
+    return [_adverse_ratio(s, g, width, call=call) for s in (660.0, 590.0, 240.0) for g in IV_GRID]
 
 
 def _round_down(x: float, step: float) -> float:
@@ -639,7 +657,26 @@ def test_the_v012_band_is_read_off_the_eight_dollar_design_space() -> None:
     coarse = [_round_down(v, 0.01) for v in (q1, q2, q3)]
     assert coarse == [0.14, 0.15, 0.15]
     fine = [_round_down(v, 0.005) for v in (q1, q2, q3)]
-    assert fine == [0.140, 0.150, 0.155]
+    assert fine == [0.140, 0.150, 0.155]  # v0.1.2's put-only band (history)
+
+
+def test_the_v013_band_is_read_off_the_pooled_put_and_call_design_space() -> None:
+    """**D5a Amendment 4 (OR-F15), as arithmetic** — Amendment 2 §4.6's alternative.
+
+    The call side at $8 runs 0.050 .. 0.135, so the put-only band admitted no call
+    entry anywhere (F15).  Pooling puts and calls (60 cells, all positive) gives
+    quartiles 0.11375 / 0.13125 / 0.15156, rounded down at 0.005 to 0.110 / 0.130 /
+    0.150 — the v0.1.3 band.
+    """
+    calls = _design_space(8.00, call=True)
+    assert min(calls) == pytest.approx(0.050, abs=2e-3)
+    assert max(calls) == pytest.approx(0.135, abs=2e-3)
+    pooled = sorted(_design_space(8.00) + calls)
+    assert len(pooled) == 60 and min(pooled) > 0
+    q1, q2, q3 = statistics.quantiles(pooled, n=4, method="inclusive")
+    assert (q1, q2, q3) == pytest.approx((0.11375, 0.13125, 0.15156), abs=5e-4)
+    fine = [_round_down(v, 0.005) for v in (q1, q2, q3)]
+    assert fine == [0.110, 0.130, 0.150]
     assert dict(zip(("p25", "median", "p75"), fine, strict=True)) == CREDIT_TO_WIDTH_QUANTILES
 
 
@@ -654,7 +691,7 @@ def test_every_superseded_floor_is_outside_the_attainable_region() -> None:
 
 def test_the_amended_band_sits_inside_the_attainable_region() -> None:
     band = CREDIT_TO_WIDTH_QUANTILES
-    assert band == {"p25": 0.140, "median": 0.150, "p75": 0.155}
+    assert band == {"p25": 0.110, "median": 0.130, "p75": 0.150}
     assert band["p25"] < band["median"] < band["p75"] < ATTAINABLE_ADVERSE_RATIO_MAX
     assert ShortVerticalParams().min_credit_to_width == band["median"]
     assert SENSITIVITY_GRID["min_credit_to_width"] == (band["median"], band["p75"])

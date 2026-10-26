@@ -22,6 +22,13 @@ re-derived by D5a's own quantile rule: baseline **0.150**, axis
 ``(0.150, 0.155)``, OAT loosening **0.140**.  The text below the next paragraph
 is the v0.1.1 history, kept legible rather than rewritten.
 
+**v0.1.3 (D5a Amendment 4, 2026-10-26) supersedes v0.1.2 at k = 0.**  Under the
+put-only band the call-side mirror could enter nothing (F15) and the development-
+window rejection breakdown found 0 of 11 setups clearing the 0.150 floor.  The
+operator's OR-F15 decision adopts the pooled put + call band Amendment 2 §4.6 had
+already derived: baseline **0.130**, axis ``(0.130, 0.150)``, OAT loosening
+**0.110**.  Nothing else changes; no sealed data was consulted.
+
 **v0.1.1 superseded v0.1.0 at k = 0.**  ``count_sealed_looks`` keys on
 ``Strategy.name`` and no row in ``strategy`` begins ``options``, so no sealed look
 has been spent on this family and v0.1.0 was never evaluated.  D5a repairs three
@@ -140,7 +147,10 @@ from signalforge.research.strategies.base import lagged_regime
 #: operator's raised $900 cap (OP-1).  Neither 0.1.0 nor 0.1.1 was ever evaluated,
 #: so ``count_sealed_looks`` still reports k = 0 for this family, the amendment
 #: costs no look and D5 §10's variant budget (1, hard cap 2) is untouched.
-VERSION = "0.1.2"
+#: 0.1.3 is D5a Amendment 4: the operator's OR-F15 decision (2026-10-26) adopts the
+#: pooled put + call credit-floor band 0.110 / 0.130 / 0.150 that Amendment 2 §4.6
+#: derived and left un-adopted.  Still never evaluated, so k = 0 is unchanged.
+VERSION = "0.1.3"
 
 #: D5 §2.1.  ``count_sealed_looks`` keys on this, so the options family starts at
 #: k = 0 by construction and can never be conflated with an equity family.
@@ -220,7 +230,7 @@ class ShortVerticalParams:
     dte_target: int = 35  # AXIS 4
     profit_target_pct: float = 0.50  # AXIS 5
     #: AXIS 6 — Amendment 2 §4 (v0.1.1: 0.10, which is near-inert at $8: 29/30).
-    min_credit_to_width: float = 0.150
+    min_credit_to_width: float = 0.130
     #: D5a §3: dollars of STRIKE DISTANCE per contract, fixed for the version, so
     #: ``R_scale = width_usd * 100 = $800.00`` is identical on every underlying and
     #: gate 0.5's ``single_scale``/``scale_matches`` pass by construction.  It is
@@ -282,14 +292,14 @@ class ShortVerticalParams:
 #: ``3.0 x 0.1813 = 0.544 < 1`` everywhere at v0.1.2's $8 (Amendment 2 §4.3).
 #:
 #: Each axis's second value is the HARDER side, per D5 §4.2's rule: 3.0 leaves more
-#: tail per trade than 1.5, and 0.155 thins the population more than 0.140.
+#: tail per trade than 1.5, and 0.150 thins the population more than 0.130 (v0.1.3).
 SENSITIVITY_GRID: Mapping[str, tuple[float | int, ...]] = {
     "short_delta_target": (0.12, 0.20, 0.30),
     "max_short_delta": (0.28, 0.35),
     "stop_multiple": (2.0, 3.0),
     "dte_target": (21, 35),
     "profit_target_pct": (0.50, 0.75),
-    "min_credit_to_width": (0.150, 0.155),
+    "min_credit_to_width": (0.130, 0.150),
 }
 
 #: Amendment 2 §4 (re-deriving D5a §2.3/§2.4 at the v0.1.2 width), recorded so the
@@ -303,7 +313,12 @@ SENSITIVITY_GRID: Mapping[str, tuple[float | int, ...]] = {
 #: one-valued axis (Amendment 2 §4.2).  D5a's v0.1.1 values were 0.05 / 0.10 / 0.13
 #: with a maximum of 0.155.
 ATTAINABLE_ADVERSE_RATIO_MAX = 0.1813
-CREDIT_TO_WIDTH_QUANTILES: Mapping[str, float] = {"p25": 0.140, "median": 0.150, "p75": 0.155}
+#:
+#: **v0.1.3 (D5a Amendment 4, OR-F15):** the band is now read off the POOLED put +
+#: call design space (60 cells, all positive), quartiles 0.11375 / 0.13125 /
+#: 0.15156, rounded down at 0.005 to 0.110 / 0.130 / 0.150 (Amendment 2 §4.6).  The
+#: put-only band above is kept in the derivation notes as v0.1.2 history.
+CREDIT_TO_WIDTH_QUANTILES: Mapping[str, float] = {"p25": 0.110, "median": 0.130, "p75": 0.150}
 
 #: Amendment 2 §4.4.  With an $8 width and a $0.05 tick above $3.00, the adverse
 #: credit is quantised in $5.00 steps per contract, so the ratio lives on a lattice
@@ -343,7 +358,7 @@ OAT_PARAMETERS: Mapping[str, tuple[float | int, ...]] = {
     # derived p25 of the attainable region at $8 (Amendment 2 §4.2; D5a's $2 p25 was
     # 0.05); D5 §4.4's 0.20 is outside it entirely.
     "profit_target_pct": (0.25,),
-    "min_credit_to_width": (0.140,),
+    "min_credit_to_width": (0.110,),  # v0.1.3: pooled p25 (was 0.140, put-only)
 }
 
 #: D5 §4.2: 45 DTE is excluded **by derivation, not preference**.  Third-Friday
