@@ -17,6 +17,7 @@ from signalforge.research.strategies import (
     default_strategies,
 )
 from signalforge.research.strategies.base import StrategyContext
+from signalforge.research.strategies.mean_reversion import MeanReversionParams
 
 RISK_OFF = RegimeState(Trend.BEAR, Vol.HIGH, date(2024, 1, 1))
 BULL = RegimeState(Trend.BULL, Vol.LOW, date(2024, 1, 1))
@@ -71,11 +72,33 @@ def test_mean_reversion_fires_long_after_a_sharp_dip() -> None:
     closes = [100.0 + float(rng.normal(0, 0.2)) for _ in range(40)]
     closes.append(closes[-1] * 0.90)  # ~ -10% single-day shock => strongly negative z
     series = _mk(closes)
-    strat = MeanReversion()
+    strat = MeanReversion(MeanReversionParams(trend_window=0))  # 0.1.0 rule
     sig = strat.evaluate(series, len(series) - 1, StrategyContext(regime=NEUTRAL))
     assert sig is not None
     assert sig.direction is Direction.LONG
     assert sig.target_price is not None and sig.target_price > series.close[-1]  # revert up to SMA
+
+
+def test_mean_reversion_v020_only_buys_dips_above_the_200_day_average() -> None:
+    rng = np.random.default_rng(0)
+    # a long uptrend, then a sharp one-day dip that stays above SMA(200)
+    up = [50.0 + 0.25 * i + float(rng.normal(0, 0.2)) for i in range(240)]
+    up.append(up[-1] * 0.93)
+    sig = MeanReversion().evaluate(_mk(up), len(up) - 1, StrategyContext(regime=NEUTRAL))
+    assert sig is not None and sig.direction is Direction.LONG
+    assert "above SMA200" in sig.reason
+    # a long downtrend with the same dip: the falling knife is refused
+    down = [150.0 - 0.25 * i + float(rng.normal(0, 0.2)) for i in range(240)]
+    down.append(down[-1] * 0.93)
+    assert (
+        MeanReversion().evaluate(_mk(down), len(down) - 1, StrategyContext(regime=NEUTRAL)) is None
+    )
+    # too little history for SMA(200): no signal rather than a guess
+    short = up[-60:]
+    assert (
+        MeanReversion().evaluate(_mk(short), len(short) - 1, StrategyContext(regime=NEUTRAL))
+        is None
+    )
 
 
 def test_mean_reversion_not_in_a_bear_regime() -> None:
