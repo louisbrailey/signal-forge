@@ -38,12 +38,20 @@ from signalforge.research.strategies import (
     TrendContinuation,
     VolatilityBreakout,
 )
+from signalforge.research.strategies.mean_reversion import MeanReversionParams
 from signalforge.settings_store import effective_research_config
 
 # The spec_json_hashes the LIVE approvals of strategy versions 2 and 5 are
 # recorded under (evals 20/32 and 23/35). Public content hashes, not secrets.
 HV2 = "2ed9743170bd3bbdb450ea03a004a7ffaeb64ccbbe6075db312ffd544072f382"  # pragma: allowlist secret
 HV5 = "dfe696b662dd02b8fa3a02ce5b987c6eade84a40d88c1a2d8d52e206cb6f6c32"  # pragma: allowlist secret
+
+
+def _mr() -> MeanReversion:
+    """Pipeline fixture: mean reversion with the 0.2.0 trend filter switched off,
+    so these mechanics tests keep the trade flow they were written against."""
+    return MeanReversion(MeanReversionParams(trend_window=0))
+
 
 UNIVERSE = ["SPY", "AAPL"]
 END = date(2024, 12, 31)
@@ -85,7 +93,7 @@ def test_no_trade_is_the_default_when_gates_are_strict(session: Session) -> None
     """The canonical operational result when nothing clears the bar."""
     _seed(session)
     cfg = effective_research_config(session)  # real, strict, version-controlled thresholds
-    strat = MeanReversion()
+    strat = _mr()
     result = evaluate_promotion(session, strat, symbols=UNIVERSE, start=START, end=END, config=cfg)
 
     assert len(result.gates) == 10
@@ -110,7 +118,7 @@ def test_permissive_thresholds_still_run_every_gate_honestly(session: Session) -
     end-to-end without crashing or silently promoting on a technicality."""
     _seed(session)
     cfg = _permissive_config(session)
-    strat = MeanReversion()
+    strat = _mr()
     result = evaluate_promotion(session, strat, symbols=UNIVERSE, start=START, end=END, config=cfg)
 
     assert len(result.gates) == 10
@@ -135,7 +143,7 @@ def test_finalize_promotes_and_records_when_every_gate_passes(session: Session) 
     from signalforge.research.persistence import upsert_strategy_version
     from signalforge.research.promotion import Gate, _finalize
 
-    strat = MeanReversion()
+    strat = _mr()
     version = upsert_strategy_version(session, strat.spec())
     session.flush()
     cfg = _permissive_config(session)
@@ -292,7 +300,7 @@ def test_benchmark_metrics_on_a_known_price_path() -> None:
     [
         RelativeStrength(),
         TrendContinuation(),
-        MeanReversion(),
+        _mr(),
         VolatilityBreakout(),
     ],
 )
@@ -326,7 +334,7 @@ def test_gate1_requires_actual_edge_not_just_any_trade_in_the_fold(session: Sess
         update={"promotion": cfg.promotion.model_copy(update={"min_net_expectancy_r": 999.0})}
     )
     result = evaluate_promotion(
-        session, MeanReversion(), symbols=UNIVERSE, start=START, end=END, config=strict_gate1
+        session, _mr(), symbols=UNIVERSE, start=START, end=END, config=strict_gate1
     )
     gate1 = next(g for g in result.gates if g.number == 1)
     assert gate1.passed is False
@@ -349,7 +357,7 @@ def test_min_presealed_span_is_tied_to_regime_warmup(session: Session) -> None:
     session.flush()
     cfg = _permissive_config(session)
     result = evaluate_promotion(
-        session, MeanReversion(), symbols=UNIVERSE, start=START, end=short_end, config=cfg
+        session, _mr(), symbols=UNIVERSE, start=START, end=short_end, config=cfg
     )
     assert result.passed is False
     assert len(result.gates) == 1
@@ -468,7 +476,7 @@ def test_two_dataset_snapshots_get_independent_sealed_tests(session: Session) ->
     blocked by — the other snapshot's locked sealed test."""
     _seed(session)
     cfg = _permissive_config(session)
-    strat = MeanReversion()
+    strat = _mr()
 
     snap_a = get_or_create_dataset_snapshot(session, key="variant_a", symbols=UNIVERSE)
     snap_b = get_or_create_dataset_snapshot(
@@ -507,9 +515,7 @@ def test_evaluate_promotion_without_a_dataset_snapshot_resolves_one_automaticall
     transparently resolve/reuse a snapshot matching the given symbols."""
     _seed(session)
     cfg = _permissive_config(session)
-    result = evaluate_promotion(
-        session, MeanReversion(), symbols=UNIVERSE, start=START, end=END, config=cfg
-    )
+    result = evaluate_promotion(session, _mr(), symbols=UNIVERSE, start=START, end=END, config=cfg)
     assert result.dataset_snapshot_id is not None
     snap = session.get(DataSnapshot, result.dataset_snapshot_id)
     assert sorted(snap.symbols_json) == sorted(UNIVERSE)
@@ -527,9 +533,7 @@ def test_gate7_uses_all_pre_sealed_trades_not_only_oos(session: Session) -> None
 
     _seed(session)
     cfg = _permissive_config(session)
-    result = evaluate_promotion(
-        session, MeanReversion(), symbols=UNIVERSE, start=START, end=END, config=cfg
-    )
+    result = evaluate_promotion(session, _mr(), symbols=UNIVERSE, start=START, end=END, config=cfg)
     gate7 = next(g for g in result.gates if g.number == 7)
 
     sealed_start = END - timedelta(days=cfg.promotion.sealed_window_days)
@@ -542,7 +546,7 @@ def test_gate7_uses_all_pre_sealed_trades_not_only_oos(session: Session) -> None
     )
     full = run_strategy_over_universe(
         session,
-        MeanReversion(),
+        _mr(),
         UNIVERSE,
         START,
         pre_sealed_end,
@@ -584,9 +588,7 @@ def test_gate6_reports_warmup_trades_and_never_drops_one(session: Session) -> No
     must close: bucketed + unbucketed == every trade considered."""
     _seed(session)
     cfg = _permissive_config(session)
-    result = evaluate_promotion(
-        session, MeanReversion(), symbols=UNIVERSE, start=START, end=END, config=cfg
-    )
+    result = evaluate_promotion(session, _mr(), symbols=UNIVERSE, start=START, end=END, config=cfg)
     gate6 = next(g for g in result.gates if g.number == 6)
     ub = gate6.evidence["unbucketed"]
     buckets = gate6.evidence["trades_per_regime"]
@@ -670,7 +672,7 @@ def test_gate6_bucket_counts_are_unchanged_by_the_reporting_change(session: Sess
         }
     )
     result = evaluate_promotion(
-        session, MeanReversion(), symbols=UNIVERSE, start=START, end=END, config=strict
+        session, _mr(), symbols=UNIVERSE, start=START, end=END, config=strict
     )
     gate6 = next(g for g in result.gates if g.number == 6)
 
@@ -678,7 +680,7 @@ def test_gate6_bucket_counts_are_unchanged_by_the_reporting_change(session: Sess
     pre_sealed_end = sealed_start - timedelta(days=1)
     full = run_strategy_over_universe(
         session,
-        MeanReversion(),
+        _mr(),
         UNIVERSE,
         START,
         pre_sealed_end,
@@ -706,7 +708,7 @@ def test_gate6_extended_proxy_labelling_is_diagnostic_only(session: Session) -> 
     cfg = _permissive_config(session)
     later_start = START + timedelta(days=800)  # leaves real proxy history before `start`
     result = evaluate_promotion(
-        session, MeanReversion(), symbols=UNIVERSE, start=later_start, end=END, config=cfg
+        session, _mr(), symbols=UNIVERSE, start=later_start, end=END, config=cfg
     )
     gate6 = next(g for g in result.gates if g.number == 6)
     ext = gate6.evidence["unbucketed"]["extended_labelling"]
@@ -732,9 +734,7 @@ def test_gate6_extension_is_a_noop_when_no_earlier_proxy_history_exists(session:
     says so explicitly rather than implying a fix happened."""
     _seed(session)
     cfg = _permissive_config(session)
-    result = evaluate_promotion(
-        session, MeanReversion(), symbols=UNIVERSE, start=START, end=END, config=cfg
-    )
+    result = evaluate_promotion(session, _mr(), symbols=UNIVERSE, start=START, end=END, config=cfg)
     ext = next(g for g in result.gates if g.number == 6).evidence["unbucketed"][
         "extended_labelling"
     ]
@@ -930,9 +930,7 @@ def test_sealed_look_ledger_is_reported_on_a_failing_evaluation(session: Session
     counter exists to close, so it is reported on failures too."""
     _seed(session)
     cfg = effective_research_config(session)  # strict: this will not pass
-    result = evaluate_promotion(
-        session, MeanReversion(), symbols=UNIVERSE, start=START, end=END, config=cfg
-    )
+    result = evaluate_promotion(session, _mr(), symbols=UNIVERSE, start=START, end=END, config=cfg)
     assert result.passed is False
     g9 = next(g for g in result.gates if g.number == 9)
     assert g9.evidence["sealed_look_ledger"]["this_look"] == 1
@@ -1066,7 +1064,7 @@ def test_undeclared_strategies_keep_their_shipped_nine_point_grid() -> None:
             "stop_atr": [1.5, 2.0, 2.5],
         },
     }
-    for strat in (RelativeStrength(), TrendContinuation(), MeanReversion()):
+    for strat in (RelativeStrength(), TrendContinuation(), _mr()):
         plan = _sensitivity_plan(strat)
         assert plan is not None
         _f, grid = plan

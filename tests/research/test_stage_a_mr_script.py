@@ -20,7 +20,7 @@ from signalforge.backtest.engine import run_backtest
 from signalforge.data.series import PriceSeries
 from signalforge.research.regime import RegimeState, Trend, Vol
 from signalforge.research.strategies.base import signal_fn_for
-from signalforge.research.strategies.mean_reversion import MeanReversion
+from signalforge.research.strategies.mean_reversion import MeanReversion, MeanReversionParams
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "stage_a_mr.py"
 
@@ -69,7 +69,8 @@ def test_refuses_the_live_database_path(tmp_path: Path) -> None:
 def test_wrapper_at_blend_zero_reproduces_v010_trades() -> None:
     mod = _load_script()
     series = _series()
-    strat = MeanReversion()
+    # v0.1.0 behaviour: the 0.2.0 trend filter switched off.
+    strat = MeanReversion(MeanReversionParams(trend_window=0))
     bull = RegimeState(Trend.BULL, Vol.LOW, date(2021, 1, 1))
     fn = signal_fn_for(strat, regime_by_date=dict.fromkeys(series.dates, bull))
     cm = CostModel()

@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from signalforge.db.session import session_scope
 from signalforge.domain import StrategyStatus
+from signalforge.research.strategies.mean_reversion import VERSION as MR_VERSION
 from tests.app.conftest import _csrf
 
 
@@ -27,7 +28,7 @@ def _seed_strategy(status: StrategyStatus = StrategyStatus.EXPERIMENTAL) -> tupl
         s.add(strat)
         s.flush()
         ver = StrategyVersion(
-            strategy_id=strat.id, version="0.1.0", git_sha="abc1234", spec_json={}, status=status
+            strategy_id=strat.id, version=MR_VERSION, git_sha="abc1234", spec_json={}, status=status
         )
         s.add(ver)
         s.flush()
