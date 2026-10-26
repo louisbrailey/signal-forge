@@ -150,3 +150,24 @@ FX_STRATEGIES: tuple[FxStrategy, ...] = (
         signal=_zfade,
     ),
 )
+
+
+# --------------------------------------------------------------------------- #
+# Crypto (version CRYPTO-1): the SAME three rules with the SAME parameters,
+# pre-registered for crypto before any crypto result was seen. Re-using the FX
+# rules unchanged (rather than choosing crypto-specific ones after a look) is
+# deliberate: bars are calendar days (7 per week), so a 55-bar channel or a
+# 126-bar lookback spans fewer calendar weeks than in FX — recorded here, not
+# tuned away.
+# --------------------------------------------------------------------------- #
+CRYPTO_STRATEGY_VERSION = "CRYPTO-1"
+CRYPTO_STRATEGIES: tuple[FxStrategy, ...] = tuple(
+    FxStrategy(
+        s.key.replace("fx_", "crypto_", 1),
+        s.description,
+        dict(s.params),
+        warmup=s.warmup,
+        signal=s.signal,
+    )
+    for s in FX_STRATEGIES
+)

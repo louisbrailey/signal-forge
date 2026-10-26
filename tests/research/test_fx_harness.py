@@ -115,3 +115,40 @@ def test_too_few_trades_fails_with_a_named_reason() -> None:
     res = h.evaluate_strategy(FX_STRATEGIES[0], series, seal_from=seal, gates=h.FxGates())
     assert res.verdict == "DEV_FAIL"
     assert any("OOS trades" in r for r in res.reasons)
+
+
+def test_crypto_research_uses_its_own_table_costs_and_version(session: Session) -> None:
+    from signalforge.db.models import CryptoBarDaily
+    from signalforge.research.fx.strategies import CRYPTO_STRATEGIES, CRYPTO_STRATEGY_VERSION
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    closes = _random_walk(7, n=1500) * 30000
+    d0 = date(2021, 1, 1)
+    prev = float(closes[0])
+    for i, c in enumerate(closes):
+        c = float(c)
+        session.add(
+            CryptoBarDaily(
+                pair="BTCUSD",
+                session_date=d0 + timedelta(days=i),  # every calendar day
+                open=prev,
+                high=max(prev, c) * 1.01,
+                low=min(prev, c) * 0.99,
+                close=c,
+                source="massive_crypto",
+                latency_category=LatencyCategory.END_OF_DAY,
+                ingested_at=now,
+                quality_flags=[],
+            )
+        )
+        prev = c
+    session.flush()
+
+    report = h.run_crypto_research(session, ["BTCUSD"])
+
+    assert report["market"] == "Crypto" and report["version"] == CRYPTO_STRATEGY_VERSION
+    assert report["spread_bps"] == {"BTCUSD": h.CRYPTO_SPREAD_BPS["BTCUSD"]}
+    assert [s["key"] for s in report["strategies"]] == [s.key for s in CRYPTO_STRATEGIES]
+    assert all(k.startswith("crypto_") for k in (s.key for s in CRYPTO_STRATEGIES))
+    # crypto rows never leak into the FX loader
+    assert len(h.load_series(session, "BTCUSD")) == 0
