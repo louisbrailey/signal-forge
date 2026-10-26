@@ -19,10 +19,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from signalforge.db.models import (
+    Candidate,
     CryptoBarDaily,
     CryptoPaperBook,
     CryptoPaperTrade,
     FxBarDaily,
+    GridTradeRow,
     Instrument,
     OHLCVDaily,
     PaperAccount,
@@ -296,3 +298,71 @@ def feed_ages(session: Session) -> list[dict[str, Any]]:
         }
         for f in rep["feeds"]
     ]
+
+
+def scanner_activity(session: Session, days: int = 180) -> dict[str, Any]:
+    """Trade ideas produced per day, one bar series per horizon."""
+    since = datetime.combine(_cut(days), datetime.min.time(), tzinfo=UTC)
+    counts: dict[str, dict[date, int]] = defaultdict(lambda: defaultdict(int))
+    last: date | None = None
+    for created, horizon in session.execute(
+        select(Candidate.created_at, Candidate.horizon).where(Candidate.created_at >= since)
+    ):
+        d = created.date()
+        counts[str(getattr(horizon, "value", horizon))][d] += 1
+        last = max(last, d) if last else d
+    series = [
+        {
+            "name": h.replace("_", " "),
+            "type": "bars",
+            "data": [{"time": d.isoformat(), "value": n} for d, n in sorted(c.items())],
+        }
+        for h, c in sorted(counts.items())
+    ]
+    return _envelope(
+        kind="bars",
+        title="Trade ideas per day",
+        series=series,
+        as_of=last,
+        latency="END_OF_DAY",
+        unit="ideas",
+        note="" if series else "no scans in this period",
+    )
+
+
+def grid_activity(session: Session, days: int = 365) -> dict[str, Any]:
+    """Simulated grid fills per day: dollars bought and dollars sold."""
+    buys: dict[date, float] = defaultdict(float)
+    sells: dict[date, float] = defaultdict(float)
+    last: date | None = None
+    for d, side, usd in session.execute(
+        select(GridTradeRow.session_date, GridTradeRow.side, GridTradeRow.usd).where(
+            GridTradeRow.session_date >= _cut(days)
+        )
+    ):
+        (buys if side == "buy" else sells)[d] += float(usd)
+        last = max(last, d) if last else d
+    return _envelope(
+        kind="bars",
+        title="Grid fills per day (simulated USD)",
+        series=[
+            {
+                "name": "Bought",
+                "type": "bars",
+                "data": [
+                    {"time": d.isoformat(), "value": round(v, 2)} for d, v in sorted(buys.items())
+                ],
+            },
+            {
+                "name": "Sold",
+                "type": "bars",
+                "data": [
+                    {"time": d.isoformat(), "value": round(v, 2)} for d, v in sorted(sells.items())
+                ],
+            },
+        ],
+        as_of=last,
+        latency="END_OF_DAY",
+        unit="USD",
+        note="SIMULATED grid book.",
+    )

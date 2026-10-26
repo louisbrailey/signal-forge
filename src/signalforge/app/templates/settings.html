@@ -1,8 +1,10 @@
 {% extends "base.html" %}
+{% from "_macros.html" import page_intro, chart_card %}
 {% from "_macros.html" import killswitch_card %}
 {% block title %}Settings — Signal Forge{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-semibold text-slate-900">Settings</h1>
+{{ page_intro('Switches that control what Signal Forge does, including the emergency kill switch. API keys are read from the .env file and are never shown here.') }}
 
 <section class="mt-4 grid gap-4 lg:grid-cols-2">
   {{ killswitch_card(kill_switch, csrf_token) }}

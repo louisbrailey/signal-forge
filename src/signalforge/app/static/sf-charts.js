@@ -79,7 +79,9 @@
         if (!s.data || !s.data.length) return;
         const color = PALETTE[i % PALETTE.length];
         let ser;
-        if (s.type === "candles") {
+        if (s.type === "bars") {
+          ser = chart.addHistogramSeries({ color: color, priceFormat: { type: "volume" } });
+        } else if (s.type === "candles") {
           ser = chart.addCandlestickSeries({ upColor: "#10b981", downColor: "#ef4444", wickUpColor: "#10b981", wickDownColor: "#ef4444", borderVisible: false });
         } else if (p.series.length === 1) {
           ser = chart.addAreaSeries({ lineColor: color, topColor: color + "55", bottomColor: color + "05", lineWidth: 2 });
@@ -96,6 +98,18 @@
         el.insertBefore(legend, box);
       }
       if (legend) legend.innerHTML = names.join("");
+      let empty = el.querySelector(".sf-empty");
+      if (p.empty) {
+        if (!empty) {
+          empty = document.createElement("div");
+          empty.className = "sf-empty pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-slate-400";
+          box.style.position = "relative";
+          box.appendChild(empty);
+        }
+        empty.textContent = "Nothing to chart yet" + (p.note ? " — " + p.note : "");
+      } else if (empty) {
+        empty.remove();
+      }
       if (!el.dataset.fitted) { chart.timeScale().fitContent(); el.dataset.fitted = "1"; }
       footer(el, p);
     }

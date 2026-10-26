@@ -1,7 +1,10 @@
 {% extends "base.html" %}
+{% from "_macros.html" import page_intro, chart_card %}
 {% block title %}Scanner — Signal Forge{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-semibold text-slate-900">Candidate Scanner</h1>
+{{ page_intro('Trade ideas the strategies found. Each row is a hypothetical setup with an entry, a stop and a target — nothing is bought. Click a symbol for its chart and the reasons it qualified.') }}
+<div class="mb-6">{{ chart_card('sc-act','Trade ideas per day','/api/charts/scanner/activity?days=180', base='', ranges=False, height=200, hint='How many ideas each horizon produced. A quiet day is normal.') }}</div>
 <p class="mt-1 text-sm text-slate-500">Only candidates that pass every quality gate are shown. Rejected setups
 are counted below with their reasons.</p>
 

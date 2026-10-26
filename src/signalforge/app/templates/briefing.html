@@ -1,8 +1,10 @@
 {% extends "base.html" %}
+{% from "_macros.html" import page_intro, chart_card %}
 {% block title %}Daily briefing — Signal Forge{% endblock %}
 {% block content %}
 <div class="flex items-center justify-between">
   <h1 class="text-2xl font-semibold text-slate-900">Daily research briefing</h1>
+{{ page_intro('A one-page summary of the last trading day: what moved, what the strategies found and what changed in the paper books. Built from stored data; any AI-written wording is marked as such.') }}
   <form method="post" action="/briefing/build">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
     <button class="rounded bg-slate-900 px-3 py-1.5 text-sm text-white">Rebuild now</button>

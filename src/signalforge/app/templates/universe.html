@@ -1,7 +1,9 @@
 {% extends "base.html" %}
+{% from "_macros.html" import page_intro, chart_card %}
 {% block title %}Universe Coverage — Signal Forge{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-semibold text-slate-900">Liquid U.S. Research Universe</h1>
+{{ page_intro('The wider list of liquid U.S. stocks the research can draw from, refreshed after each close. Filters remove thinly traded, very small or very new stocks.') }}
 <p class="mt-1 text-sm text-slate-500">
   Discovery → bulk archive → eligibility screen → normalized bars (eligible only) → post-close research scan.
   Scheduled job <code>universe_update</code> is {{ 'ON' if u.enabled else 'OFF (config-gated)' }}; run manually with

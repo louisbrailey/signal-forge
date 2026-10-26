@@ -1,10 +1,13 @@
 {% extends "base.html" %}
+{% from "_macros.html" import page_intro, chart_card %}
 {% block title %}Paper Operations · Signal Forge{% endblock %}
 {% from "_macros.html" import paper_books %}
 {% block content %}
+<h1 class="text-2xl font-bold">Paper Operations</h1>
+{{ page_intro("How the simulated trading is going: money in each paper book, open positions and today's activity. This page refreshes itself every 30 seconds.") }}
+<div class="mb-6">{{ chart_card('pc-eq','Paper books — realized equity','/api/charts/paper/equity', ranges=False, height=240, hint='Simulated dollars, one line per book.') }}</div>
 <section hx-get="/paper-console" hx-trigger="every 30s" hx-select="#paper-state" hx-target="#paper-state" hx-swap="outerHTML">
 <div id="paper-state">
-<h1 class="text-2xl font-bold">Paper Operations</h1>
 <p class="mt-2">Research signal only — no order was placed.</p>
 <p class="text-sm text-slate-600">Refreshes every 30 seconds. Market inputs remain END-OF-DAY or DELAYED; this is not streaming execution.</p>
 <p class="mt-4 font-semibold {{ 'text-green-800' if worker_healthy else 'text-red-800' }}">Worker: {{ 'heartbeat current' if worker_healthy else 'stale or unavailable — inspect Ops' }}</p>

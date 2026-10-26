@@ -109,3 +109,41 @@ def test_pages_redirect_when_signed_out(client: TestClient) -> None:
     for path in ("/markets", "/crypto-paper"):
         r = client.get(path, follow_redirects=False)
         assert r.status_code == 303
+
+
+PAGES_WITH_INTRO = (
+    "/",
+    "/scanner",
+    "/briefing",
+    "/news",
+    "/universe",
+    "/paper-console",
+    "/paper-probation",
+    "/portfolio",
+    "/journal",
+    "/grid",
+    "/strategies",
+    "/strategies/promotion",
+    "/kronos",
+    "/options",
+    "/agents",
+    "/ops",
+    "/settings",
+    "/markets",
+    "/crypto-paper",
+)
+
+
+def test_every_page_opens_with_a_plain_english_intro(registered_client: TestClient) -> None:
+    for path in PAGES_WITH_INTRO:
+        r = registered_client.get(path)
+        assert r.status_code == 200, path
+        assert "max-w-3xl text-sm" in r.text, f"{path} has no intro"
+
+
+def test_scanner_and_grid_activity_charts(registered_client: TestClient) -> None:
+    for url in ("/api/charts/scanner/activity", "/api/charts/grid"):
+        p = registered_client.get(url).json()
+        assert p["kind"] == "bars" and p["latency"] == "END_OF_DAY"
+    assert 'data-chart="/api/charts/scanner/activity' in registered_client.get("/scanner").text
+    assert 'data-chart="/api/charts/grid' in registered_client.get("/grid").text

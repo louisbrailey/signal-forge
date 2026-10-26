@@ -1,7 +1,9 @@
 {% extends "base.html" %}
+{% from "_macros.html" import page_intro, chart_card %}
 {% block title %}Strategy Lab — Signal Forge{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-semibold text-slate-900">Strategy Lab</h1>
+{{ page_intro("Each strategy's backtest evidence: number of trades, average result per trade in R (one R is the amount risked), drawdowns and behaviour in different market conditions.") }}
 <p class="mt-1 text-sm text-slate-500">Strategies are code + a versioned spec. A strategy only alerts when it is
 <code>paper_approved</code> — earned automatically by clearing every gate on
 <a href="/strategies/promotion" class="text-sky-700 hover:underline">Strategy Promotion</a>, never set manually.

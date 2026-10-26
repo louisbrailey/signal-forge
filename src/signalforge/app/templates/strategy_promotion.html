@@ -1,7 +1,9 @@
 {% extends "base.html" %}
+{% from "_macros.html" import page_intro, chart_card %}
 {% block title %}Strategy Promotion — Signal Forge{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-semibold text-slate-900">Strategy Promotion</h1>
+{{ page_intro('The ten checks a strategy must pass before it may paper trade, including a final year of data it was never tuned on. A red result means the check did its job.') }}
 <p class="mt-1 text-sm text-slate-500">
   A strategy version becomes <code>paper_approved</code> only by clearing all ten gates below on
   genuine licensed data — never by manual action. Every evaluation, pass or fail, is kept
