@@ -24,7 +24,10 @@ PARENT = "e3b8c5d1f7a2"  # pragma: allowlist secret
 
 def test_the_revision_follows_the_books_revision_and_the_chain_has_one_head(db_url: str) -> None:
     script = ScriptDirectory.from_config(alembic_config(db_url))
-    assert script.get_heads() == [REVISION]
+    heads = script.get_heads()
+    assert len(heads) == 1
+    # later additive revisions sit on top; this one must stay in the single chain
+    assert REVISION in {r.revision for r in script.walk_revisions("base", heads[0])}
     assert script.get_revision(REVISION).down_revision == PARENT
 
 

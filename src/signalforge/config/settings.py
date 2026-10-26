@@ -68,6 +68,15 @@ class Settings(BaseSettings):
     # never hard-coded in the adapter.
     options_min_request_spacing_s: float | None = None
 
+    # --- Forex daily bars (Massive Currencies; research data only) ---
+    # OFF by default. Lives here, not on ResearchConfig, for the same reason as
+    # the worker policy below: it shapes no signal and must not move
+    # ``full_config_hash``. No strategy, scan, alert or paper path reads FX
+    # bars. Env: FOREX_INGEST_ENABLED, FOREX_PAIRS, FOREX_LOOKBACK_DAYS.
+    forex_ingest_enabled: bool = False
+    forex_pairs: str = "EURUSD,USDJPY,GBPUSD,AUDUSD,USDCAD,USDCHF,NZDUSD,XAUUSD"
+    forex_lookback_days: int = Field(default=730, gt=0, le=3650)
+
     # --- News ---
     news_provider: str = ""
     news_api_key: SecretStr = SecretStr("")

@@ -415,6 +415,38 @@ class OptionAggregateDaily(Base, IntPK, CreatedAt):
     quality_flags: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
+class FxBarDaily(Base, IntPK, CreatedAt):
+    """Completed daily bars for one currency pair (Massive Currencies).
+
+    Deliberately NOT ``ohlcv_daily``: every equity path (scans, universe,
+    Kronos, paper) reads that table, and a currency pair is not an equity — it
+    has no splits/dividends, trades 24/5, and its ``volume`` is a tick count,
+    not shares. Keeping it in its own table means no equity strategy can read
+    an FX bar by accident. ``session_date`` is the UTC calendar day the bar
+    covers; weekend partial bars are dropped. Latency is END_OF_DAY: only
+    completed UTC days are requested."""
+
+    __tablename__ = "fx_bar_daily"
+    __table_args__ = (
+        UniqueConstraint("pair", "session_date", "source"),
+        Index("ix_fx_bar_daily_pair_date", "pair", "session_date"),
+    )
+
+    pair: Mapped[str] = mapped_column(String(12), index=True)  # e.g. EURUSD
+    session_date: Mapped[date] = mapped_column(index=True)
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    tick_volume: Mapped[float | None] = mapped_column(Float, default=None)
+    vwap: Mapped[float | None] = mapped_column(Float, default=None)
+    transactions: Mapped[int | None] = mapped_column(Integer, default=None)
+    source: Mapped[str] = mapped_column(String(40), index=True)
+    latency_category: Mapped[LatencyCategory] = mapped_column(SAEnum(LatencyCategory, **_ENUM_KW))
+    ingested_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    quality_flags: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
 class FundamentalsSnapshot(Base, IntPK, CreatedAt):
     __tablename__ = "fundamentals_snapshot"
     __table_args__ = (UniqueConstraint("instrument_id", "as_of", "source"),)
