@@ -37,48 +37,49 @@ _OPEN = datetime(2024, 6, 25, 13, 30, tzinfo=UTC)
 # the request plan: the API budget is stated before anything is fetched
 # --------------------------------------------------------------------------- #
 def test_plan_costs_the_designs_own_backfill() -> None:
-    """The exact backfill the orchestrator will run, recomputed from the
-    adapter's limits rather than taken from the design's estimate."""
+    """The backfill actually needed for ORB, recomputed from the provider's
+    real limit: the 50,000 cap counts ONE-MINUTE base aggregates (incident
+    2026-10-26, ingestion_run 71), so a request may span ~52 sessions."""
     plan = intraday_request_plan(
         [f"SYM{i}" for i in range(24)],
-        date(2016, 10, 17),
-        date(2026, 9, 8),
+        date(2016, 9, 1),
+        date(2026, 10, 26),
         bar_size="15m",
         request_spacing_s=12.1,
     )
-    # 2016 (part), 2017..2025, 2026 (part) = 11 calendar-year chunks per symbol
-    assert plan.n_requests == 24 * 11 == 264
-    assert 52.0 < plan.minutes < 54.0  # 263 gaps x 12.1s = 53.0 min
-    assert plan.max_rows_per_request < PROVIDER_ROW_CAP
+    assert plan.n_requests == 24 * 61 == 1464  # Sep-Oct 2016 .. Sep-Oct 2026
+    assert 290.0 < plan.minutes < 300.0
+    assert plan.max_rows_per_request <= PROVIDER_ROW_CAP
     assert 1_500_000 < plan.rth_rows < 1_600_000
-    assert "264 paced provider requests" in plan.summary()
+    assert "1464 paced provider requests in 2-month chunks" in plan.summary()
 
 
-def test_plan_refuses_a_chunk_that_could_exceed_the_providers_row_cap() -> None:
-    """The adapter rejects a paginated response, so an over-large chunk would
-    fail the symbol outright. Refuse up front instead."""
-    with pytest.raises(ValueError, match="above the provider's 50,000 cap"):
-        intraday_request_plan(["AAPL"], date(2016, 1, 1), date(2026, 1, 1), bar_size="1m")
+def test_cap_is_checked_in_base_minutes_whatever_the_bar_size() -> None:
+    """A year of 15m bars is only ~16k rows, but ~240k one-minute bases: the
+    provider paginates it. The plan must refuse such a chunk for EVERY bar size."""
+    for bar_size in ("5m", "15m", "1h"):
+        with pytest.raises(ValueError, match="one-minute base aggregates"):
+            intraday_request_plan(
+                ["AAPL"], date(2017, 1, 1), date(2017, 12, 31), bar_size=bar_size, chunk_months=12
+            )
+        ok = intraday_request_plan(
+            ["AAPL"], date(2017, 1, 1), date(2017, 12, 31), bar_size=bar_size
+        )
+        assert ok.max_rows_per_request <= PROVIDER_ROW_CAP
+        assert ok.n_requests == 6
 
-    ok = intraday_request_plan(["AAPL"], date(2016, 1, 1), date(2026, 1, 1), bar_size="5m")
-    assert ok.max_rows_per_request <= PROVIDER_ROW_CAP
 
-
-def test_plan_chunks_on_calendar_year_boundaries() -> None:
-    plan = intraday_request_plan(["AAPL"], date(2023, 6, 1), date(2025, 2, 1), bar_size="15m")
+def test_plan_chunks_on_fixed_calendar_month_boundaries() -> None:
+    plan = intraday_request_plan(["AAPL"], date(2023, 6, 15), date(2023, 12, 2), bar_size="15m")
     spans = [(c.start.isoformat(), c.end.isoformat()) for c in plan.chunks]
     assert spans == [
-        ("2023-06-01", "2023-12-31"),
-        ("2024-01-01", "2024-12-31"),
-        ("2025-01-01", "2025-02-01"),
+        ("2023-06-15", "2023-06-30"),  # aligned to the May-Jun block
+        ("2023-07-01", "2023-08-31"),
+        ("2023-09-01", "2023-10-31"),
+        ("2023-11-01", "2023-12-02"),
     ]
-    # multi-year chunks collapse the same span into fewer requests
-    assert (
-        intraday_request_plan(
-            ["AAPL"], date(2023, 6, 1), date(2025, 2, 1), bar_size="15m", chunk_years=2
-        ).n_requests
-        == 2
-    )
+    with pytest.raises(ValueError, match="must divide 12"):
+        intraday_request_plan(["AAPL"], date(2023, 1, 1), date(2023, 3, 1), chunk_months=5)
 
 
 # --------------------------------------------------------------------------- #

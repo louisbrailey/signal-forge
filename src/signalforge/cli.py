@@ -2201,9 +2201,13 @@ def ingest_intraday_cmd(
     symbols: Annotated[
         str, typer.Option(help="Comma-separated; default: configured universe.")
     ] = "",
-    chunk_years: Annotated[
-        int, typer.Option(help="Calendar years per provider request (keeps each under 50k rows).")
-    ] = 1,
+    chunk_months: Annotated[
+        int,
+        typer.Option(
+            help="Calendar months per provider request (2 keeps each under the provider's "
+            "50,000 one-minute base-aggregate cap; must divide 12)."
+        ),
+    ] = 2,
     resume_run_id: Annotated[
         int, typer.Option(help="Resume this ingestion_run id; symbols already OK are skipped.")
     ] = 0,
@@ -2214,18 +2218,18 @@ def ingest_intraday_cmd(
     """Fetch intraday bars into the local store (Phase 2).
 
     Two modes. With --since it is a DATED BACKFILL: the span is split into
-    calendar-year chunks that each stay under the provider's 50,000-row
-    response cap (the adapter rejects a paginated answer rather than silently
-    truncating it), only RTH bars are stored, progress is committed per symbol
-    and recorded on an ``IngestionRun`` row that --resume-run-id can re-enter.
-    Without it, the original trailing --days top-up.
+    two-month calendar chunks that each stay under the provider's 50,000
+    one-minute base-aggregate cap (the adapter rejects a paginated answer
+    rather than silently truncating it), only RTH bars are stored, progress is
+    committed per symbol and recorded on an ``IngestionRun`` row that
+    --resume-run-id can re-enter. Without it, the original trailing --days
+    top-up.
 
-    API volume, recomputed from the adapter's own limits — the 24-symbol
-    ex-META universe at 15m from 2016-10-17 to 2026-09-08 is 11 calendar-year
-    chunks per symbol = 264 paced requests, ~53 min at the Basic plan's 12.1 s
-    spacing, and ~1.55M RTH rows (~0.53 GB). Each request is at most ~16,128
-    rows against the 50,000 cap, so the chunking has ~3x headroom even if the
-    provider returns extended hours. Use --dry-run to print the exact plan for
+    The cap counts one-minute base aggregates, not rows of the requested bar
+    size (ingestion_run 71: year-long 15m chunks came back paginated). The
+    24-symbol ex-META universe at 15m from 2016-09-01 to 2026-10-26 is 61
+    two-month chunks per symbol = 1,464 paced requests, ~4.9 h at 12.1 s
+    spacing, and ~1.59M RTH rows. Use --dry-run to print the exact plan for
     the arguments you intend to run.
 
     A backfill deliberately does NOT register a BAR_INTRADAY feed-status row:
@@ -2276,7 +2280,7 @@ def ingest_intraday_cmd(
     end_d = date.fromisoformat(until) if until else date.today()
     try:
         plan = intraday_request_plan(
-            syms, start_d, end_d, bar_size=bar_size, chunk_years=chunk_years
+            syms, start_d, end_d, bar_size=bar_size, chunk_months=chunk_months
         )
     except ValueError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
@@ -2295,7 +2299,7 @@ def ingest_intraday_cmd(
             start_d,
             end_d,
             bar_size=bar_size,
-            chunk_years=chunk_years,
+            chunk_months=chunk_months,
             resume_run_id=resume_run_id or None,
         )
         run_id, status, written, skipped = (
