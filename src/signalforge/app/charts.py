@@ -261,7 +261,7 @@ def crypto_paper_curve(session: Session, key: str) -> dict[str, Any]:
                     pts.append({"time": r.exit_date.isoformat(), "value": round(total, 3)})
         marks = sum(r.mark_r or 0.0 for r in rows if r.status == "OPEN")
         as_of = book.last_bar_date
-        if as_of is not None:
+        if as_of is not None and as_of.isoformat() >= pts[-1]["time"]:
             if as_of.isoformat() != pts[-1]["time"]:
                 pts.append({"time": as_of.isoformat(), "value": round(total, 3)})
             # Only one observation exists for open marks. Two points at the same
