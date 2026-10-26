@@ -190,3 +190,66 @@ def test_scheduled_job_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(fx, "ingest_forex", lambda *a, **k: called.append(True))
     scheduler.job_forex_ingest()
     assert called == []
+
+
+# --- crypto (same Currencies plan, seven-day market) ----------------------- #
+def _crypto_client(api: FakeAPI) -> fx.ForexClient:
+    return fx.ForexClient(
+        api_key=KEY,
+        client=httpx.Client(transport=httpx.MockTransport(api.crypto_handler)),
+        spacing_s=0.0,
+        sleep=lambda _s: None,
+        prefix="X",
+    )
+
+
+def _crypto_handler(self: FakeAPI, request: httpx.Request) -> httpx.Response:
+    url = str(request.url)
+    assert "/ticker/X:" in url and "/ticker/C:" not in url
+    return self.handler(
+        httpx.Request("GET", url.replace("/ticker/X:", "/ticker/C:"), headers=request.headers)
+    )
+
+
+FakeAPI.crypto_handler = _crypto_handler  # type: ignore[attr-defined]
+
+
+def test_crypto_pairs_parse_with_their_own_rules() -> None:
+    assert fx.parse_pairs("btcusd, X:ETHUSD, BTC-USD", fx.CRYPTO) == ["BTCUSD", "ETHUSD"]
+    with pytest.raises(ValueError):
+        fx.parse_pairs("EURJPY", fx.CRYPTO)  # crypto quotes in USD only
+
+
+def test_crypto_keeps_weekend_bars_in_its_own_table(session: Session) -> None:
+    from signalforge.db.models import CryptoBarDaily
+
+    api = FakeAPI()
+    days = [date(2026, 10, d) for d in range(16, 21)]  # Fri..Tue incl. Sat/Sun
+    api.bars["BTCUSD"] = [_bar(d, 82000.0) for d in days]
+    # Sunday 2026-10-25 -> last completed crypto day is Saturday 10-24, not Friday
+    assert fx.last_completed_fx_day(
+        datetime(2026, 10, 25, 3, tzinfo=UTC), trades_weekends=True
+    ) == date(2026, 10, 24)
+
+    rep = fx.ingest_crypto(
+        session, ["BTCUSD"], lookback_days=4, client=_crypto_client(api), now=NOW
+    )
+
+    pr = rep.pairs[0]
+    assert (pr.status, pr.written, pr.weekend_dropped, pr.gaps) == ("ok", 5, 0, [])
+    rows = session.scalars(select(CryptoBarDaily).order_by(CryptoBarDaily.session_date)).all()
+    assert [r.session_date.day for r in rows] == [16, 17, 18, 19, 20]
+    assert rows[0].volume == 1234 and rows[0].source == "massive_crypto"
+    assert session.scalars(select(FxBarDaily)).all() == []
+    assert session.scalars(select(OHLCVDaily)).all() == []
+    feed = session.scalar(select(DataFeedStatus).where(DataFeedStatus.provider == "massive_crypto"))
+    assert feed is not None and feed.last_success_at is not None
+
+
+def test_crypto_job_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from signalforge import scheduler
+
+    called: list[bool] = []
+    monkeypatch.setattr(fx, "ingest_crypto", lambda *a, **k: called.append(True))
+    scheduler.job_crypto_ingest()
+    assert called == []

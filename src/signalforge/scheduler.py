@@ -47,6 +47,7 @@ NO_JOB_LEVEL_LOCK_RETRY: frozenset[str] = frozenset(
         # one commit per currency pair; a job-level retry would re-request
         # every pair against the shared provider rate limit
         "forex_ingest",
+        "crypto_ingest",
         "approved_scope_scan",
         "catchup_scan",
         "catchup_approved_scope_scan",
@@ -482,6 +483,31 @@ def job_forex_ingest() -> None:
                 session, settings.forex_pairs.split(","), lookback_days=settings.forex_lookback_days
             )
         _log.info("forex.ingest", end=rep.end, written=rep.written, failed=rep.failed)
+    finally:
+        _EOD_UPDATE_LOCK.release()
+
+
+def job_crypto_ingest() -> None:
+    """Daily top-up of completed crypto bars. Config-gated OFF
+    (``CRYPTO_INGEST_ENABLED``); research data only, never a signal or trade."""
+    from signalforge.config import get_settings
+    from signalforge.data.forex import ingest_crypto
+    from signalforge.db.session import session_scope
+
+    settings = get_settings()
+    if not settings.crypto_ingest_enabled or settings.market_data_provider != "massive":
+        _log.info("crypto.ingest.skipped_disabled")
+        return
+    if not _EOD_UPDATE_LOCK.acquire(timeout=UNIVERSE_WAIT_FOR_EOD_S):
+        raise RuntimeError("crypto ingest skipped: EOD update still running")
+    try:
+        with session_scope(write=True) as session:
+            rep = ingest_crypto(
+                session,
+                settings.crypto_pairs.split(","),
+                lookback_days=settings.crypto_lookback_days,
+            )
+        _log.info("crypto.ingest", end=rep.end, written=rep.written, failed=rep.failed)
     finally:
         _EOD_UPDATE_LOCK.release()
 
@@ -1055,6 +1081,14 @@ def default_job_specs() -> list[JobSpec]:
             "Top up completed daily forex bars (config-gated OFF; research data only)",
             cron_hour=19,
             cron_minute=30,
+        ),
+        JobSpec(
+            "crypto_ingest",
+            job_crypto_ingest,
+            24 * 60,
+            "Top up completed daily crypto bars (config-gated OFF; research data only)",
+            cron_hour=19,
+            cron_minute=45,
         ),
         JobSpec("daily_briefing", job_daily_briefing, 24 * 60, "Build the daily research briefing"),
         JobSpec(

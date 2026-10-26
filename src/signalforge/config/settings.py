@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     forex_ingest_enabled: bool = False
     forex_pairs: str = "EURUSD,USDJPY,GBPUSD,AUDUSD,USDCAD,USDCHF,NZDUSD,XAUUSD"
     forex_lookback_days: int = Field(default=730, gt=0, le=3650)
+    # Crypto daily bars from the same Currencies plan. OFF by default.
+    # Env: CRYPTO_INGEST_ENABLED, CRYPTO_PAIRS, CRYPTO_LOOKBACK_DAYS.
+    crypto_ingest_enabled: bool = False
+    crypto_pairs: str = "BTCUSD,ETHUSD,SOLUSD"
+    crypto_lookback_days: int = Field(default=730, gt=0, le=3650)
 
     # --- News ---
     news_provider: str = ""
