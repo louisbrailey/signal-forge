@@ -236,6 +236,27 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "S18: the crypto paper book is a simulation — no execution, broker, alerts, LLM or other paper books"
+type = "forbidden"
+source_modules = ["signalforge.paper.crypto_ledger"]
+forbidden_modules = [
+    "signalforge.execution",
+    "signalforge.alerts",
+    "signalforge.llm",
+    "signalforge.research.candidates",
+    "signalforge.research.scan",
+    "signalforge.research.promotion",
+    "signalforge.paper.ledger",
+    "signalforge.paper.options_ledger",
+    "signalforge.paper.options_marks",
+    "signalforge.paper.options_auto_simulate",
+    "signalforge.paper.options_eod",
+    "httpx",
+    "requests",
+    "socket",
+]
+
+[[tool.importlinter.contracts]]
 name = "S11: options are education/simulation only — no alerts, no LLM, no decision path"
 type = "forbidden"
 # Widened, never narrowed: the two new options data modules are covered by the

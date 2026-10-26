@@ -48,6 +48,8 @@ NO_JOB_LEVEL_LOCK_RETRY: frozenset[str] = frozenset(
         # every pair against the shared provider rate limit
         "forex_ingest",
         "crypto_ingest",
+        # one commit per cycle; idempotent replay, but no blind job-level retry
+        "crypto_paper",
         "approved_scope_scan",
         "catchup_scan",
         "catchup_approved_scope_scan",
@@ -510,6 +512,43 @@ def job_crypto_ingest() -> None:
         _log.info("crypto.ingest", end=rep.end, written=rep.written, failed=rep.failed)
     finally:
         _EOD_UPDATE_LOCK.release()
+
+
+def job_crypto_paper() -> None:
+    """Daily SIMULATED crypto paper cycle. Config-gated OFF
+    (``CRYPTO_PAPER_ENABLED``); needs a book created by the operator. No broker,
+    no order path. The kill switch blocks new paper trades, never closes."""
+    from signalforge.config import get_settings
+    from signalforge.db.session import session_scope
+    from signalforge.paper.crypto_ledger import get_book, run_cycle
+
+    if not get_settings().crypto_paper_enabled:
+        _log.info("crypto.paper.skipped_disabled")
+        return
+    with session_scope(write=True) as session:
+        from sqlalchemy import select
+
+        from signalforge.db.models import CryptoPaperBook
+
+        keys = [b.strategy_key for b in session.scalars(select(CryptoPaperBook))]
+        for key in keys:
+            if get_book(session, key) is None:
+                continue
+            try:
+                rep = run_cycle(session, key)
+            except Exception as exc:  # one failing book must not stop the others
+                session.rollback()
+                _log.error("crypto.paper.cycle_failed", strategy=key, error=str(exc)[:200])
+                continue
+            _log.info(
+                "crypto.paper.cycle",
+                strategy=key,
+                last_bar=rep.last_bar,
+                opened=len(rep.opened),
+                closed=len(rep.closed),
+                divergences=len(rep.divergences),
+                kill_switch_skipped=len(rep.skipped_open_kill_switch),
+            )
 
 
 def job_daily_briefing() -> None:
@@ -1089,6 +1128,14 @@ def default_job_specs() -> list[JobSpec]:
             "Top up completed daily crypto bars (config-gated OFF; research data only)",
             cron_hour=19,
             cron_minute=45,
+        ),
+        JobSpec(
+            "crypto_paper",
+            job_crypto_paper,
+            24 * 60,
+            "SIMULATED crypto paper cycle (config-gated OFF; no broker, no order)",
+            cron_hour=20,
+            cron_minute=0,
         ),
         JobSpec("daily_briefing", job_daily_briefing, 24 * 60, "Build the daily research briefing"),
         JobSpec(

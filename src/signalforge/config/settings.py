@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     crypto_ingest_enabled: bool = False
     crypto_pairs: str = "BTCUSD,ETHUSD,SOLUSD"
     crypto_lookback_days: int = Field(default=730, gt=0, le=3650)
+    # Crypto PAPER book (simulated; no broker, no order path). OFF by default.
+    # The daily cycle runs only when this is true AND a book was created with
+    # ``signalforge crypto paper start --confirm`` for a SEALED_PASS strategy.
+    # Env: CRYPTO_PAPER_ENABLED.
+    crypto_paper_enabled: bool = False
 
     # --- News ---
     news_provider: str = ""
