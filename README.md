@@ -137,3 +137,13 @@ See [Subscription workflow](docs/SUBSCRIPTION_WORKFLOW.md) for verified endpoint
 currency/gold/index/futures context, conservative latency labels and research limits.
 Run `uv run signalforge providers refresh-context` to update the bounded context panel
 and briefing inputs. It does not create trades or change strategy decisions.
+
+### Isolated Kronos comparison books
+
+The explicit, offline-data experiment CLI is documented in
+[the frozen comparison plan](docs/KRONOS-COMPARISON-PLAN.md). It creates three
+private accounts per approved daily strategy/horizon (baseline, Kronos filter,
+and matched-selection control), uses the existing paper ledger, and reads the
+operating database without writing to it. It is not registered with the worker
+or dashboard. Results remain sealed until the predefined final analysis; this
+is research infrastructure, not evidence of improved profitability.

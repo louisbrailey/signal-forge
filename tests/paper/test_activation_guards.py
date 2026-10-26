@@ -184,7 +184,11 @@ def test_automatic_acceptance_has_exactly_one_guarded_entry_point() -> None:
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2] / "src" / "signalforge"
-    manual_ok = {"paper/ledger.py", "cli.py"}
+    # Explicit comparison CLI is a third manual caller, confined to a NEW DB.
+    # It is not registered with either scheduler. The operating->experiments
+    # import contract and tests/experiments verify read-only source access,
+    # private DB marker checks, and unchanged source ledger bytes.
+    manual_ok = {"paper/ledger.py", "cli.py", "experiments/comparison.py"}
     for p in root.rglob("*.py"):
         text = p.read_text()
         rel = str(p.relative_to(root))
