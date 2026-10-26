@@ -81,7 +81,7 @@ def test_a_crash_mid_evaluation_still_consumes_the_look(
     def boom(*a: object, **k: object) -> None:
         raise RuntimeError("crash")
 
-    monkeypatch.setattr(sl, "run_backtest", boom)
+    monkeypatch.setattr(sl, "backtest", boom)
     with pytest.raises(RuntimeError):
         sl.run_sealed_test(session, "fx", "fx_tsmom_126_ma50", ["EURUSD"], gates=OPEN)
     session.rollback()
@@ -102,3 +102,11 @@ def test_unknown_market_or_strategy_is_an_error(session: Session) -> None:
 def test_sealed_window_is_the_final_365_calendar_days() -> None:
     s = {"EURUSD": _series("EURUSD", _random_walk(1, n=800))}
     assert h.sealed_start(s, 365) == s["EURUSD"].dates[-1] - timedelta(days=364)
+
+
+def test_fx2_strategies_seal_under_their_own_version_and_gates(session: Session) -> None:
+    mk, _, gates = sl._lookup("fx", "fx_donchian_55_trail20")
+    assert mk.version == "FX-2" and gates.holding_cost_bps_per_day == 1.0
+    mk1, _, gates1 = sl._lookup("fx", "fx_donchian_55")
+    assert mk1.version == "FX-1" and gates1.holding_cost_bps_per_day == 0.0
+    assert sl.existing(session, "fx", "fx_donchian_55_trail20") is None

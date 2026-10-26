@@ -353,6 +353,9 @@ def fx_research(
         Path | None,
         typer.Option(help="Write the markdown report here (default: <data dir>/research/fx/)."),
     ] = None,
+    version: Annotated[
+        str, typer.Option(help="Pre-registered strategy set: FX-1 or FX-2.")
+    ] = "FX-1",
 ) -> None:
     """Evaluate the pre-registered FX strategies on the development window.
     The sealed final year is never evaluated here. Research only."""
@@ -362,11 +365,19 @@ def fx_research(
     from signalforge.config.paths import data_dir
     from signalforge.data.forex import parse_pairs
     from signalforge.db.session import session_scope
-    from signalforge.research.fx.harness import render_markdown, run_fx_research
+    from signalforge.research.fx.harness import (
+        render_markdown,
+        run_fx2_research,
+        run_fx_research,
+    )
 
+    if version not in ("FX-1", "FX-2"):
+        typer.echo("--version must be FX-1 or FX-2")
+        raise typer.Exit(2)
     chosen = parse_pairs(pairs if pairs is not None else get_settings().forex_pairs)
+    runner = run_fx2_research if version == "FX-2" else run_fx_research
     with session_scope() as session:
-        report = run_fx_research(session, chosen)
+        report = runner(session, chosen)
     md = render_markdown(report)
     target = out or (
         data_dir() / "research" / "fx" / f"fx_research_{report['version']}_{date.today()}.md"
@@ -377,9 +388,14 @@ def fx_research(
     for s in report["strategies"]:
         m = s["pooled"]
         typer.echo(
-            f"  {s['key']:20} {s['verdict']:9} trades={m['n_trades']:4d} "
+            f"  {s['key']:24} {s['verdict']:9} trades={m['n_trades']:4d} "
             f"exp={m['expectancy_r']:+.3f}R ci_low={s['ci_expectancy_r']['low']:+.3f}R "
             f"2x={s['stress_expectancy_r']:+.3f}R"
+            + (
+                f" hold={s['holding_stress_expectancy_r']:+.3f}R"
+                if s.get("holding_stress_expectancy_r") is not None
+                else ""
+            )
         )
     typer.echo(f"Sealed from {report['sealed_from']} (not evaluated). Report: {target}")
     typer.echo("Research only — no order was placed.")

@@ -39,6 +39,9 @@ class FxStrategy:
     params: dict[str, float]
     warmup: int
     signal: Callable[[PriceSeries, int], EntrySignal | None]
+    # FX-2: exit on a close back through the prior N-bar opposite channel,
+    # run by ``research.fx.trail_engine`` (the equity engine is frozen).
+    trail_channel: int | None = None
 
 
 # --- 1. Donchian channel breakout (trend) ---------------------------------- #
@@ -170,4 +173,45 @@ CRYPTO_STRATEGIES: tuple[FxStrategy, ...] = tuple(
         signal=s.signal,
     )
     for s in FX_STRATEGIES
+)
+
+
+# --------------------------------------------------------------------------- #
+# FX-2 (pre-registered 2026-10-26, docs/research/PREREGISTRATION_FX-2_2026-10-26.md)
+# One change to fx_donchian_55: exit on a close back through the prior 20-day
+# opposite channel instead of a fixed 40-bar time stop. Entry and initial stop
+# are unchanged; a 250-bar safety time stop only bounds a trade.
+# --------------------------------------------------------------------------- #
+FX2_STRATEGY_VERSION = "FX-2"
+_TRAIL_N, _TRAIL_SAFETY = 20, 250
+
+
+def _donchian_trail(series: PriceSeries, t: int) -> EntrySignal | None:
+    sig = _donchian(series, t)
+    if sig is None:
+        return None
+    return EntrySignal(
+        sig.direction,
+        sig.stop_price,
+        _TRAIL_SAFETY,
+        reason=sig.reason + "; 20d trailing exit",
+    )
+
+
+FX2_STRATEGIES: tuple[FxStrategy, ...] = (
+    FxStrategy(
+        "fx_donchian_55_trail20",
+        "Close beyond the prior 55-day high/low; 2xATR(20) initial stop; exit on a close "
+        "back through the prior 20-day low/high; 250-bar safety stop.",
+        {
+            "channel": _DON_N,
+            "atr_n": _DON_ATR_N,
+            "stop_atr": _DON_STOP_ATR,
+            "trail": _TRAIL_N,
+            "safety_time": _TRAIL_SAFETY,
+        },
+        warmup=_DON_N + 2,
+        signal=_donchian_trail,
+        trail_channel=_TRAIL_N,
+    ),
 )

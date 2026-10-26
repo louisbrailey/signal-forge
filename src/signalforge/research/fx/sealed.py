@@ -29,27 +29,38 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from signalforge.backtest.costs import CostModel
-from signalforge.backtest.engine import SimTrade, run_backtest
+from signalforge.backtest.engine import SimTrade
 from signalforge.backtest.metrics import compute_metrics
 from signalforge.db.models import CurrencySealedTest
 from signalforge.research.fx.harness import (
     CRYPTO_MARKET,
+    FX2_GATES,
+    FX2_MARKET,
     FX_MARKET,
     FxGates,
     ResearchMarket,
+    backtest,
     evaluate_strategy,
+    holding_cost_r,
     load_series,
     sealed_start,
 )
-from signalforge.research.fx.strategies import CRYPTO_STRATEGIES, FX_STRATEGIES, FxStrategy
+from signalforge.research.fx.strategies import (
+    CRYPTO_STRATEGIES,
+    FX2_STRATEGIES,
+    FX_STRATEGIES,
+    FxStrategy,
+)
 
 SEALED_MIN_TRADES = 10
 SEALED_MIN_EXPECTANCY_R = 0.0
 SEALED_MIN_STRESS_EXPECTANCY_R = 0.0
 
-_MARKETS: dict[str, tuple[ResearchMarket, tuple[FxStrategy, ...]]] = {
-    "fx": (FX_MARKET, FX_STRATEGIES),
-    "crypto": (CRYPTO_MARKET, CRYPTO_STRATEGIES),
+# Each market lists its pre-registered versions: (market+version, strategies,
+# the gates that version was pre-registered with).
+_MARKETS: dict[str, tuple[tuple[ResearchMarket, tuple[FxStrategy, ...], FxGates], ...]] = {
+    "fx": ((FX_MARKET, FX_STRATEGIES, FxGates()), (FX2_MARKET, FX2_STRATEGIES, FX2_GATES)),
+    "crypto": ((CRYPTO_MARKET, CRYPTO_STRATEGIES, FxGates()),),
 }
 
 
@@ -57,14 +68,21 @@ class SealedTestRefused(RuntimeError):
     """The sealed year may not be evaluated (already used, or no dev pass)."""
 
 
-def _strategy(market: str, key: str) -> tuple[ResearchMarket, FxStrategy]:
+def _lookup(market: str, key: str) -> tuple[ResearchMarket, FxStrategy, FxGates]:
     if market not in _MARKETS:
         raise ValueError(f"unknown market {market!r}; expected one of {sorted(_MARKETS)}")
-    mk, strategies = _MARKETS[market]
-    for s in strategies:
-        if s.key == key:
-            return mk, s
-    raise ValueError(f"unknown {mk.name} strategy {key!r}: {[s.key for s in strategies]}")
+    known: list[str] = []
+    for mk, strategies, gates in _MARKETS[market]:
+        for s in strategies:
+            known.append(s.key)
+            if s.key == key:
+                return mk, s, gates
+    raise ValueError(f"unknown {market} strategy {key!r}: {known}")
+
+
+def _strategy(market: str, key: str) -> tuple[ResearchMarket, FxStrategy]:
+    mk, s, _ = _lookup(market, key)
+    return mk, s
 
 
 def existing(session: Session, market: str, key: str) -> CurrencySealedTest | None:
@@ -87,8 +105,8 @@ def run_sealed_test(
     gates: FxGates | None = None,
     now: datetime | None = None,
 ) -> CurrencySealedTest:
-    gates = gates or FxGates()
-    mk, strat = _strategy(market, strategy_key)
+    mk, strat, registered_gates = _lookup(market, strategy_key)
+    gates = gates or registered_gates
     prior = existing(session, market, strategy_key)
     if prior is not None:
         raise SealedTestRefused(
@@ -144,15 +162,9 @@ def run_sealed_test(
                     f"{series.low[i]!r}|{series.close[i]!r}\n".encode()
                 )
         spread = mk.spread(pair)
-        b = run_backtest(
-            series, strat.signal, cost_model=cm, spread_bps=spread, warmup=strat.warmup
-        )
-        st = run_backtest(
-            series,
-            strat.signal,
-            cost_model=cm,
-            spread_bps=spread * gates.stress_spread_multiplier,
-            warmup=strat.warmup,
+        b = backtest(strat, series, cost_model=cm, spread_bps=spread)
+        st = backtest(
+            strat, series, cost_model=cm, spread_bps=spread * gates.stress_spread_multiplier
         )
         pb = [t for t in b.trades if t.entry_date >= seal_from]
         ps = [t for t in st.trades if t.entry_date >= seal_from]
@@ -169,6 +181,13 @@ def run_sealed_test(
 
     m = compute_metrics(base)
     sm = compute_metrics(stress)
+    held_r: float | None = None
+    if gates.holding_cost_bps_per_day > 0 and base:
+        fracs = sorted(abs(t.pnl_pct / t.pnl_r) for t in base if t.pnl_r)
+        fallback = fracs[len(fracs) // 2] if fracs else 0.0
+        held_r = sum(
+            t.pnl_r - holding_cost_r(t, gates.holding_cost_bps_per_day, fallback) for t in base
+        ) / len(base)
     reasons = []
     if m.n_trades < SEALED_MIN_TRADES:
         reasons.append(f"sealed trades {m.n_trades} < {SEALED_MIN_TRADES}")
@@ -179,10 +198,16 @@ def run_sealed_test(
             f"sealed {gates.stress_spread_multiplier:g}x-cost expectancy "
             f"{sm.expectancy_r:.3f}R < {SEALED_MIN_STRESS_EXPECTANCY_R}R"
         )
+    if held_r is not None and held_r < gates.min_holding_stress_expectancy_r:
+        reasons.append(
+            f"sealed {gates.holding_cost_bps_per_day:g}bp/day holding-cost expectancy "
+            f"{held_r:.3f}R < {gates.min_holding_stress_expectancy_r}R"
+        )
     row.data_sha256 = h.hexdigest()
     row.result = {
         "metrics": m.to_dict(),
         "stress_expectancy_r": sm.expectancy_r,
+        "holding_stress_expectancy_r": held_r,
         "pairs": per_pair,
         "reasons": reasons,
         "gates": {
