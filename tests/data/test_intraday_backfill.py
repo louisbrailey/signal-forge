@@ -405,3 +405,39 @@ def test_massive_intraday_never_leaks_the_key() -> None:
             "SPY", _OPEN, _OPEN + timedelta(hours=1), bar_size="15m"
         )
     assert "test-placeholder" not in str(exc.value)
+
+
+def test_each_chunk_spans_whole_new_york_days(session: Session) -> None:
+    """Incident 2026-10-26 (ingestion_run 73): post-market bars on a chunk's
+    last trading day fall after midnight UTC. A UTC end-of-day bound made the
+    adapter reject every chunk ending on a trading day. Chunks are bounded by
+    New York calendar days instead."""
+    from zoneinfo import ZoneInfo
+
+    ny = ZoneInfo("America/New_York")
+    seen: list[tuple[datetime, datetime]] = []
+
+    class _Recorder:
+        provider_name = "fixture"
+
+        @property
+        def capabilities(self):  # pragma: no cover - trivial
+            return FixtureMarketDataAdapter().capabilities
+
+        def fetch_intraday_bars(self, symbol, start, end, *, bar_size="5m"):
+            seen.append((start, end))
+            return FixtureMarketDataAdapter().fetch_intraday_bars(
+                symbol, start, end, bar_size=bar_size
+            )
+
+    # 2024-02-29 is a Thursday session: the Jan-Feb chunk ends on a trading day
+    ingest_intraday_history(
+        session, _Recorder(), ["SPY"], date(2024, 2, 26), date(2024, 3, 1), bar_size="15m"
+    )
+    (lo1, hi1), (lo2, _) = seen
+    assert lo1.astimezone(ny) == datetime(2024, 2, 26, tzinfo=ny)
+    assert hi1.astimezone(ny).date() == date(2024, 2, 29)
+    # 19:45 ET post-market on the last day (00:45 UTC the next day) is inside
+    late_post_market = datetime(2024, 3, 1, 0, 45, tzinfo=UTC)
+    assert lo1 <= late_post_market <= hi1
+    assert lo2.astimezone(ny) == datetime(2024, 3, 1, tzinfo=ny)

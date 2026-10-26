@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC as _UTC
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -611,6 +612,7 @@ def ingest_intraday_universe(
 # therefore be split into requests that each fit under the cap, and the split
 # must be decided up front so the API budget is a stated number rather than a
 # surprise.
+_NY = ZoneInfo("America/New_York")
 PROVIDER_ROW_CAP = 50_000
 # Extended-hours minutes per session (04:00-20:00 ET).
 #
@@ -895,8 +897,12 @@ def ingest_intraday_history(
             continue
         sym_error: str | None = None
         for chunk in (c for c in plan.chunks if c.symbol == sym):
-            lo = datetime.combine(chunk.start, datetime.min.time(), tzinfo=_UTC)
-            hi = datetime.combine(chunk.end, datetime.max.time(), tzinfo=_UTC)
+            # The provider's date range is New York calendar days, and a day's
+            # post-market bars run to 20:00 ET, i.e. into the NEXT UTC date.
+            # A UTC end-of-day bound made the adapter reject every chunk that
+            # ends on a trading day (incident 2026-10-26, ingestion_run 73).
+            lo = datetime.combine(chunk.start, datetime.min.time(), tzinfo=_NY)
+            hi = datetime.combine(chunk.end, datetime.max.time(), tzinfo=_NY)
             r = ingest_intraday_symbol(
                 session,
                 adapter,
