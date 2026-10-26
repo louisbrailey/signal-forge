@@ -62,6 +62,7 @@ def test_fx_and_crypto_charts_return_stored_bars(registered_client: TestClient) 
     snap = registered_client.get("/api/charts/snapshot/crypto").json()["rows"]
     btc = next(r for r in snap if r["pair"] == "BTCUSD")
     assert btc["close"] == 1.04 and len(btc["spark"]) == 5
+    assert btc["chg_30d"] is None
     assert registered_client.get("/api/charts/fx/EURUSD?days=1").status_code == 422
 
 
@@ -147,3 +148,26 @@ def test_scanner_and_grid_activity_charts(registered_client: TestClient) -> None
         assert p["kind"] == "bars" and p["latency"] == "END_OF_DAY"
     assert 'data-chart="/api/charts/scanner/activity' in registered_client.get("/scanner").text
     assert 'data-chart="/api/charts/grid' in registered_client.get("/grid").text
+
+
+def test_crypto_month_change_uses_calendar_days(registered_client: TestClient) -> None:
+    now = datetime.now(UTC)
+    with session_scope(write=True) as s:
+        for i in range(40):
+            s.add(
+                CryptoBarDaily(
+                    pair="BTCUSD",
+                    source="massive_crypto",
+                    session_date=now.date() - timedelta(days=40 - i),
+                    open=100 + i,
+                    high=101 + i,
+                    low=99 + i,
+                    close=100 + i,
+                    latency_category=LatencyCategory.END_OF_DAY,
+                    ingested_at=now,
+                    quality_flags=[],
+                )
+            )
+    rows = registered_client.get("/api/charts/snapshot/crypto").json()["rows"]
+    btc = next(r for r in rows if r["pair"] == "BTCUSD")
+    assert btc["chg_30d"] == (139 / 109 - 1) * 100

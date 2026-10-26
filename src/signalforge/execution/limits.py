@@ -215,10 +215,8 @@ class OpenGateContext:
     adapter_name: str
     # K1 — killswitch.ensure_not_engaged() did not raise.
     kill_switch_engaged: bool | None
-    # K2 — the execution-local kill state; unreadable (None) BLOCKS. This is the
-    # deliberate inverse of killswitch.py's fail-open semantics, which are right
-    # for a research tool and wrong for order submission. killswitch.py itself is
-    # untouched: its 39 call sites keep their meaning.
+    # K2 — independent execution-local kill state; unreadable (None) BLOCKS.
+    # The shared K1 guard also fails closed on corrupt state. Keep both checks.
     execution_kill_engaged: bool | None
     dead_man_alive: bool | None  # D1
     market_open_broker: bool | None  # C1 - adapter.clock()

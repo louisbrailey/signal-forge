@@ -172,7 +172,8 @@ def pair_snapshot(session: Session, market: str, pairs: list[str]) -> list[dict[
             continue
         last_d, last_c = rows[-1]
         prev = rows[-2][1] if len(rows) > 1 else None
-        month = rows[-22][1] if len(rows) > 22 else rows[0][1]
+        month_cutoff = last_d - timedelta(days=30)
+        month = next((c for d, c in reversed(rows) if d <= month_cutoff), None)
         out.append(
             {
                 "pair": p,
@@ -263,11 +264,9 @@ def crypto_paper_curve(session: Session, key: str) -> dict[str, Any]:
         if as_of is not None:
             if as_of.isoformat() != pts[-1]["time"]:
                 pts.append({"time": as_of.isoformat(), "value": round(total, 3)})
-            open_pts = [
-                {"time": pts[-1]["time"], "value": round(total, 3)},
-            ]
-            if marks:
-                open_pts.append({"time": as_of.isoformat(), "value": round(total + marks, 3)})
+            # Only one observation exists for open marks. Two points at the same
+            # timestamp violate Lightweight Charts' strictly increasing contract.
+            open_pts = [{"time": as_of.isoformat(), "value": round(total + marks, 3)}]
     return _envelope(
         kind="lines",
         title=f"{key} paper — cumulative R",

@@ -7,9 +7,8 @@ When engaged, the system must immediately stop:
 
 Design goals:
 * **Predictable on error** — a missing state file means *not engaged* (fresh
-  install). An unreadable or corrupt file is also treated as *not engaged* but
-  logged at ERROR, because silently freezing a research tool on a parse glitch
-  is worse than the operator re-engaging explicitly.
+  install). An unreadable or corrupt file is treated as *engaged* and logged at ERROR.
+  An operator must explicitly repair or release it before guarded work resumes.
 * **Cheap to check** — ``is_active()`` is a small JSON read; callers may cache
   for a single job tick but never longer.
 * **Auditable** — every transition appends to a JSONL event log.
@@ -67,20 +66,31 @@ class KillSwitch:
             raw = self._state_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return KillSwitchState.initial()
-        except OSError as exc:  # pragma: no cover - unusual
-            _log.error("killswitch.state_unreadable", path=str(self._state_path), error=str(exc))
-            return KillSwitchState.initial()
+        except (OSError, UnicodeError):
+            return self._invalid_state("unreadable")
         try:
             data = json.loads(raw)
+            if not isinstance(data, dict) or type(data.get("active")) is not bool:
+                return self._invalid_state("corrupt")
+            changed_at = datetime.fromisoformat(data["changed_at"])
+            if changed_at.tzinfo is None or changed_at.utcoffset() is None:
+                return self._invalid_state("corrupt")
             return KillSwitchState(
-                active=bool(data["active"]),
+                active=data["active"],
                 reason=str(data.get("reason", "")),
                 actor=str(data.get("actor", "unknown")),
-                changed_at=datetime.fromisoformat(data["changed_at"]),
+                changed_at=changed_at,
             )
-        except (json.JSONDecodeError, KeyError, ValueError) as exc:
-            _log.error("killswitch.state_corrupt", path=str(self._state_path), error=str(exc))
-            return KillSwitchState.initial()
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            return self._invalid_state("corrupt")
+
+    @staticmethod
+    def _invalid_state(category: str) -> KillSwitchState:
+        # Never include file contents or exception text: they may contain secrets.
+        _log.error("killswitch.state_invalid", category=category)
+        return KillSwitchState(
+            active=True, reason=f"kill-switch state {category}", actor="system", changed_at=_now()
+        )
 
     def is_active(self) -> bool:
         return self.state().active
