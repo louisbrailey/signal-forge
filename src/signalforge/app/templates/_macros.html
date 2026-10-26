@@ -108,3 +108,30 @@
   </table>
 </div>
 {% endmacro %}
+
+{% macro chart_card(id, title, url, hint='', height=300, ranges=True, base='', picker=None, options=[]) %}
+<div class="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:bg-slate-900 dark:border-slate-800">
+  <div class="mb-2 flex flex-wrap items-center gap-2">
+    <h2 class="text-sm font-semibold text-slate-900 dark:text-white">{{ title }}</h2>
+    {% if picker %}
+    <select data-chart-picker="#{{ id }}" class="rounded-md border border-slate-300 bg-transparent px-2 py-0.5 text-sm dark:border-slate-700">
+      {% for o in options %}<option value="{{ o }}" {{ 'selected' if o == picker }}>{{ o }}</option>{% endfor %}
+    </select>
+    {% endif %}
+    {% if ranges %}
+    <div class="ml-auto flex gap-1 text-xs">
+      {% for d, lab in [(30,'1M'),(90,'3M'),(365,'1Y'),(1825,'5Y'),(3650,'Max')] %}
+      <button type="button" data-range="#{{ id }}" data-days="{{ d }}"
+        class="rounded px-2 py-0.5 {{ 'bg-indigo-600 text-white' if d == 365 else 'hover:bg-slate-100 dark:hover:bg-slate-800' }}">{{ lab }}</button>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% if hint %}<p class="mb-2 text-xs text-slate-500">{{ hint }}</p>{% endif %}
+  <div id="{{ id }}" data-chart="{{ url }}" data-base="{{ base }}" data-height="{{ height }}"></div>
+</div>
+{% endmacro %}
+
+{% macro page_intro(text) %}
+<p class="mb-4 max-w-3xl text-sm text-slate-600 dark:text-slate-400">{{ text }}</p>
+{% endmacro %}

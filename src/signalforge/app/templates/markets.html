@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% from "_macros.html" import chart_card, page_intro %}
+{% block title %}Charts — Signal Forge{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold text-slate-900 dark:text-white">Charts</h1>
+{{ page_intro("Every market Signal Forge stores, charted from the newest data in the database. Charts refresh every minute on their own. These are completed daily bars (END-OF-DAY), so a chart is as current as the last close the provider has published — the line under each chart says exactly how old it is.") }}
+
+<div class="grid gap-4 xl:grid-cols-2">
+  {{ chart_card('chart-stock', 'Stocks', '/api/charts/equity/' ~ (stocks[0] if stocks else 'SPY'),
+       hint='Pick any symbol on your watchlist.', base='/api/charts/equity/',
+       picker=(stocks[0] if stocks else 'SPY'), options=stocks, height=360) }}
+  {{ chart_card('chart-fx', 'Forex', '/api/charts/fx/' ~ (fx_pairs[0] if fx_pairs else 'EURUSD'),
+       hint='UTC daily bars; weekends excluded. Click a row below to switch pair.', base='/api/charts/fx/',
+       picker=(fx_pairs[0] if fx_pairs else 'EURUSD'), options=fx_pairs, height=360) }}
+  {{ chart_card('chart-crypto', 'Crypto', '/api/charts/crypto/' ~ (crypto_pairs[0] if crypto_pairs else 'BTCUSD'),
+       hint='UTC daily bars, seven days a week. Click a row below to switch coin.', base='/api/charts/crypto/',
+       picker=(crypto_pairs[0] if crypto_pairs else 'BTCUSD'), options=crypto_pairs, height=360) }}
+  <div class="min-w-0 space-y-4">
+    <div class="min-w-0 rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:bg-slate-900 dark:border-slate-800">
+      <h2 class="mb-2 text-sm font-semibold">Forex at a glance</h2>
+      <div data-snapshot="fx" data-target="#chart-fx" class="overflow-x-auto"><span class="text-xs text-slate-400">loading…</span></div>
+    </div>
+    <div class="min-w-0 rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:bg-slate-900 dark:border-slate-800">
+      <h2 class="mb-2 text-sm font-semibold">Crypto at a glance</h2>
+      <div data-snapshot="crypto" data-target="#chart-crypto" class="overflow-x-auto"><span class="text-xs text-slate-400">loading…</span></div>
+    </div>
+  </div>
+</div>
+<p class="mt-4 text-xs text-slate-500">Research signal only — no order was placed.</p>
+{% endblock %}
