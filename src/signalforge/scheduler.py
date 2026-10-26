@@ -44,6 +44,9 @@ NO_JOB_LEVEL_LOCK_RETRY: frozenset[str] = frozenset(
         "daily_eod_update",
         "catch_up",
         "universe_update",
+        # one commit per currency pair; a job-level retry would re-request
+        # every pair against the shared provider rate limit
+        "forex_ingest",
         "approved_scope_scan",
         "catchup_scan",
         "catchup_approved_scope_scan",
@@ -457,6 +460,30 @@ def job_market_context() -> None:
 
     if get_settings().market_data_provider == "massive":
         refresh()
+
+
+def job_forex_ingest() -> None:
+    """Daily top-up of completed forex bars. Config-gated OFF
+    (``FOREX_INGEST_ENABLED``); research data only, never a signal or trade."""
+    from signalforge.config import get_settings
+    from signalforge.data.forex import ingest_forex
+    from signalforge.db.session import session_scope
+
+    settings = get_settings()
+    if not settings.forex_ingest_enabled or settings.market_data_provider != "massive":
+        _log.info("forex.ingest.skipped_disabled")
+        return
+    # Shares the provider key with the EOD equity ingest: never overlap it.
+    if not _EOD_UPDATE_LOCK.acquire(timeout=UNIVERSE_WAIT_FOR_EOD_S):
+        raise RuntimeError("forex ingest skipped: EOD update still running")
+    try:
+        with session_scope(write=True) as session:
+            rep = ingest_forex(
+                session, settings.forex_pairs.split(","), lookback_days=settings.forex_lookback_days
+            )
+        _log.info("forex.ingest", end=rep.end, written=rep.written, failed=rep.failed)
+    finally:
+        _EOD_UPDATE_LOCK.release()
 
 
 def job_daily_briefing() -> None:
@@ -1021,6 +1048,14 @@ def default_job_specs() -> list[JobSpec]:
             "Poll licensed news (config-gated OFF; U.S. sessions only; not on the decision path)",
         ),
         JobSpec("market_context", job_market_context, 24 * 60, "Bounded cross-asset context"),
+        JobSpec(
+            "forex_ingest",
+            job_forex_ingest,
+            24 * 60,
+            "Top up completed daily forex bars (config-gated OFF; research data only)",
+            cron_hour=19,
+            cron_minute=30,
+        ),
         JobSpec("daily_briefing", job_daily_briefing, 24 * 60, "Build the daily research briefing"),
         JobSpec(
             "alerts", job_alerts, 60, "Evaluate and dispatch alerts (policy-gated, OFF by default)"

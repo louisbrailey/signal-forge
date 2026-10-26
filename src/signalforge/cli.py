@@ -237,6 +237,46 @@ def providers_refresh_context() -> None:
     typer.echo(f"Recorded {count} context responses. Research signal only — no order was placed.")
 
 
+@data_app.command("forex-ingest")
+def data_forex_ingest(
+    pairs: Annotated[
+        str | None,
+        typer.Option(help="Comma-separated pairs, e.g. EURUSD,USDJPY (default: FOREX_PAIRS)."),
+    ] = None,
+    lookback_days: Annotated[
+        int | None,
+        typer.Option(
+            help="Days back for a pair with no stored bars (default: FOREX_LOOKBACK_DAYS)."
+        ),
+    ] = None,
+) -> None:
+    """Top up completed daily forex bars into fx_bar_daily. Research data only:
+    no signal, alert, candidate or paper trade reads them."""
+    from signalforge.config import get_settings
+    from signalforge.data.forex import ingest_forex, parse_pairs
+    from signalforge.db.session import session_scope
+
+    settings = get_settings()
+    chosen = parse_pairs(pairs if pairs is not None else settings.forex_pairs)
+    days = lookback_days if lookback_days is not None else settings.forex_lookback_days
+    with session_scope(write=True) as session:
+        rep = ingest_forex(session, chosen, lookback_days=days)
+    typer.echo(f"Forex daily bars through {rep.end} (UTC, END-OF-DAY):")
+    for pr in rep.pairs:
+        detail = (
+            pr.error
+            if pr.status == "failed"
+            else (
+                f"+{pr.written} written, {pr.skipped_existing} existing, "
+                f"{pr.weekend_dropped} weekend dropped, {len(pr.gaps)} weekday gaps"
+            )
+        )
+        typer.echo(f"  {pr.pair:7} {pr.status:10} {detail}")
+    typer.echo("Research data only — no order was placed.")
+    if rep.failed:
+        raise typer.Exit(1)
+
+
 @providers_app.command("verify")
 def providers_verify(
     no_store: Annotated[
