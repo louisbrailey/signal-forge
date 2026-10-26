@@ -22,6 +22,13 @@ PLIST_PATHS = sorted(LAUNCHD_DIR.glob("*.plist"))
 
 LOG_DIR_SUFFIX = "Library/Logs/signalforge/"
 
+PERSISTENT_AGENTS = {
+    "com.signalforge.api.plist",
+    "com.signalforge.worker.plist",
+    "com.signalforge.kronos.plist",
+}
+PERIODIC_AGENTS = {"com.signalforge.kronos-comparison.plist"}
+
 
 def _load(path: Path) -> dict[str, Any]:
     with path.open("rb") as fh:
@@ -36,11 +43,7 @@ def plist(request: pytest.FixtureRequest) -> tuple[Path, dict[str, Any]]:
 
 def test_expected_services_are_present() -> None:
     names = {p.name for p in PLIST_PATHS}
-    assert names == {
-        "com.signalforge.api.plist",
-        "com.signalforge.worker.plist",
-        "com.signalforge.kronos.plist",
-    }
+    assert names == PERSISTENT_AGENTS | PERIODIC_AGENTS
 
 
 def test_plist_parses_and_label_matches_filename(plist: tuple[Path, dict[str, Any]]) -> None:
@@ -51,49 +54,63 @@ def test_plist_parses_and_label_matches_filename(plist: tuple[Path, dict[str, An
 def test_program_arguments_start_with_an_absolute_venv_bin_path(
     plist: tuple[Path, dict[str, Any]],
 ) -> None:
-    """The program is an absolute path inside the plist's OWN checkout venv.
+    """Every program is absolute and comes from the PATH-leading venv.
 
-    The plists are hand-reviewed files for the one Mac that loads them, so they
-    carry that machine's absolute paths (README: "edit them if the repo lives
-    elsewhere"). Where *this* test happens to run — CI, a worktree, a clone in
-    another directory — says nothing about whether they are right. What must
-    hold everywhere is internal consistency: launchd runs with no shell, no
-    PATH inheritance and no working directory of ours, so the program must be
-    absolute and must come from ``<WorkingDirectory>/.venv/bin`` — never from a
-    venv belonging to some other tree.
+    Persistent services run from their own checkout venv. The comparison
+    collector is intentionally different: its program comes from the operating
+    checkout venv while its working directory and PYTHONPATH point at the frozen
+    research checkout. That cross-checkout split is part of the frozen protocol,
+    not an inconsistency to normalize away.
     """
-    _path, data = plist
+    path, data = plist
     args = data["ProgramArguments"]
     assert isinstance(args, list) and args
     program = Path(args[0])
     assert program.is_absolute(), program
     workdir = Path(data["WorkingDirectory"])
     assert workdir.is_absolute(), workdir
-    venv_bin = workdir / ".venv" / "bin"
-    assert program.parent == venv_bin, f"{program} is not under {venv_bin}"
+    path_venv_bin = Path(data["EnvironmentVariables"]["PATH"].split(":")[0])
+    assert program.parent == path_venv_bin
+    if path.name in PERSISTENT_AGENTS:
+        own_venv_bin = workdir / ".venv" / "bin"
+        assert program.parent == own_venv_bin, f"{program} is not under {own_venv_bin}"
 
 
 def test_path_env_leads_with_the_same_venv_bin(plist: tuple[Path, dict[str, Any]]) -> None:
-    _path, data = plist
-    venv_bin = Path(data["WorkingDirectory"]) / ".venv" / "bin"
+    path, data = plist
+    program_bin = Path(data["ProgramArguments"][0]).parent
     first = data["EnvironmentVariables"]["PATH"].split(":")[0]
-    assert Path(first) == venv_bin, f"PATH starts with {first}, expected {venv_bin}"
+    assert Path(first) == program_bin, f"PATH starts with {first}, expected {program_bin}"
+    if path.name in PERSISTENT_AGENTS:
+        own_venv_bin = Path(data["WorkingDirectory"]) / ".venv" / "bin"
+        assert Path(first) == own_venv_bin
 
 
 def test_keep_alive_and_run_at_load_are_true(plist: tuple[Path, dict[str, Any]]) -> None:
-    _path, data = plist
+    path, data = plist
     assert data["RunAtLoad"] is True
-    assert data["KeepAlive"] is True
+    if path.name in PERSISTENT_AGENTS:
+        assert data["KeepAlive"] is True
+    else:
+        assert path.name in PERIODIC_AGENTS
+        assert data.get("KeepAlive", False) is False
+        assert isinstance(data["StartInterval"], int) and data["StartInterval"] > 0
 
 
 def test_log_paths_are_under_library_logs_signalforge(plist: tuple[Path, dict[str, Any]]) -> None:
-    _path, data = plist
+    path, data = plist
     out = data["StandardOutPath"]
     err = data["StandardErrorPath"]
-    assert LOG_DIR_SUFFIX in out, out
-    assert LOG_DIR_SUFFIX in err, err
     assert Path(out).is_absolute()
     assert Path(err).is_absolute()
+    if path.name in PERSISTENT_AGENTS:
+        assert LOG_DIR_SUFFIX in out, out
+        assert LOG_DIR_SUFFIX in err, err
+    else:
+        # The one-shot collector writes bounded atomic status instead of an
+        # unbounded launchd log (docs/KRONOS-COMPARISON-COLLECTOR.md).
+        assert path.name in PERIODIC_AGENTS
+        assert out == err == "/dev/null"
 
 
 def test_worker_plist_invokes_the_scheduler_cli() -> None:
