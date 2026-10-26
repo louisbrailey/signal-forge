@@ -340,3 +340,28 @@ class StrategyPromotionEvaluation(Base, IntPK, CreatedAt):
     sealed_test_id: Mapped[int | None] = mapped_column(
         ForeignKey("strategy_sealed_test.id", ondelete="SET NULL"), default=None
     )
+
+
+class CurrencySealedTest(Base, IntPK, CreatedAt):
+    """The ONE sealed-year evaluation of an FX/crypto research strategy version.
+
+    Unique per (market, version, strategy_key): a second evaluation of the same
+    version is refused, so the sealed year can be looked at exactly once. The
+    row is written as ``IN_PROGRESS`` and committed BEFORE the sealed bars are
+    touched, so a crash mid-evaluation still consumes the look. Research only:
+    nothing reads this table to place, size or alert on a trade."""
+
+    __tablename__ = "currency_sealed_test"
+    __table_args__ = (UniqueConstraint("market", "version", "strategy_key"),)
+
+    market: Mapped[str] = mapped_column(String(16))  # FX | Crypto
+    version: Mapped[str] = mapped_column(String(32))
+    strategy_key: Mapped[str] = mapped_column(String(64))
+    sealed_from: Mapped[date] = mapped_column()
+    sealed_to: Mapped[date] = mapped_column()
+    pairs: Mapped[list[str]] = mapped_column(JSON, default=list)
+    data_sha256: Mapped[str] = mapped_column(String(64), default="")
+    dev_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    verdict: Mapped[str] = mapped_column(String(16), default="IN_PROGRESS")
+    evaluated_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
