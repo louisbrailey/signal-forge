@@ -393,6 +393,14 @@ class OptionsShortVertical:
     #: ``strategies.base.declared_regime_lag_sessions`` reads this off the class.
     regime_lag_sessions = 1
 
+    #: D5a §3.5, re-derived at the $3,600 aggregate by Amendment 2 §3.3:
+    #: floor(3600 / 801.60) = 4 concurrent structures. Pre-registered at k = 0 for
+    #: v0.1.2; the evidence assembler and the sensitivity grid both apply it, with
+    #: ascending-symbol priority and refused entries counted
+    #: ``skipped_portfolio_concurrency`` (gate-8 evidence). Implementing a
+    #: pre-registered rule before the first look is not a version change.
+    portfolio_concurrency_cap = 4
+
     def __init__(
         self,
         params: ShortVerticalParams | None = None,

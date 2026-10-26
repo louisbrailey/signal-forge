@@ -1100,6 +1100,7 @@ def coverage_preflight(
 # pooling the per-underlying runs into one population
 # --------------------------------------------------------------------------- #
 _COUNTER_INT_FIELDS = (
+    "skipped_portfolio_concurrency",
     "non_entry_missing_leg_bar",
     "non_entry_no_signal_window",
     "force_close_unpriceable_exclusions",
@@ -1160,7 +1161,49 @@ def _pool_outcome(
     )
 
 
-def pool_dual(reports: Sequence[DualSpreadReport], *, label: str = "") -> DualSpreadReport:
+def cap_concurrent(
+    trades: Sequence[OptionTrade], cap: int | None
+) -> tuple[list[OptionTrade], list[OptionTrade]]:
+    """Apply the pre-registered portfolio concurrency cap (D5a §3.5; Amendment 2 §3.3).
+
+    Candidates are taken in entry-date order and, on the same date, in ASCENDING
+    underlying symbol — the deliberately outcome-independent priority the
+    pre-registration fixes (anything keyed on credit, IV, delta or price would be a
+    selection channel). A structure occupies a slot from its entry date through its
+    exit date inclusive, so a slot freed by an exit is reusable from the next
+    session, never the same one. Returns ``(kept, skipped)``; ``cap=None`` keeps all.
+    """
+    ordered = sorted(trades, key=lambda t: (t.entry_date, t.underlying_symbol))
+    if cap is None:
+        return ordered, []
+    if cap < 1:
+        raise ValueError("a portfolio concurrency cap must be >= 1")
+    kept: list[OptionTrade] = []
+    skipped: list[OptionTrade] = []
+    for t in ordered:
+        open_now = sum(1 for k in kept if k.entry_date <= t.entry_date <= k.exit_date)
+        (kept if open_now < cap else skipped).append(t)
+    return kept, skipped
+
+
+def _with_trades(
+    outcome: OptionsBacktestOutcome, trades: list[OptionTrade], skipped: int
+) -> OptionsBacktestOutcome:
+    from dataclasses import replace
+
+    counters = replace(
+        outcome.counters, exit_deferred_sessions=list(outcome.counters.exit_deferred_sessions)
+    )
+    counters.skipped_portfolio_concurrency += skipped
+    return replace(outcome, trades=trades, counters=counters)
+
+
+def pool_dual(
+    reports: Sequence[DualSpreadReport],
+    *,
+    label: str = "",
+    concurrency_cap: int | None = None,
+) -> DualSpreadReport:
     """One :class:`DualSpreadReport` over every underlying's population.
 
     The four cells are recomputed by ``options_backtest_runner._cells_for`` — the
@@ -1174,6 +1217,15 @@ def pool_dual(reports: Sequence[DualSpreadReport], *, label: str = "") -> DualSp
     name = label or f"POOLED({len(reports)})"
     base = _pool_outcome([r.baseline for r in reports], label=name)
     stress = _pool_outcome([r.stressed for r in reports], label=name)
+    if concurrency_cap is not None:
+        # The cap is decided on the BASELINE population and the SAME structures are
+        # kept in the stressed one (D5 §6.2c form (a): matched by identity, never
+        # re-selected), so the two cells always describe identical trades.
+        kept, skipped = cap_concurrent(base.trades, concurrency_cap)
+        keys = {(t.underlying_symbol, t.entry_date) for t in kept}
+        stress_kept = [t for t in stress.trades if (t.underlying_symbol, t.entry_date) in keys]
+        base = _with_trades(base, kept, len(skipped))
+        stress = _with_trades(stress, stress_kept, len(stress.trades) - len(stress_kept))
     return DualSpreadReport(
         cells=_cells_for(base) | _cells_for(stress), baseline=base, stressed=stress
     )
@@ -1735,9 +1787,15 @@ def assemble_options_evidence(
     )
 
     if evaluable:
-        dual = pool_dual([r.dual for r in evaluable if r.dual is not None])
+        cap = getattr(strategy, "portfolio_concurrency_cap", None)
+        dual = pool_dual([r.dual for r in evaluable if r.dual is not None], concurrency_cap=cap)
         mech_reports = [r.mechanical for r in evaluable if r.mechanical is not None]
-        mechanical = pool_dual(mech_reports) if mech_reports else None
+        mechanical = pool_dual(mech_reports, concurrency_cap=cap) if mech_reports else None
+        if cap is not None and dual.baseline.counters.skipped_portfolio_concurrency:
+            notes.append(
+                f"portfolio concurrency cap {cap} (D5a §3.5): "
+                f"{dual.baseline.counters.skipped_portfolio_concurrency} entries skipped"
+            )
     else:
         dual = _empty_dual(strategy.selection_cost_model)
         mechanical = None

@@ -61,6 +61,7 @@ from signalforge.db.models import DataSnapshot
 from signalforge.observability import get_logger
 from signalforge.research.options_evidence import (
     OptionsStrategy,
+    cap_concurrent,
     resolve_option_data_source,
     run_underlying,
 )
@@ -210,8 +211,11 @@ def cache_key(
     """
     if not q_series_digest:
         raise ValueError("cache_key needs the q-series digest; an empty one is not a key")
+    # ``cc1``: grids cached before the D5a §3.5 portfolio cap was applied measured
+    # a different population; the schema tag makes every such entry a miss.
     return (
-        f"{version}__{snapshot_key}__{options_config_hash or 'nohash'}__q{q_series_digest[:32]}"
+        f"{version}__{snapshot_key}__{options_config_hash or 'nohash'}"
+        f"__q{q_series_digest[:32]}__cc1"
     ).replace("/", "_")
 
 
@@ -421,7 +425,10 @@ def _evaluate_point(
         if run.dual is None:
             continue
         trades.extend(_presealed(run.dual.baseline.trades, presealed_window))
-        skipped += run.dual.baseline.counters.non_entry_no_signal_window
+    # The same pre-registered portfolio cap the evidence assembler applies
+    # (D5a §3.5): a grid cell must measure the population the gates will see.
+    trades, capped = cap_concurrent(trades, getattr(strat, "portfolio_concurrency_cap", None))
+    skipped = len(capped)
     if not trades:
         return 0, 0.0, 0.0, skipped
     rs = [t.pnl_r for t in trades]
