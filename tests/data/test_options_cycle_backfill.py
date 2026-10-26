@@ -395,6 +395,7 @@ def test_the_run_records_its_own_parameters_and_the_ceiling_raise(session: Sessi
     assert prov["pacing_s"] == 7.5  # the pacing ACTUALLY used, not a literal
     assert prov["ladder_id"] == "LADDER_17"
     assert prov["cycle_rule"] == "monthly_third_friday"
+    assert prov["cycle_expiry_adjustment"] == "holiday_preceding_session"
     assert prov["options_config_hash"] == "abc123"
     assert prov["require_shares_per_contract"] == 100
     assert run.kind == "options_cycle_backfill"

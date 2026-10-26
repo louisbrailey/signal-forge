@@ -46,6 +46,7 @@ from signalforge.data.adapters.massive_options import MassiveOptionsAdapter, Opt
 from signalforge.data.calendar import sessions as _sessions
 from signalforge.data.options_cycles import (
     BASIS_NONE,
+    CYCLE_EXPIRY_ADJUSTMENT,
     CYCLE_RULE_MONTHLY_THIRD_FRIDAY,
     EXCL_BAR_BUDGET_EXHAUSTED,
     EXCL_CONTRACT_FETCH_FAILED,
@@ -1041,6 +1042,7 @@ def _cycle_provenance(
         "window_start": caps.window_start.isoformat(),
         "window_end": caps.window_end.isoformat(),
         "cycle_rule": caps.cycle_rule,
+        "cycle_expiry_adjustment": CYCLE_EXPIRY_ADJUSTMENT,
         "dte_entry_min": caps.dte_entry_min,
         "dte_entry_max": caps.dte_entry_max,
         "strike_band_pct": caps.strike_band_pct,
@@ -1225,6 +1227,7 @@ _IDENTITY_KEYS: frozenset[str] = frozenset(
         "window_start",
         "window_end",
         "cycle_rule",
+        "cycle_expiry_adjustment",
         "dte_entry_min",
         "dte_entry_max",
         "strike_band_pct",
@@ -1251,10 +1254,14 @@ def _refuse_parameter_drift(run: IngestionRun, provenance: dict[str, object]) ->
     stored = dict((run.gaps_json or {}).get(_RUN_PROVENANCE_KEY, {}) or {})
     if not stored:
         return  # a run from before provenance was recorded structurally
+    # ``cycle_expiry_adjustment`` is compared even when the stored blob predates
+    # it: a run keyed on unadjusted calendar Fridays has a different cycle set
+    # (its holiday cycles came back ``no_contracts_returned``), so continuing it
+    # under the adjusted rule would splice two datasets.
     drift = {
         k: (stored.get(k), provenance.get(k))
         for k in _IDENTITY_KEYS
-        if k in stored and stored.get(k) != provenance.get(k)
+        if (k in stored or k == "cycle_expiry_adjustment") and stored.get(k) != provenance.get(k)
     }
     if drift:
         raise ValueError(
