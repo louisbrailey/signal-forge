@@ -135,7 +135,7 @@ def test_the_options_spec_is_distinguishable_without_hashing_it_at_all() -> None
 def test_the_options_spec_is_complete_and_experimental() -> None:
     spec = OptionsShortVertical().spec()
     assert spec.missing_fields() == []
-    assert spec.version == VERSION == "0.1.2"  # D5a Amendment 2 (OP-1)
+    assert spec.version == VERSION == "0.1.3"  # D5a Amendment 4 (OR-F15)
     assert spec.horizon is Horizon.MEDIUM_SWING  # OQ-1 ratified, D5a §5
     assert spec.status.value == "experimental"
     assert "authorises NO order" in spec.notes
@@ -154,7 +154,9 @@ def test_the_params_are_exactly_the_d5a_pre_registration() -> None:
     0.50 -> 0.0.  Amendment 2 moved two more under OP-1's $900 cap: ``width_usd``
     $2.00 -> $8.00 (the widest $1-ladder width with ``8 x 100 + 1.60 <= 900``) and
     ``min_credit_to_width`` 0.10 -> 0.150 (the rounded-down median of the $8
-    attainable ratios; 0.10 would admit 29 of 30 cells there).
+    attainable ratios; 0.10 would admit 29 of 30 cells there).  Amendment 4 (v0.1.3,
+    OR-F15) moved ``min_credit_to_width`` 0.150 -> 0.130, the rounded-down median of
+    the POOLED put + call attainable ratios (Amendment 2 §4.6).
     """
     p = ShortVerticalParams()
     assert (
@@ -164,7 +166,7 @@ def test_the_params_are_exactly_the_d5a_pre_registration() -> None:
         p.dte_target,
         p.profit_target_pct,
         p.min_credit_to_width,
-    ) == (0.20, 0.35, 2.0, 35, 0.50, 0.150)
+    ) == (0.20, 0.35, 2.0, 35, 0.50, 0.130)
     assert (p.width_usd, p.time_stop_dte) == (8.00, 7)
     assert (p.dte_window_lo, p.dte_window_hi) == (28, 45)
     assert (p.delta_tolerance, p.width_tolerance_pct) == (0.05, 0.0)
@@ -197,7 +199,7 @@ def test_the_declared_grid_is_six_axes_and_ninety_six_points() -> None:
     # the width is a declared CONSTANT of the version, never an axis
     assert "width_usd" not in axes
     assert OAT_PARAMETERS["width_usd"] == (2.00, 8.00)  # v0.1.1 width as the control
-    assert axes["min_credit_to_width"] == [0.150, 0.155]
+    assert axes["min_credit_to_width"] == [0.130, 0.150]
     assert axes["stop_multiple"] == [2.0, 3.0]
 
 

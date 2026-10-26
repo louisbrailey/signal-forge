@@ -111,7 +111,7 @@ v1's limits would still refuse every O3 structure.
 |---|---|---|
 | OP-1 | Per-structure / aggregate caps | **Closed 2026-09-23: $900 / $3,600** |
 | OP-4 | Aggregate leg | Closed as a limit; 4-structure concurrency cap applies (IMPL-3.3 open) |
-| OR-F15 | Band population (put-only vs pooled) | Open, orchestrator, before the first look |
+| OR-F15 | Band population (put-only vs pooled) | **Decided 2026-10-26: pooled band, v0.1.3** |
 
 
 ## Addendum 4 (2026-10-04): the first options evaluation runs on the index ETFs only
@@ -130,9 +130,13 @@ pre-flight now judges a snapshot on its own underlyings, at the same floors.
 
 | # | Item | Status |
 |---|---|---|
-| OR-0c | Gate 0.c read pooled over the set (SPY, QQQ, IWM: 0.902) or per symbol (QQQ and IWM are 0.882 each, leaving SPY alone) | **Open — before the first `--confirm`** |
-| OR-F15 | Band population (put-only vs pooled) | Open, unchanged |
+| OR-0c | Gate 0.c read pooled over the set (SPY, QQQ, IWM: 0.902) or per symbol (QQQ and IWM are 0.882 each, leaving SPY alone) | **Decided 2026-10-26: pooled** (see line below) |
+| OR-F15 | Band population (put-only vs pooled) | **Decided 2026-10-26: pooled band, v0.1.3** |
 | IMPL-3.3 | 4-structure concurrency cap | **Implemented 2026-10-26** (`options_evidence.cap_concurrent`; see addendum) |
+
+OR-0c: DECIDED pooled — 2026-10-26, operator Louis Brailey (instructed in chat; recorded by Claude). The evaluated set stays SPY/QQQ/IWM; floors unchanged; `--confirm` still requires `--accept-pooled-coverage OR-0c`. Ref: options_designs/OR-0c_DECISION_MEMO_2026-10-06.md.
+
+OR-F15: DECIDED pooled band — 2026-10-26, operator Louis Brailey (instructed in chat; recorded by Claude). Adopt the pooled put + call credit-floor band 0.110 / 0.130 / 0.150 as **v0.1.3** (D5a Amendment 4). Disclosure: chosen after the development-window rejection breakdown (0 of 11 setups cleared the v0.1.2 floor); no sealed data was consulted.
 
 *Decision memo: `options_designs/OR-0c_DECISION_MEMO_2026-10-06.md` (states both readings, the numbers, and how to record either decision; decides nothing).*
 

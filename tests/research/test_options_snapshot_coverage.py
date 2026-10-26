@@ -693,14 +693,16 @@ def test_a_member_below_the_continuity_floor_alone_is_also_reported(session: Ses
     assert [row[0] for row in pre.members_below_floor] == ["QQQ"]
 
 
-def test_the_repository_records_or0c_as_open() -> None:
-    """Nobody but the operator marks it decided; the committed file says Open."""
+def test_the_repository_records_the_operators_or0c_decision() -> None:
+    """The operator decided OR-0c pooled on 2026-10-26; the committed file carries
+    exactly that line, dated and attributed (OR-0c memo, "How the operator records")."""
     from signalforge.research import options_evidence as oe
 
     assert oe.OR0C_DECISIONS_FILE.is_file()
-    assert not oe.or0c_pooled_decision_recorded()
+    assert oe.or0c_pooled_decision_recorded()
     text = oe.OR0C_DECISIONS_FILE.read_text(encoding="utf-8")
-    assert "| OR-0c |" in text and "Open" in text
+    line = next(ln for ln in text.splitlines() if ln.startswith("OR-0c: DECIDED pooled"))
+    assert "2026-10-26" in line and "operator" in line
 
 
 def test_the_or0c_decision_line_is_parsed_strictly(tmp_path: Path) -> None:
@@ -825,9 +827,16 @@ def test_evaluate_confirm_refuses_a_below_floor_member_without_the_flag(
 
 
 def test_evaluate_confirm_refuses_the_flag_while_the_decisions_file_says_open(
-    session: Session, no_worker: None
+    session: Session, no_worker: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The flag alone is not a decision: the committed file still says Open."""
+    """The flag alone is not a decision: a decisions file that says Open refuses it."""
+    from signalforge.research import options_evidence as oe
+
+    still_open = tmp_path / "decisions.md"
+    still_open.write_text(
+        "| OR-0c | Gate 0.c read pooled or per symbol | **Open** |\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(oe, "OR0C_DECISIONS_FILE", still_open)
     key = _evaluable_snapshot_with_a_weak_member(session)
     res = runner.invoke(
         app, _evaluate_args(key, "--confirm", "--grid", "--accept-pooled-coverage", "OR-0c")
