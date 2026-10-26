@@ -5,12 +5,39 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{% block title %}Signal Forge{% endblock %}</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config = { darkMode: 'media' };</script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/htmx/2.0.3/htmx.min.js"></script>
-  <style>[data-disclaimer]{position:sticky;top:0;z-index:50}</style>
+  {% if user %}
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js" defer></script>
+  <script src="/static/sf-charts.js" defer></script>
+  {% endif %}
+  <style>
+    [data-disclaimer]{position:sticky;top:0;z-index:50}
+    /* readable defaults for the many existing table/card pages */
+    main table{width:100%;border-collapse:collapse}
+    main th{font-weight:600;text-align:left}
+    main th,main td{padding:.35rem .5rem}
+    main tbody tr:nth-child(even){background:rgba(148,163,184,.08)}
+    main section,main .card{border-radius:.75rem}
+    @media (prefers-color-scheme: dark){
+      body{background:#0b1220;color:#e2e8f0}
+      main .bg-white,main section.bg-white{background:#111a2e!important;border-color:#1e293b!important}
+      main .text-slate-900,main .text-slate-800{color:#f1f5f9!important}
+      main .text-slate-600,main .text-slate-500{color:#94a3b8!important}
+      main .border-slate-200,main .border-slate-300{border-color:#1e293b!important}
+      main .bg-slate-50,main .bg-slate-100{background:#0f172a!important}
+      input,select,textarea{background:#0f172a!important;color:#e2e8f0!important;border-color:#334155!important}
+      label,.text-slate-700{color:#cbd5e1!important}
+      button.bg-slate-900{background:#4f46e5!important}
+      main .bg-amber-50{background:#2a1d05!important;color:#fde68a!important}
+      main .bg-red-50{background:#2a0b0b!important;color:#fecaca!important}
+      main .bg-emerald-50{background:#062a1c!important;color:#a7f3d0!important}
+    }
+  </style>
 </head>
-<body class="h-full bg-slate-50 text-slate-800">
-  <div data-disclaimer class="bg-amber-100 border-b border-amber-300 text-amber-900 text-xs sm:text-sm">
-    <div class="mx-auto max-w-6xl px-4 py-2">
+<body class="h-full bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-200">
+  <div data-disclaimer class="bg-amber-100 border-b border-amber-300 text-amber-900 text-xs dark:bg-amber-950 dark:text-amber-100 dark:border-amber-800">
+    <div class="px-4 py-1.5">
       <strong>Research &amp; education only — not financial advice.</strong>
       {{ not_advice_notice }}
       No brokerage is ever contacted; no order is ever placed.
@@ -19,44 +46,92 @@
   </div>
 
   {% if user %}
-  {% set navitems = [
-      ('overview.html','/','Overview'), ('scanner.html','/scanner','Scanner'),
-      ('briefing.html','/briefing','Briefing'),
-      ('portfolio.html','/portfolio','Portfolio'), ('strategies.html','/strategies','Strategy Lab'),
-      ('strategy_promotion.html','/strategies/promotion','Strategy Promotion'),
-      ('paper_probation.html','/paper-probation','Paper Probation'),
-      ('paper_console.html','/paper-console','Paper Operations'),
-      ('kronos.html','/kronos','Kronos Research'),
-      ('journal.html','/journal','Journal'), ('options.html','/options','Options (learn)'),
-      ('news.html','/news','News'),
-      ('universe.html','/universe','Universe'),
-      ('grid.html','/grid','Grid'),
-      ('agents.html','/agents','Agents'),
-      ('ops_status.html','/ops','Ops'),
-      ('settings.html','/settings','Settings') ] %}
-  <nav class="border-b border-slate-200 bg-white">
-    <div class="mx-auto flex max-w-6xl flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 text-sm">
-      <a href="/" class="font-semibold text-slate-900">Signal&nbsp;Forge</a>
-      {% for key, href, label in navitems %}
-      <a href="{{ href }}"
-         class="rounded px-2 py-1 {{ 'bg-slate-900 text-white' if nav_active == key else 'text-slate-600 hover:bg-slate-100' }}">{{ label }}</a>
-      {% endfor %}
-      <span class="ml-auto flex items-center gap-2 text-slate-500">
-        <span>{{ user.username }}</span>
-        <form method="post" action="/logout">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-          <button class="rounded border border-slate-300 px-2 py-1 hover:bg-slate-50">Sign out</button>
-        </form>
-      </span>
+  {% set navgroups = [
+      ('Home', [
+          ('overview.html','/','Overview','At-a-glance: money, markets, alerts'),
+          ('briefing.html','/briefing','Daily briefing','Today in plain English')]),
+      ('Markets', [
+          ('markets.html','/markets','Charts','Stocks, forex & crypto charts'),
+          ('scanner.html','/scanner','Scanner','Today\'s trade ideas'),
+          ('news.html','/news','News','Licensed headlines'),
+          ('universe.html','/universe','Universe','Which stocks are tracked')]),
+      ('Paper trading', [
+          ('paper_console.html','/paper-console','Paper operations','Simulated trades, live status'),
+          ('crypto_paper.html','/crypto-paper','Crypto paper','Simulated crypto book'),
+          ('paper_probation.html','/paper-probation','Paper probation','Strategies on trial'),
+          ('portfolio.html','/portfolio','Portfolio','Your positions & imports'),
+          ('journal.html','/journal','Journal','Notes on trades'),
+          ('grid.html','/grid','Grid','Mechanical grid book')]),
+      ('Research', [
+          ('strategies.html','/strategies','Strategy lab','Backtests & evidence'),
+          ('strategy_promotion.html','/strategies/promotion','Promotion gates','What passed, what failed'),
+          ('kronos.html','/kronos','Kronos AI','Forecast research'),
+          ('options.html','/options','Options (learn)','Simulator & education'),
+          ('agents.html','/agents','Agents','Automated research reports')]),
+      ('System', [
+          ('ops_status.html','/ops','Health','Worker, jobs & data feeds'),
+          ('settings.html','/settings','Settings','Switches & kill switch')]) ] %}
+  {% set ns = namespace(title='') %}
+  {% for g, items in navgroups %}{% for key, href, label, hint in items %}{% if nav_active == key %}{% set ns.title = label %}{% endif %}{% endfor %}{% endfor %}
+
+  <div class="flex min-h-[calc(100%-2rem)]">
+    <aside class="hidden lg:block w-60 shrink-0 border-r border-slate-200 bg-white dark:bg-slate-900 dark:border-slate-800">
+      <div class="sticky top-8 h-[calc(100vh-2rem)] overflow-y-auto px-3 py-4">
+        <a href="/" class="mb-4 flex items-center gap-2 px-2 text-base font-bold text-slate-900 dark:text-white">
+          <span class="inline-block h-6 w-6 rounded-md bg-gradient-to-br from-indigo-500 to-emerald-500"></span>
+          Signal&nbsp;Forge
+        </a>
+        {% for g, items in navgroups %}
+        <div class="mt-4 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">{{ g }}</div>
+        <ul class="mt-1 space-y-0.5">
+          {% for key, href, label, hint in items %}
+          <li><a href="{{ href }}" title="{{ hint }}"
+            class="block rounded-md px-2 py-1.5 text-sm {{ 'bg-indigo-600 text-white' if nav_active == key else 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800' }}">{{ label }}</a></li>
+          {% endfor %}
+        </ul>
+        {% endfor %}
+      </div>
+    </aside>
+
+    <div class="min-w-0 flex-1">
+      <header class="sticky top-8 z-40 border-b border-slate-200 bg-white/90 backdrop-blur dark:bg-slate-900/90 dark:border-slate-800">
+        <div class="flex items-center gap-3 px-4 py-2">
+          <details class="lg:hidden relative">
+            <summary class="cursor-pointer list-none rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-700">☰ Menu</summary>
+            <nav class="absolute left-0 mt-2 w-64 max-h-[70vh] overflow-y-auto rounded-lg border border-slate-200 bg-white p-2 shadow-lg dark:bg-slate-900 dark:border-slate-700">
+              {% for g, items in navgroups %}
+              <div class="mt-2 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">{{ g }}</div>
+              {% for key, href, label, hint in items %}
+              <a href="{{ href }}" class="block rounded px-2 py-1.5 text-sm {{ 'bg-indigo-600 text-white' if nav_active == key else 'hover:bg-slate-100 dark:hover:bg-slate-800' }}">{{ label }}</a>
+              {% endfor %}
+              {% endfor %}
+            </nav>
+          </details>
+          <div class="truncate text-sm font-semibold text-slate-900 dark:text-white">{{ ns.title or 'Signal Forge' }}</div>
+          <div id="status-strip" class="ml-auto flex items-center gap-2 text-xs"
+               hx-get="/ui/status-strip" hx-trigger="load, every 60s" hx-swap="innerHTML">
+            <span class="text-slate-400">checking status…</span>
+          </div>
+          <span class="hidden md:inline text-xs text-slate-500">{{ user.username }}</span>
+          <form method="post" action="/logout">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button class="rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800">Sign out</button>
+          </form>
+        </div>
+      </header>
+      <main class="mx-auto max-w-7xl px-4 py-6">{% block content %}{% endblock %}</main>
+      <footer class="mx-auto max-w-7xl px-4 py-8 text-xs text-slate-400">
+        Signal Forge v{{ app_version }} · local-first · paper-trading only ·
+        every recommendation is a hypothetical research output.
+      </footer>
     </div>
-  </nav>
-  {% endif %}
-
-  <main class="mx-auto max-w-6xl px-4 py-6">{% block content %}{% endblock %}</main>
-
+  </div>
+  {% else %}
+  <main class="mx-auto max-w-6xl px-4 py-6">{% block auth_content %}{{ self.content() }}{% endblock %}</main>
   <footer class="mx-auto max-w-6xl px-4 py-8 text-xs text-slate-400">
     Signal Forge v{{ app_version }} · local-first · paper-trading only ·
     every recommendation is a hypothetical research output.
   </footer>
+  {% endif %}
 </body>
 </html>

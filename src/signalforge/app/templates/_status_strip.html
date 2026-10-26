@@ -1,0 +1,13 @@
+{% if kill.active %}
+<a href="/settings" class="whitespace-nowrap rounded-full bg-red-600 px-2.5 py-1 font-semibold text-white" title="{{ kill.reason }}">⛔ <span class="hidden sm:inline">Kill switch </span>ON</a>
+{% else %}
+<a href="/settings" class="whitespace-nowrap rounded-full bg-emerald-100 px-2.5 py-1 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-200" title="Kill switch is clear">●<span class="hidden sm:inline"> Running</span></a>
+{% endif %}
+{% if stale %}
+<a href="/ops" class="whitespace-nowrap rounded-full bg-amber-100 px-2.5 py-1 text-amber-900 dark:bg-amber-900/50 dark:text-amber-100"
+   title="{% for f in stale %}{{ f.provider }} last updated {{ f.age_hours }}h ago&#10;{% endfor %}">⚠ {{ stale|length }}<span class="hidden sm:inline"> feed{{ 's' if stale|length != 1 }}</span> stale</a>
+{% else %}
+<a href="/ops" class="whitespace-nowrap rounded-full bg-slate-100 px-2.5 py-1 text-slate-700 dark:bg-slate-800 dark:text-slate-200"
+   title="{% for f in feeds %}{{ f.provider }}: {{ f.age_hours }}h ago ({{ f.latency }})&#10;{% endfor %}">✓ <span class="hidden sm:inline">Data fresh · end-of-day</span><span class="sm:hidden">Data</span></a>
+{% endif %}
+<span class="hidden md:inline text-slate-400" title="This bar refreshes every 60 seconds">updated {{ generated_at }}</span>

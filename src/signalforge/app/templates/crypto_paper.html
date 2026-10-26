@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% from "_macros.html" import chart_card, page_intro %}
+{% block title %}Crypto paper — Signal Forge{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold text-slate-900 dark:text-white">Crypto paper book</h1>
+{{ page_intro("A SIMULATED forward test: the crypto strategy that passed its one-time sealed test is followed day by day on prices it has never seen. Results are in R — one R is the amount risked on a trade. No broker is connected and no order is ever placed.") }}
+
+{% for b in books %}
+<section class="mb-6 space-y-4">
+  <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+    {% set cards = [
+      ('Closed trades', b.closed_trades|string),
+      ('Average per trade', ('%+.2fR'|format(b.expectancy_r)) if b.expectancy_r is not none else 'none yet'),
+      ('Total', '%+.2fR'|format(b.total_r) ~ ' (≈ $' ~ '{:,.0f}'.format(b.illustrative_usd) ~ ')'),
+      ('Sealed-year average', ('%+.2fR'|format(b.sealed_expectancy_r)) if b.sealed_expectancy_r is not none else '—') ] %}
+    {% for label, val in cards %}
+    <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:bg-slate-900 dark:border-slate-800">
+      <div class="text-xs text-slate-500">{{ label }}</div>
+      <div class="mt-1 text-xl font-semibold tabular-nums">{{ val }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  <p class="text-sm text-slate-600 dark:text-slate-400">
+    <strong>{{ b.strategy_key }}</strong> ({{ b.version }}) · counting trades from {{ b.start_date }} to {{ b.observation_end }} ·
+    prices through {{ b.last_bar_date or '—' }}{% if b.skipped_kill_switch %} · {{ b.skipped_kill_switch }} trade(s) declined while the kill switch was on{% endif %}
+  </p>
+  {{ chart_card('chart-cp-' ~ loop.index, 'Cumulative result (R)', '/api/charts/paper/crypto/' ~ b.strategy_key, ranges=False, height=260,
+       hint='Solid line: closed trades. Dashed: including open trades at the latest close.') }}
+  <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:bg-slate-900 dark:border-slate-800">
+    <h2 class="mb-2 text-sm font-semibold">Open trades</h2>
+    {% if b.open %}
+    <table class="text-sm"><thead><tr><th>Coin</th><th>Direction</th><th>Since</th><th class="text-right">Entry</th><th class="text-right">Stop</th><th class="text-right">Now</th></tr></thead><tbody>
+      {% for o in b.open %}<tr><td>{{ o.pair }}</td><td>{{ o.direction|lower }}</td><td>{{ o.entry_date }}</td>
+        <td class="text-right tabular-nums">{{ '{:,.2f}'.format(o.entry_price) }}</td><td class="text-right tabular-nums">{{ '{:,.2f}'.format(o.stop_price) }}</td>
+        <td class="text-right tabular-nums">{{ ('%+.2fR'|format(o.mark_r)) if o.mark_r is not none else '—' }}</td></tr>{% endfor %}
+    </tbody></table>
+    {% else %}<p class="text-sm text-slate-500">No open trades. A trade starts when a daily close breaks the 55-day high or low.</p>{% endif %}
+    {% if b.divergences %}<p class="mt-2 text-sm text-amber-700">⚠ {{ b.divergences|length }} stored trade(s) disagree with a fresh replay: {{ b.divergences|join('; ') }}</p>{% endif %}
+  </div>
+</section>
+{% else %}
+<div class="rounded-xl border border-dashed border-slate-300 p-6 text-sm text-slate-600 dark:border-slate-700">
+  No crypto paper book yet. A book can only be started for a strategy that passed its sealed test:
+  <code class="font-mono">signalforge crypto paper start crypto_donchian_55 --confirm</code>
+</div>
+{% endfor %}
+<p class="mt-4 text-xs text-slate-500">SIMULATED paper book. Research signal only — no order was placed.</p>
+{% endblock %}
