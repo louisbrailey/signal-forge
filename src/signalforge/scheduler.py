@@ -534,7 +534,12 @@ def job_crypto_paper() -> None:
         for key in keys:
             if get_book(session, key) is None:
                 continue
-            rep = run_cycle(session, key)
+            try:
+                rep = run_cycle(session, key)
+            except Exception as exc:  # one failing book must not stop the others
+                session.rollback()
+                _log.error("crypto.paper.cycle_failed", strategy=key, error=str(exc)[:200])
+                continue
             _log.info(
                 "crypto.paper.cycle",
                 strategy=key,

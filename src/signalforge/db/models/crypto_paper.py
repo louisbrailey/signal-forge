@@ -52,7 +52,9 @@ class CryptoPaperTrade(Base, IntPK, CreatedAt):
     entry_date: Mapped[date] = mapped_column()
     entry_price: Mapped[float] = mapped_column(Float)
     stop_price: Mapped[float] = mapped_column(Float)
-    status: Mapped[str] = mapped_column(String(8), default="OPEN")  # OPEN | CLOSED
+    status: Mapped[str] = mapped_column(
+        String(8), default="OPEN"
+    )  # OPEN | CLOSED | SKIPPED (declined under kill switch)
     exit_date: Mapped[date | None] = mapped_column(default=None)
     exit_price: Mapped[float | None] = mapped_column(Float, default=None)
     exit_reason: Mapped[str | None] = mapped_column(String(16), default=None)

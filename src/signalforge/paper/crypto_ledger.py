@@ -18,8 +18,9 @@ What it is not
 Safety rules
     * A book can only be created for a strategy whose current version has a
       ``SEALED_PASS`` sealed test, and only with an explicit confirmation.
-    * The kill switch blocks OPENING (no new trade row is recorded while it is
-      engaged) and never blocks CLOSING or marking existing trades.
+    * The kill switch blocks OPENING and never blocks CLOSING or marking
+      existing trades. A trade declined while it is engaged is stored as
+      ``SKIPPED`` so a later cycle (switch released) can never open it late.
     * CLOSED rows are immutable. If a replay disagrees with a stored trade
       (e.g. the vendor revised a bar), the disagreement is written to
       ``divergence`` and the stored values are kept.
@@ -175,8 +176,27 @@ def run_cycle(session: Session, key: str, *, now: datetime | None = None) -> Cyc
             still_open = t.exit_reason == "eod" and t.exit_date == last_bar
             tag = f"{pair} {t.direction.value} {t.entry_date}"
             row = stored.get(t.entry_date)
+            if row is not None and row.status == "SKIPPED":
+                continue  # declined while the kill switch was engaged — never opened later
             if row is None:
                 if engaged:
+                    # Record the refusal durably: a later cycle (switch released)
+                    # replays the same history and must not open this trade late.
+                    session.add(
+                        CryptoPaperTrade(
+                            book_id=book.id,
+                            pair=pair,
+                            direction=t.direction.value,
+                            entry_date=t.entry_date,
+                            entry_price=t.entry_price,
+                            stop_price=_signal_stop(strat, series, index[t.entry_date]),
+                            status="SKIPPED",
+                            exit_reason="kill_switch",
+                            costs_bps=t.costs_bps,
+                            reason=t.reason[:64],
+                            divergence="",
+                        )
+                    )
                     rep.skipped_open_kill_switch.append(tag)
                     continue
                 row = CryptoPaperTrade(
@@ -222,7 +242,7 @@ def run_cycle(session: Session, key: str, *, now: datetime | None = None) -> Cyc
                 row.mark_r = None
                 rep.closed.append(f"{tag} {t.exit_reason} {t.pnl_r:+.2f}R")
         for entry, row in stored.items():
-            if entry not in seen:
+            if entry not in seen and row.status != "SKIPPED":
                 note = "replay no longer produces this trade"
                 if row.divergence != note:
                     row.divergence = note
@@ -278,6 +298,7 @@ def status(session: Session, key: str) -> dict[str, Any]:
             if r.status == "OPEN"
         ],
         "closed_trades": len(closed),
+        "skipped_kill_switch": sum(1 for r in rows if r.status == "SKIPPED"),
         "expectancy_r": (sum(pnl) / len(pnl)) if pnl else None,
         "total_r": sum(pnl),
         "illustrative_usd": sum(pnl) * book.risk_usd_per_trade,

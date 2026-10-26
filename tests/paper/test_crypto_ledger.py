@@ -152,7 +152,8 @@ def test_kill_switch_blocks_opening_but_not_closing(session: Session) -> None:
         get_kill_switch().release(reason="test", actor="test")
 
     after = {r.entry_date: r.status for r in session.scalars(select(CryptoPaperTrade))}
-    assert set(after) == set(before)  # nothing new opened
+    new_rows = {d: st for d, st in after.items() if d not in before}
+    assert all(st == "SKIPPED" for st in new_rows.values())  # nothing new opened
     assert rep.skipped_open_kill_switch  # and it says so
     for d in open_before:  # an open trade still closes/marks normally
         row = session.scalar(select(CryptoPaperTrade).where(CryptoPaperTrade.entry_date == d))
@@ -198,3 +199,35 @@ def test_scheduled_cycle_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(cl, "run_cycle", lambda *a, **k: called.append(True))
     scheduler.job_crypto_paper()
     assert called == []
+
+
+def test_a_trade_declined_under_the_kill_switch_is_never_opened_later(session: Session) -> None:
+    closes = _closes()
+    _sealed(session)
+    cl.start_book(session, KEY, now=datetime(2020, 6, 1, tzinfo=UTC))
+    _add_bars(session, closes, 0, 500)
+    cl.run_cycle(session, KEY, now=NOW)
+
+    get_kill_switch().engage(reason="test", actor="test")
+    try:
+        _add_bars(session, closes, 500, len(closes))
+        rep = cl.run_cycle(session, KEY, now=NOW)
+    finally:
+        get_kill_switch().release(reason="test", actor="test")
+    declined = {
+        r.entry_date
+        for r in session.scalars(
+            select(CryptoPaperTrade).where(CryptoPaperTrade.status == "SKIPPED")
+        )
+    }
+    assert declined and len(declined) == len(rep.skipped_open_kill_switch)
+
+    rep2 = cl.run_cycle(session, KEY, now=NOW)  # switch released: replay sees them again
+
+    assert rep2.opened == [] and rep2.skipped_open_kill_switch == []
+    for d in declined:
+        row = session.scalar(select(CryptoPaperTrade).where(CryptoPaperTrade.entry_date == d))
+        assert row is not None and row.status == "SKIPPED" and row.pnl_r is None
+    st = cl.status(session, KEY)
+    assert st["skipped_kill_switch"] == len(declined)
+    assert all(o["entry_date"] not in {d.isoformat() for d in declined} for o in st["open"])
