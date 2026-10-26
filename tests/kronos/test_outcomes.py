@@ -38,7 +38,8 @@ def test_costs_and_cohorts_use_stored_inputs():
     assert r["status"] == "mature"
     assert 0 < r["net_fixed_horizon_return"] < 0.02
     assert r["mae"] == 0 and r["baseline_mae"] == 2
-    assert r["cohorts"] == ["kronos_positive", "disagreement"]
+    assert r["cohorts"] == ["kronos_positive"]
+    assert r["strategy_context"] == "unavailable_no_candidate"
     assert r["observations"] == bars
 
 
@@ -94,3 +95,13 @@ def test_outcome_store_is_idempotent_and_source_readonly(db_url, tmp_path):
     report = shadow_status(ledger)
     assert report["outcomes"] == {"excluded": 1}
     assert report["recent_outcomes"][0]["reason"] == "legacy_without_frozen_context"
+
+
+def test_agreement_requires_recorded_candidate_context():
+    p, t, bars = example()
+    p["candidate_snapshot"] = [
+        {"created_at": "2026-10-18T11:00:00+00:00", "direction": "LONG", "gate": "PASSED"}
+    ]
+    assert evaluate(p, t, bars)["cohorts"] == ["strategy_positive", "kronos_positive", "agreement"]
+    p["candidate_snapshot"][0]["gate"] = "NO_TRADE"
+    assert evaluate(p, t, bars)["cohorts"] == ["kronos_positive", "disagreement"]

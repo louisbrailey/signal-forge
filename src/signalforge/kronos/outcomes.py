@@ -78,12 +78,13 @@ def evaluate(payload: dict[str, Any], generated: str, bars: list[dict[str, Any]]
             cohorts.append("kronos_positive")
         if strategy_positive and kronos_positive:
             cohorts.append("agreement")
-        if strategy_positive != kronos_positive:
+        if candidates and strategy_positive != kronos_positive:
             cohorts.append("disagreement")
         return {
             "status": "mature",
             "protocol": PROTOCOL,
             "cohorts": cohorts,
+            "strategy_context": "recorded" if candidates else "unavailable_no_candidate",
             "net_fixed_horizon_return": net,
             "mae": mean(abs(p - b["close"]) for p, b in zip(predicted, bars, strict=True)),
             "baseline_mae": mean(abs(base - b["close"]) for b in bars),

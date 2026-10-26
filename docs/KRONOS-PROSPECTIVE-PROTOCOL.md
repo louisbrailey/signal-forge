@@ -21,6 +21,7 @@ for 20-session diagnostics; do not blend horizons. Snapshot all candidate IDs, v
 rejections. This is a bounded sampled watchlist, not all strategy opportunities.
 
 Report strategy-positive, Kronos-positive, agreement and disagreement cohorts.
+An absent candidate means unavailable comparison context, not disagreement.
 They overlap. Forecast windows and instruments are correlated. Returns are a
 one-share next-session-open to terminal-close diagnostic: default project costs
 (zero commission, 3 bps slippage each side, half of 5 bps spread each side).

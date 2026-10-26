@@ -14,8 +14,8 @@
 <p>Unvalidated research. Research signal only — no order was placed.</p>
 <h3 class="font-semibold mt-4">Prospective outcome diagnostics</h3>
 <p class="text-sm">{{ shadow.outcomes or 'No resolved outcomes yet.' }} Older records without frozen context are excluded. Pending horizons require complete future sessions. These fixed-horizon comparisons are not strategy P&amp;L or evidence of profitability.</p>
-<table class="text-sm w-full"><caption>Latest persisted outcomes, separated by horizon</caption><thead><tr><th>Symbol</th><th>Sessions</th><th>Outcome</th><th>Net diagnostic return</th><th>Price MAE / baseline (USD)</th></tr></thead><tbody>
-{% for o in shadow.recent_outcomes %}<tr><td>{{ o.symbol }}</td><td>{{ o.horizon }}</td><td>{{ o.status }} {{ o.reason or '' }}</td><td>{{ ('%.3f%%'|format(o.net_fixed_horizon_return * 100)) if o.status == 'mature' else '—' }}</td><td>{{ ('%.3f / %.3f'|format(o.mae, o.baseline_mae)) if o.status == 'mature' else '—' }}</td></tr>{% endfor %}
+<table class="text-sm w-full"><caption>Latest persisted outcomes, separated by horizon</caption><thead><tr><th>Symbol</th><th>Sessions</th><th>Outcome</th><th>Comparison context</th><th>Net diagnostic return</th><th>Price MAE / baseline (USD)</th></tr></thead><tbody>
+{% for o in shadow.recent_outcomes %}<tr><td>{{ o.symbol }}</td><td>{{ o.horizon }}</td><td>{{ o.status }} {{ o.reason or '' }}</td><td>{{ (o.strategy_context or 'unavailable')|replace('_', ' ') }} {{ (o.cohorts or [])|join(', ') }}</td><td>{{ ('%.3f%%'|format(o.net_fixed_horizon_return * 100)) if o.status == 'mature' else '—' }}</td><td>{{ ('%.3f / %.3f'|format(o.mae, o.baseline_mae)) if o.status == 'mature' else '—' }}</td></tr>{% endfor %}
 </tbody></table>
 </section>
 <div class="my-4 border border-amber-400 bg-amber-50 rounded p-4"><strong>HISTORICAL REPLAY · experimental AI research</strong><p>{{ runtime.notice }}</p><p>Research signal only — no order was placed.</p></div>
