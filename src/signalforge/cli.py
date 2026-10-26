@@ -433,6 +433,98 @@ def crypto_research(
     typer.echo("Research only — no order was placed.")
 
 
+@fx_app.command("sealed-test")
+def fx_sealed_test(
+    strategy: Annotated[str, typer.Argument(help="Strategy key, e.g. fx_zfade_20.")],
+    confirm: Annotated[
+        bool,
+        typer.Option("--confirm", help="Required: the sealed year can be evaluated only once."),
+    ] = False,
+    pairs: Annotated[
+        str | None, typer.Option(help="Comma-separated pairs (default: FOREX_PAIRS).")
+    ] = None,
+) -> None:
+    """ONE-TIME sealed-year test of a strategy that passes development.
+    Refused if the strategy is not DEV_PASS or already used its sealed year."""
+    from signalforge.config import get_settings
+    from signalforge.data.forex import parse_pairs
+    from signalforge.db.session import session_scope
+    from signalforge.research.fx.sealed import (
+        SealedTestRefused,
+        describe,
+        existing,
+        run_sealed_test,
+    )
+
+    with session_scope(write=True) as session:
+        prior = existing(session, "fx", strategy)
+        if prior is not None:
+            typer.echo(describe(prior))
+            typer.echo("Already evaluated; the sealed year is used. Research only.")
+            return
+        if not confirm:
+            typer.echo("Refusing without --confirm: the sealed year can be evaluated only once.")
+            raise typer.Exit(2)
+        try:
+            row = run_sealed_test(
+                session,
+                "fx",
+                strategy,
+                parse_pairs(pairs if pairs is not None else get_settings().forex_pairs),
+            )
+        except SealedTestRefused as exc:
+            typer.echo(f"Refused: {exc}")
+            raise typer.Exit(1) from None
+        typer.echo(describe(row))
+    typer.echo("Research only — no order was placed.")
+
+
+@crypto_app.command("sealed-test")
+def crypto_sealed_test(
+    strategy: Annotated[str, typer.Argument(help="Strategy key, e.g. crypto_zfade_20.")],
+    confirm: Annotated[
+        bool,
+        typer.Option("--confirm", help="Required: the sealed year can be evaluated only once."),
+    ] = False,
+    pairs: Annotated[
+        str | None, typer.Option(help="Comma-separated pairs (default: CRYPTO_PAIRS).")
+    ] = None,
+) -> None:
+    """ONE-TIME sealed-year test of a strategy that passes development.
+    Refused if the strategy is not DEV_PASS or already used its sealed year."""
+    from signalforge.config import get_settings
+    from signalforge.data.forex import CRYPTO, parse_pairs
+    from signalforge.db.session import session_scope
+    from signalforge.research.fx.sealed import (
+        SealedTestRefused,
+        describe,
+        existing,
+        run_sealed_test,
+    )
+
+    with session_scope(write=True) as session:
+        prior = existing(session, "crypto", strategy)
+        if prior is not None:
+            typer.echo(describe(prior))
+            typer.echo("Already evaluated; the sealed year is used. Research only.")
+            return
+        if not confirm:
+            typer.echo("Refusing without --confirm: the sealed year can be evaluated only once.")
+            raise typer.Exit(2)
+        try:
+            row = run_sealed_test(
+                session,
+                "crypto",
+                strategy,
+                parse_pairs(pairs if pairs is not None else get_settings().crypto_pairs, CRYPTO),
+            )
+        except SealedTestRefused as exc:
+            typer.echo(f"Refused: {exc}")
+            raise typer.Exit(1) from None
+        typer.echo(describe(row))
+    typer.echo("Research only — no order was placed.")
+
+
 @providers_app.command("verify")
 def providers_verify(
     no_store: Annotated[

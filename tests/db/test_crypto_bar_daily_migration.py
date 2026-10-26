@@ -30,4 +30,5 @@ def test_upgrade_creates_the_table_and_downgrade_removes_only_it(db_url: str) ->
     assert {"pair", "session_date", "open", "high", "low", "close", "source"} <= cols
     command.downgrade(cfg, PARENT)
     after = set(inspect(create_engine(db_url)).get_table_names())
-    assert before - after == {"crypto_bar_daily"}
+    assert "crypto_bar_daily" in before - after
+    assert before - after <= {"crypto_bar_daily", "currency_sealed_test"}
