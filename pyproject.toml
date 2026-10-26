@@ -581,3 +581,9 @@ name = "Cross-asset context cannot drive signals, risk or paper execution"
 type = "forbidden"
 source_modules = ["signalforge.research.strategies", "signalforge.risk", "signalforge.paper", "signalforge.execution", "signalforge.backtest"]
 forbidden_modules = ["signalforge.data.market_context"]
+
+[[tool.importlinter.contracts]]
+name = "Operating pipelines cannot import isolated comparison experiments"
+type = "forbidden"
+source_modules = ["signalforge.research", "signalforge.risk", "signalforge.paper", "signalforge.execution", "signalforge.backtest", "signalforge.scheduler", "signalforge.app", "signalforge.alerts", "signalforge.kronos"]
+forbidden_modules = ["signalforge.experiments"]

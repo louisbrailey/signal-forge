@@ -153,7 +153,9 @@ def test_the_equity_caller_allowlist_is_repaired_to_path_equality() -> None:
     """The template this twin is copied from must not keep its basename hole."""
     existing = (Path(__file__).parent / "test_activation_guards.py").read_text()
     assert "p.name in manual_ok" not in existing
-    assert 'manual_ok = {"paper/ledger.py", "cli.py"}' in existing
+    # The third explicitly named caller writes only isolated comparison DBs.
+    # Keep EXACT paths, never a basename or a broad experiments/ prefix.
+    assert 'manual_ok = {"paper/ledger.py", "cli.py", "experiments/comparison.py"}' in existing
     assert "rel in manual_ok" in existing
 
 
