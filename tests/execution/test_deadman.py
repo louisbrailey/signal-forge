@@ -5,10 +5,9 @@ a lapse blocks opening (``may_open``'s D1) and a lapse blocks **nothing** on the
 close lane (``may_close`` has no D1 to fail, and ``build_close_intent`` never
 consults one). Drill V2.
 
-``killswitch.py`` is untouched by all of this, and one test asserts that it still
-reads a corrupt file as NOT engaged — because the whole design rests on the two
-modules having opposite error semantics, and a future "fix" to the kill switch
-would silently delete the distinction.
+Both the shared kill switch and the execution-specific K2 reader now block
+opening on corrupt state. Their independent guards remain in place; protective
+closing still does not depend on the shared kill-switch read.
 """
 
 from __future__ import annotations
@@ -155,13 +154,8 @@ def test_a_lapse_blocks_nothing_on_the_close_lane() -> None:
     assert {c.name for c in decision.checks} == {"C-P1", "C-P2", "C-P3", "C-P4", "C-P5"}
 
 
-def test_the_kill_switch_itself_is_still_fail_open(tmp_path: object) -> None:
-    """The design rests on the two modules having OPPOSITE error semantics.
-
-    ``killswitch.py`` reads a corrupt file as NOT engaged, deliberately, across
-    39 call sites. If that ever changes silently, the reason the execution layer
-    needed its own K2 state disappears with it.
-    """
+def test_the_shared_kill_switch_also_fails_closed(tmp_path: object) -> None:
+    """Corruption blocks shared callers as well as the independent K2 guard."""
     from pathlib import Path
 
     from signalforge.killswitch import KillSwitch
@@ -170,4 +164,4 @@ def test_the_kill_switch_itself_is_still_fail_open(tmp_path: object) -> None:
     state_path.write_text("{not json", encoding="utf-8")
     switch = KillSwitch(state_path=state_path, log_path=Path(str(tmp_path)) / "ks.log")
 
-    assert switch.state().active is False
+    assert switch.state().active is True

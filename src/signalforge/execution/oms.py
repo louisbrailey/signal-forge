@@ -647,19 +647,10 @@ def assert_terminal(state: OrderState) -> None:
 # §8 — the execution-local kill state (K2), the submission lock, the drain
 # ---------------------------------------------------------------------------
 #
-# FACT: ``killswitch.py`` is deliberately fail-OPEN — its own docstring says a
-# missing state file means *not engaged*, and an unreadable or corrupt file is
-# ALSO treated as not engaged but logged at ERROR, "because silently freezing a
-# research tool on a parse glitch is worse than the operator re-engaging
-# explicitly". That is right for a research tool and wrong for order submission.
-#
-# It is not changed. There are 39 ``ensure_not_engaged()`` call sites and
-# flipping fail-open to fail-closed would silently alter all of them. Instead a
-# SEPARATE, execution-only kill state is added whose unreadable/corrupt case
-# BLOCKS. Nothing else reads it. Missing evidence of safety is not evidence of
-# safety — but a MISSING file is not an unreadable one: a fresh install has
-# simply never engaged it, which is what ``killswitch.py`` means by a missing
-# file too, and §8 names the unreadable/corrupt case specifically.
+# K2 retains an independent execution-only state file and readability flag.
+# Both this reader and the shared kill switch block on unreadable/corrupt state.
+# A missing file remains the fresh-install inactive state. The separate K2 gate
+# is retained; protective closing must not depend on either opening guard.
 
 
 @dataclass(frozen=True, slots=True)

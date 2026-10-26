@@ -28,7 +28,7 @@ from signalforge.db.models import (
 from signalforge.domain import Direction, Horizon, LatencyCategory, QualityGate, StrategyStatus
 from signalforge.experiments import comparison as c
 from signalforge.experiments.report import finalize, paired_interval
-from signalforge.killswitch import KillSwitchEngaged, get_kill_switch
+from signalforge.killswitch import KillSwitch, KillSwitchEngaged, get_kill_switch
 from signalforge.paper.ledger import accept_candidate
 from signalforge.settings_store import set_setting
 
@@ -417,8 +417,13 @@ def test_foreign_keys_and_storage_cap_on_private_connections(experiment):
     engine.dispose()
 
 
-def test_pinned_operating_kill_switch_blocks_even_from_other_checkout(experiment):
+def test_pinned_operating_kill_switch_blocks_even_from_other_checkout(experiment, monkeypatch):
     source, directory, _, _ = experiment
+    # Actually model a different checkout: its shared guard reads a different,
+    # inactive state file, so the pinned operating-state guard must still block.
+    monkeypatch.setattr(
+        "signalforge.killswitch._default", KillSwitch(source.parent / "other-kill.json")
+    )
     (source.parent / "kill_switch.json").write_text('{"active": true}')
     with (
         freeze_time("2026-10-26 21:00:00"),

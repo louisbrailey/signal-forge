@@ -231,3 +231,33 @@ def test_a_trade_declined_under_the_kill_switch_is_never_opened_later(session: S
     st = cl.status(session, STRATEGY)
     assert st["skipped_kill_switch"] == len(declined)
     assert all(o["entry_date"] not in {d.isoformat() for d in declined} for o in st["open"])
+
+
+def test_crypto_chart_open_marks_have_unique_timestamps(session: Session) -> None:
+    from signalforge.app.charts import crypto_paper_curve
+
+    _sealed(session)
+    book = cl.start_book(session, STRATEGY, now=NOW)
+    book.last_bar_date = NOW.date() + timedelta(days=3)
+    session.add(
+        CryptoPaperTrade(
+            book_id=book.id,
+            pair="BTCUSD",
+            direction="long",
+            entry_date=NOW.date() + timedelta(days=1),
+            entry_price=100,
+            stop_price=90,
+            status="OPEN",
+            mark_r=0.5,
+            marked_at=book.last_bar_date,
+            costs_bps=1,
+            reason="test",
+            divergence="",
+        )
+    )
+    session.commit()
+    chart = crypto_paper_curve(session, STRATEGY)
+    for series in chart["series"]:
+        times = [point["time"] for point in series["data"]]
+        assert times == sorted(set(times))
+    assert chart["series"][1]["data"] == [{"time": book.last_bar_date.isoformat(), "value": 0.5}]
