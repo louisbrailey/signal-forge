@@ -21,10 +21,10 @@ from sqlalchemy.orm import Session
 from signalforge.db.models import (
     Candidate,
     CryptoBarDaily,
-    GridTradeRow,
     CryptoPaperBook,
     CryptoPaperTrade,
     FxBarDaily,
+    GridTradeRow,
     Instrument,
     OHLCVDaily,
     PaperAccount,
