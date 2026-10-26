@@ -1,4 +1,9 @@
-"""Forex daily-bar ingest (Massive Currencies) — research data only.
+"""Forex and crypto daily-bar ingest (Massive Currencies) — research data only.
+
+One code path serves both markets of the Currencies plan; a ``DailyMarket``
+names the ticker prefix, the table, the feed label and whether the market
+trades at weekends. Crypto trades every day, so its weekend bars are real
+sessions and are kept; forex weekend bars are thin partials and are dropped.
 
 Fetches completed UTC-day aggregates for a configured list of currency pairs
 into ``fx_bar_daily``. Nothing here creates a signal, candidate, alert, paper
@@ -33,7 +38,7 @@ from sqlalchemy.orm import Session
 from signalforge.config import get_settings
 from signalforge.data.adapters.base import AdapterCapability, AdapterError
 from signalforge.data.ingest import record_feed_failure, record_feed_success
-from signalforge.db.models import FxBarDaily
+from signalforge.db.models import CryptoBarDaily, FxBarDaily
 from signalforge.db.types import utcnow
 from signalforge.domain import FeedType, LatencyCategory
 from signalforge.killswitch import ensure_not_engaged
@@ -43,7 +48,6 @@ _log = get_logger("data.forex")
 
 PROVIDER = "massive_fx"
 _BASE_URL = "https://api.massive.com"
-_PAIR_RE = re.compile(r"[A-Z]{6}")
 _MAX_PAIRS = 40
 _MAX_ATTEMPTS = 4
 _RATE_LIMIT_BACKOFF_S = 61.0
@@ -63,17 +67,70 @@ CAPABILITY = AdapterCapability(
     is_simulated=False,
 )
 
+CRYPTO_PROVIDER = "massive_crypto"
+CRYPTO_CAPABILITY = AdapterCapability(
+    provider_name=CRYPTO_PROVIDER,
+    feed_type=FeedType.BAR_DAILY,
+    latency_category=LatencyCategory.END_OF_DAY,
+    supports_point_in_time=True,
+    entitlement_note=(
+        "Currencies Starter: completed UTC-day crypto aggregates, seven days a week. "
+        "END-OF-DAY only; volume is base-asset units. "
+        "Research data only — no strategy, alert or paper path reads it."
+    ),
+    rate_limit_per_min=None,
+    is_simulated=False,
+)
 
-def parse_pairs(raw: str | Sequence[str]) -> list[str]:
-    """Normalise ``"EURUSD, usdjpy"`` / ``["C:EURUSD"]`` to unique 6-letter pairs."""
+
+@dataclass(frozen=True, slots=True)
+class DailyMarket:
+    name: str
+    prefix: str  # provider ticker prefix: C (forex) | X (crypto)
+    pair_re: re.Pattern[str]
+    example: str
+    model: type[FxBarDaily] | type[CryptoBarDaily]
+    volume_column: str
+    capability: AdapterCapability
+    trades_weekends: bool
+
+    @property
+    def provider(self) -> str:
+        return self.capability.provider_name
+
+
+FOREX = DailyMarket(
+    name="forex",
+    prefix="C",
+    pair_re=re.compile(r"[A-Z]{6}"),
+    example="EURUSD",
+    model=FxBarDaily,
+    volume_column="tick_volume",
+    capability=CAPABILITY,
+    trades_weekends=False,
+)
+CRYPTO = DailyMarket(
+    name="crypto",
+    prefix="X",
+    pair_re=re.compile(r"[A-Z0-9]{2,10}USD"),
+    example="BTCUSD",
+    model=CryptoBarDaily,
+    volume_column="volume",
+    capability=CRYPTO_CAPABILITY,
+    trades_weekends=True,
+)
+
+
+def parse_pairs(raw: str | Sequence[str], market: DailyMarket = FOREX) -> list[str]:
+    """Normalise ``"EURUSD, usdjpy"`` / ``["C:EURUSD"]`` to unique pairs."""
     items = raw.split(",") if isinstance(raw, str) else list(raw)
     out: list[str] = []
     for item in items:
-        p = item.strip().upper().removeprefix("C:").replace("/", "")
+        p = item.strip().upper().removeprefix(f"{market.prefix}:").replace("/", "").replace("-", "")
         if not p:
             continue
-        if not _PAIR_RE.fullmatch(p):
-            raise ValueError(f"invalid currency pair {item!r}: expected six letters, e.g. EURUSD")
+        if not market.pair_re.fullmatch(p):
+            raise ValueError(f"invalid {market.name} pair {item!r}: expected e.g. {market.example}")
         if p not in out:
             out.append(p)
     if len(out) > _MAX_PAIRS:
@@ -81,18 +138,18 @@ def parse_pairs(raw: str | Sequence[str]) -> list[str]:
     return out
 
 
-def last_completed_fx_day(now: datetime | None = None) -> date:
-    """The most recent fully completed UTC weekday."""
+def last_completed_fx_day(now: datetime | None = None, *, trades_weekends: bool = False) -> date:
+    """The most recent fully completed UTC day (weekday only for forex)."""
     d = (now or datetime.now(UTC)).astimezone(UTC).date() - timedelta(days=1)
-    while d.weekday() >= 5:
+    while not trades_weekends and d.weekday() >= 5:
         d -= timedelta(days=1)
     return d
 
 
-def fx_weekdays(start: date, end: date) -> list[date]:
+def fx_weekdays(start: date, end: date, *, trades_weekends: bool = False) -> list[date]:
     out, d = [], start
     while d <= end:
-        if d.weekday() < 5:
+        if trades_weekends or d.weekday() < 5:
             out.append(d)
         d += timedelta(days=1)
     return out
@@ -104,7 +161,9 @@ class ParsedBars:
     weekend_dropped: int = 0
 
 
-def parse_bars(body: dict[str, Any], *, start: date, end: date) -> ParsedBars:
+def parse_bars(
+    body: dict[str, Any], *, start: date, end: date, trades_weekends: bool = False
+) -> ParsedBars:
     """Validate a ``/v2/aggs`` forex response. Any malformed bar rejects the
     whole response — a pair is either stored whole or not at all."""
     rows = body.get("results") or []
@@ -130,7 +189,7 @@ def parse_bars(body: dict[str, Any], *, start: date, end: date) -> ParsedBars:
             raise ValueError("inconsistent OHLC")
         if not start <= d <= end:
             raise ValueError("bar outside the requested window")
-        if d.weekday() >= 5:
+        if not trades_weekends and d.weekday() >= 5:
             out.weekend_dropped += 1
             continue
         v = r.get("v")
@@ -143,7 +202,7 @@ def parse_bars(body: dict[str, Any], *, start: date, end: date) -> ParsedBars:
                 "high": h,
                 "low": lo,
                 "close": c,
-                "tick_volume": float(v) if v is not None and math.isfinite(float(v)) else None,
+                "volume": float(v) if v is not None and math.isfinite(float(v)) else None,
                 "vwap": float(vw) if vw is not None and math.isfinite(float(vw)) else None,
                 "transactions": int(n) if n is not None else None,
             }
@@ -162,7 +221,9 @@ class ForexClient:
         client: httpx.Client | None = None,
         spacing_s: float | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        prefix: str = "C",
     ) -> None:
+        self._prefix = prefix
         settings = get_settings()
         self._key = settings.market_data_api_key.get_secret_value() if api_key is None else api_key
         self._client = client
@@ -176,7 +237,7 @@ class ForexClient:
         if not self._key:
             raise AdapterError("forex: MARKET_DATA_API_KEY missing")
         path = (
-            f"/v2/aggs/ticker/C:{pair}/range/1/day/{start.isoformat()}/{end.isoformat()}"
+            f"/v2/aggs/ticker/{self._prefix}:{pair}/range/1/day/{start.isoformat()}/{end.isoformat()}"
             f"?adjusted=true&sort=asc&limit={_PAGE_LIMIT}"
         )
         last_status: int | None = None
@@ -259,11 +320,10 @@ class ForexIngestReport:
         return [p.pair for p in self.pairs if p.status == "failed"]
 
 
-def _latest_stored(session: Session, pair: str) -> date | None:
+def _latest_stored(session: Session, market: DailyMarket, pair: str) -> date | None:
+    m = market.model
     return session.scalar(
-        select(func.max(FxBarDaily.session_date)).where(
-            FxBarDaily.pair == pair, FxBarDaily.source == PROVIDER
-        )
+        select(func.max(m.session_date)).where(m.pair == pair, m.source == market.provider)
     )
 
 
@@ -275,20 +335,51 @@ def ingest_forex(
     client: ForexClient | None = None,
     now: datetime | None = None,
 ) -> ForexIngestReport:
+    """Top up each forex pair (see :func:`ingest_daily`)."""
+    return ingest_daily(
+        session, pairs, market=FOREX, lookback_days=lookback_days, client=client, now=now
+    )
+
+
+def ingest_crypto(
+    session: Session,
+    pairs: Sequence[str],
+    *,
+    lookback_days: int,
+    client: ForexClient | None = None,
+    now: datetime | None = None,
+) -> ForexIngestReport:
+    """Top up each crypto pair (see :func:`ingest_daily`)."""
+    return ingest_daily(
+        session, pairs, market=CRYPTO, lookback_days=lookback_days, client=client, now=now
+    )
+
+
+def ingest_daily(
+    session: Session,
+    pairs: Sequence[str],
+    *,
+    market: DailyMarket,
+    lookback_days: int,
+    client: ForexClient | None = None,
+    now: datetime | None = None,
+) -> ForexIngestReport:
     """Top up each pair from its newest stored bar (or ``lookback_days`` back)
-    to the last completed UTC weekday. Idempotent: an existing
+    to the last completed UTC day. Idempotent: an existing
     (pair, date, source) row is never rewritten."""
     if lookback_days <= 0:
         raise ValueError("lookback_days must be positive")
-    pairs = parse_pairs(pairs)
-    client = client or ForexClient()
-    end = last_completed_fx_day(now)
+    pairs = parse_pairs(pairs, market)
+    client = client or ForexClient(prefix=market.prefix)
+    weekends = market.trades_weekends
+    m = market.model
+    end = last_completed_fx_day(now, trades_weekends=weekends)
     rep = ForexIngestReport(end=end.isoformat())
     for pair in pairs:
         ensure_not_engaged()
         pr = PairReport(pair=pair)
         rep.pairs.append(pr)
-        latest = _latest_stored(session, pair)
+        latest = _latest_stored(session, market, pair)
         start = (latest + timedelta(days=1)) if latest else end - timedelta(days=lookback_days)
         session.commit()  # release any read transaction before network I/O
         if start > end:
@@ -297,29 +388,29 @@ def ingest_forex(
         pr.requested_from, pr.requested_to = start.isoformat(), end.isoformat()
         try:
             body = client.daily(pair, start, end)
-            parsed = parse_bars(body, start=start, end=end)
+            parsed = parse_bars(body, start=start, end=end, trades_weekends=weekends)
         except (AdapterError, ValueError, KeyError, TypeError, OverflowError) as exc:
             pr.status = "failed"
             pr.error = str(exc)[:200]
             record_feed_failure(
                 session,
-                PROVIDER,
+                market.provider,
                 FeedType.BAR_DAILY,
                 pr.error,
                 rate_limited=bool(getattr(exc, "rate_limited", False)),
-                capability=CAPABILITY,
+                capability=market.capability,
             )
             session.commit()
-            _log.warning("forex.pair_failed", pair=pair, error=pr.error)
+            _log.warning(f"{market.name}.pair_failed", pair=pair, error=pr.error)
             continue
         pr.weekend_dropped = parsed.weekend_dropped
         existing = set(
             session.scalars(
-                select(FxBarDaily.session_date).where(
-                    FxBarDaily.pair == pair,
-                    FxBarDaily.source == PROVIDER,
-                    FxBarDaily.session_date >= start,
-                    FxBarDaily.session_date <= end,
+                select(m.session_date).where(
+                    m.pair == pair,
+                    m.source == market.provider,
+                    m.session_date >= start,
+                    m.session_date <= end,
                 )
             )
         )
@@ -328,23 +419,29 @@ def ingest_forex(
             if bar["session_date"] in existing:
                 pr.skipped_existing += 1
                 continue
+            fields = dict(bar)
+            fields[market.volume_column] = fields.pop("volume")
             session.add(
-                FxBarDaily(
+                m(
                     pair=pair,
-                    source=PROVIDER,
+                    source=market.provider,
                     latency_category=LatencyCategory.END_OF_DAY,
                     ingested_at=stamp,
                     quality_flags=[],
-                    **bar,
+                    **fields,
                 )
             )
             pr.written += 1
         have = existing | {b["session_date"] for b in parsed.bars}
-        pr.gaps = [d.isoformat() for d in fx_weekdays(start, end) if d not in have]
-        record_feed_success(session, CAPABILITY)
+        pr.gaps = [
+            d.isoformat()
+            for d in fx_weekdays(start, end, trades_weekends=weekends)
+            if d not in have
+        ]
+        record_feed_success(session, market.capability)
         session.commit()
         _log.info(
-            "forex.pair",
+            f"{market.name}.pair",
             pair=pair,
             written=pr.written,
             skipped=pr.skipped_existing,

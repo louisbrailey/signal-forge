@@ -277,6 +277,43 @@ def data_forex_ingest(
         raise typer.Exit(1)
 
 
+@data_app.command("crypto-ingest")
+def data_crypto_ingest(
+    pairs: Annotated[
+        str | None,
+        typer.Option(help="Comma-separated pairs, e.g. BTCUSD,ETHUSD (default: CRYPTO_PAIRS)."),
+    ] = None,
+    lookback_days: Annotated[
+        int | None,
+        typer.Option(
+            help="Days back for a pair with no stored bars (default: CRYPTO_LOOKBACK_DAYS)."
+        ),
+    ] = None,
+) -> None:
+    """Top up completed daily crypto bars into crypto_bar_daily. Research data
+    only: no signal, alert, candidate or paper trade reads them."""
+    from signalforge.config import get_settings
+    from signalforge.data.forex import CRYPTO, ingest_crypto, parse_pairs
+    from signalforge.db.session import session_scope
+
+    settings = get_settings()
+    chosen = parse_pairs(pairs if pairs is not None else settings.crypto_pairs, CRYPTO)
+    days = lookback_days if lookback_days is not None else settings.crypto_lookback_days
+    with session_scope(write=True) as session:
+        rep = ingest_crypto(session, chosen, lookback_days=days)
+    typer.echo(f"Crypto daily bars through {rep.end} (UTC, END-OF-DAY, 7 days/week):")
+    for pr in rep.pairs:
+        detail = (
+            pr.error
+            if pr.status == "failed"
+            else (f"+{pr.written} written, {pr.skipped_existing} existing, {len(pr.gaps)} day gaps")
+        )
+        typer.echo(f"  {pr.pair:9} {pr.status:10} {detail}")
+    typer.echo("Research data only — no order was placed.")
+    if rep.failed:
+        raise typer.Exit(1)
+
+
 @providers_app.command("verify")
 def providers_verify(
     no_store: Annotated[
