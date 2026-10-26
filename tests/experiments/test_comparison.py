@@ -503,3 +503,20 @@ def test_operating_database_cannot_be_disguised_as_experiment(experiment, tmp_pa
     with pytest.raises(sqlite3.OperationalError, match="comparison_manifest"):
         c.advance(alias)
     assert c.file_hash(source) == before
+
+
+def test_source_capture_is_one_read_snapshot_with_concurrent_writer(experiment):
+    source, _, _, _ = experiment
+    with sqlite3.connect(source) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+        engine = c.source_engine(source)
+        with Session(engine) as reader:
+            before = reader.scalar(text("SELECT name FROM strategy WHERE id=1"))
+            writer.execute("UPDATE strategy SET name='concurrent-change' WHERE id=1")
+            writer.commit()
+            assert reader.scalar(text("SELECT name FROM strategy WHERE id=1")) == before
+            reader.rollback()
+            assert (
+                reader.scalar(text("SELECT name FROM strategy WHERE id=1")) == "concurrent-change"
+            )
+        engine.dispose()

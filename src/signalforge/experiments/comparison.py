@@ -94,7 +94,19 @@ def code_hash() -> str:
 def source_engine(path: Path) -> Engine:
     if not path.is_file():
         raise ValueError("Source database must exist")
-    return create_engine("sqlite:///" + path.resolve().as_uri() + "?mode=ro&uri=true")
+    engine = create_engine("sqlite:///" + path.resolve().as_uri() + "?mode=ro&uri=true")
+
+    @event.listens_for(engine, "connect")
+    def readonly_connection(connection: Any, record: Any) -> None:
+        connection.isolation_level = None
+
+    @event.listens_for(engine, "begin")
+    def snapshot(connection: Any) -> None:
+        # SQLite legacy mode otherwise does not BEGIN on SELECT: a source
+        # writer could change rows between reads in one logical Session.
+        connection.exec_driver_sql("BEGIN")
+
+    return engine
 
 
 def _private_engine(path: Path) -> Engine:
