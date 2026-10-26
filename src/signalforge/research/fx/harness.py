@@ -37,8 +37,14 @@ from signalforge.backtest.metrics import compute_metrics
 from signalforge.backtest.montecarlo import bootstrap_ci
 from signalforge.backtest.walkforward import run_walkforward
 from signalforge.data.series import PriceSeries
-from signalforge.db.models import FxBarDaily
-from signalforge.research.fx.strategies import FX_STRATEGIES, FX_STRATEGY_VERSION, FxStrategy
+from signalforge.db.models import CryptoBarDaily, FxBarDaily
+from signalforge.research.fx.strategies import (
+    CRYPTO_STRATEGIES,
+    CRYPTO_STRATEGY_VERSION,
+    FX_STRATEGIES,
+    FX_STRATEGY_VERSION,
+    FxStrategy,
+)
 
 FX_SOURCE = "massive_fx"
 
@@ -55,6 +61,54 @@ FX_SPREAD_BPS: dict[str, float] = {
     "XAUUSD": 3.0,
 }
 DEFAULT_SPREAD_BPS = 3.0  # any pair not listed above
+
+CRYPTO_SOURCE = "massive_crypto"
+# Crypto has no single quoted spread: a retail taker also pays an exchange fee
+# on every fill. The engine charges ``spread_bps / 2`` (plus slippage) on EACH
+# side, so each figure below is 2 x (half-spread + taker fee) per side.
+CRYPTO_SPREAD_BPS: dict[str, float] = {
+    "BTCUSD": 24.0,  # ~2 bps half-spread + ~10 bps taker fee, per side
+    "ETHUSD": 26.0,
+    "SOLUSD": 40.0,
+}
+CRYPTO_DEFAULT_SPREAD_BPS = 50.0
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchMarket:
+    name: str
+    version: str
+    model: type[FxBarDaily] | type[CryptoBarDaily]
+    source: str
+    spreads: dict[str, float]
+    default_spread_bps: float
+    ingest_hint: str
+    caveat: str
+
+    def spread(self, pair: str) -> float:
+        return self.spreads.get(pair, self.default_spread_bps)
+
+
+FX_MARKET = ResearchMarket(
+    name="FX",
+    version=FX_STRATEGY_VERSION,
+    model=FxBarDaily,
+    source=FX_SOURCE,
+    spreads=FX_SPREAD_BPS,
+    default_spread_bps=DEFAULT_SPREAD_BPS,
+    ingest_hint="run forex-ingest",
+    caveat="Swap/carry not modelled.",
+)
+CRYPTO_MARKET = ResearchMarket(
+    name="Crypto",
+    version=CRYPTO_STRATEGY_VERSION,
+    model=CryptoBarDaily,
+    source=CRYPTO_SOURCE,
+    spreads=CRYPTO_SPREAD_BPS,
+    default_spread_bps=CRYPTO_DEFAULT_SPREAD_BPS,
+    ingest_hint="run crypto-ingest",
+    caveat="Perpetual funding and exchange counterparty risk not modelled; spot-style costs only.",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,17 +153,13 @@ class StrategyResult:
     reasons: list[str] = field(default_factory=list)
 
 
-def load_series(session: Session, pair: str) -> PriceSeries:
+def load_series(session: Session, pair: str, market: ResearchMarket | None = None) -> PriceSeries:
+    mk = market or FX_MARKET
+    m = mk.model
     rows = session.execute(
-        select(
-            FxBarDaily.session_date,
-            FxBarDaily.open,
-            FxBarDaily.high,
-            FxBarDaily.low,
-            FxBarDaily.close,
-        )
-        .where(FxBarDaily.pair == pair, FxBarDaily.source == FX_SOURCE)
-        .order_by(FxBarDaily.session_date)
+        select(m.session_date, m.open, m.high, m.low, m.close)
+        .where(m.pair == pair, m.source == mk.source)
+        .order_by(m.session_date)
     ).all()
     return PriceSeries.from_bars(pair, [(d, o, h, lo, c, 0.0) for d, o, h, lo, c in rows])
 
@@ -130,7 +180,9 @@ def evaluate_strategy(
     *,
     seal_from: date,
     gates: FxGates,
+    market: ResearchMarket | None = None,
 ) -> StrategyResult:
+    mk = market or FX_MARKET
     res = StrategyResult(key=strat.key, description=strat.description, params=dict(strat.params))
     oos: list[SimTrade] = []
     stress_oos: list[SimTrade] = []
@@ -140,7 +192,7 @@ def evaluate_strategy(
         dev = _cut(full, seal_from)
         if len(dev) < strat.warmup + 50:
             continue
-        spread = FX_SPREAD_BPS.get(pair, DEFAULT_SPREAD_BPS)
+        spread = mk.spread(pair)
         base = run_backtest(
             dev, strat.signal, cost_model=cm, spread_bps=spread, warmup=strat.warmup
         )
@@ -216,19 +268,42 @@ def run_fx_research(
     gates: FxGates | None = None,
     strategies: Sequence[FxStrategy] = FX_STRATEGIES,
 ) -> dict[str, Any]:
+    return run_research(session, pairs, market=FX_MARKET, gates=gates, strategies=strategies)
+
+
+def run_crypto_research(
+    session: Session,
+    pairs: Sequence[str],
+    *,
+    gates: FxGates | None = None,
+    strategies: Sequence[FxStrategy] = CRYPTO_STRATEGIES,
+) -> dict[str, Any]:
+    return run_research(session, pairs, market=CRYPTO_MARKET, gates=gates, strategies=strategies)
+
+
+def run_research(
+    session: Session,
+    pairs: Sequence[str],
+    *,
+    market: ResearchMarket,
+    gates: FxGates | None = None,
+    strategies: Sequence[FxStrategy],
+) -> dict[str, Any]:
     gates = gates or FxGates()
-    series_by_pair = {p: load_series(session, p) for p in pairs}
+    series_by_pair = {p: load_series(session, p, market) for p in pairs}
     series_by_pair = {p: s for p, s in series_by_pair.items() if len(s)}
     if not series_by_pair:
-        raise ValueError("no fx_bar_daily history for the requested pairs; run forex-ingest")
+        raise ValueError(f"no {market.name} history for the requested pairs; {market.ingest_hint}")
     seal_from = sealed_start(series_by_pair, gates.sealed_days)
     results = [
-        evaluate_strategy(s, series_by_pair, seal_from=seal_from, gates=gates) for s in strategies
+        evaluate_strategy(s, series_by_pair, seal_from=seal_from, gates=gates, market=market)
+        for s in strategies
     ]
     return {
-        "version": FX_STRATEGY_VERSION,
+        "market": market.name,
+        "version": market.version,
         "gates": asdict(gates),
-        "spread_bps": {p: FX_SPREAD_BPS.get(p, DEFAULT_SPREAD_BPS) for p in series_by_pair},
+        "spread_bps": {p: market.spread(p) for p in series_by_pair},
         "history": {
             p: {"first": s.dates[0].isoformat(), "last": s.dates[-1].isoformat(), "bars": len(s)}
             for p, s in sorted(series_by_pair.items())
@@ -238,14 +313,14 @@ def run_fx_research(
         "strategies": [asdict(r) for r in results],
         "notice": (
             "Development-window research only. Sealed final year not evaluated. "
-            "Swap/carry not modelled. No order was placed."
+            f"{market.caveat} No order was placed."
         ),
     }
 
 
 def render_markdown(report: dict[str, Any]) -> str:
     lines = [
-        f"# FX research report — strategies {report['version']}",
+        f"# {report.get('market', 'FX')} research report — strategies {report['version']}",
         "",
         f"Sealed from {report['sealed_from']} (not evaluated). "
         f"Tests run: {report['tests_run']} (strategy x pair).",

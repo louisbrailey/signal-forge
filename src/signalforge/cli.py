@@ -385,6 +385,54 @@ def fx_research(
     typer.echo("Research only — no order was placed.")
 
 
+crypto_app = typer.Typer(help="Crypto research (research only; never a signal, alert or trade).")
+app.add_typer(crypto_app, name="crypto")
+
+
+@crypto_app.command("research")
+def crypto_research(
+    pairs: Annotated[
+        str | None,
+        typer.Option(help="Comma-separated pairs (default: CRYPTO_PAIRS)."),
+    ] = None,
+    out: Annotated[
+        Path | None,
+        typer.Option(help="Write the markdown report here (default: <data dir>/research/crypto/)."),
+    ] = None,
+) -> None:
+    """Evaluate the pre-registered crypto strategies on the development window.
+    The sealed final year is never evaluated here. Research only."""
+    import json as _json
+
+    from signalforge.config import get_settings
+    from signalforge.config.paths import data_dir
+    from signalforge.data.forex import CRYPTO, parse_pairs
+    from signalforge.db.session import session_scope
+    from signalforge.research.fx.harness import render_markdown, run_crypto_research
+
+    chosen = parse_pairs(pairs if pairs is not None else get_settings().crypto_pairs, CRYPTO)
+    with session_scope() as session:
+        report = run_crypto_research(session, chosen)
+    target = out or (
+        data_dir()
+        / "research"
+        / "crypto"
+        / f"crypto_research_{report['version']}_{date.today()}.md"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(render_markdown(report))
+    target.with_suffix(".json").write_text(_json.dumps(report, indent=2, default=str))
+    for s in report["strategies"]:
+        m = s["pooled"]
+        typer.echo(
+            f"  {s['key']:24} {s['verdict']:9} trades={m['n_trades']:4d} "
+            f"exp={m['expectancy_r']:+.3f}R ci_low={s['ci_expectancy_r']['low']:+.3f}R "
+            f"2x={s['stress_expectancy_r']:+.3f}R"
+        )
+    typer.echo(f"Sealed from {report['sealed_from']} (not evaluated). Report: {target}")
+    typer.echo("Research only — no order was placed.")
+
+
 @providers_app.command("verify")
 def providers_verify(
     no_store: Annotated[
