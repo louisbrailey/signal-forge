@@ -612,10 +612,15 @@ def ingest_intraday_universe(
 # must be decided up front so the API budget is a stated number rather than a
 # surprise.
 PROVIDER_ROW_CAP = 50_000
-# Extended-hours minutes per session (04:00-20:00 ET). The cap has to be
-# checked against what the PROVIDER may return, not against the RTH subset we
-# keep: a 15m request answers with up to 64 bars/session even though only 26
-# are stored.
+# Extended-hours minutes per session (04:00-20:00 ET).
+#
+# Incident 2026-10-26 (ingestion_run 71): the provider's 50,000 cap counts the
+# underlying ONE-MINUTE base aggregates, not the rows of the requested bar
+# size. A full-year 15m request returned 5,077 bars plus a ``next_url`` (only
+# 2017-01-03..05-09 of the year), the adapter correctly rejected the paginated
+# answer, and every year-chunk failed. The cap is therefore checked against
+# base minutes per session regardless of ``bar_size``: 50,000 / 960 = 52
+# sessions, so a request must span about 2.5 months at most.
 _EXTENDED_MINUTES_PER_SESSION = 16 * 60
 
 
@@ -636,7 +641,7 @@ class IntradayRequestPlan:
     bar_size: str
     start: date
     end: date
-    chunk_years: int
+    chunk_months: int
     chunks: list[IntradayChunk]
     request_spacing_s: float
     sessions: int
@@ -674,7 +679,7 @@ class IntradayRequestPlan:
         return (
             f"{len(self.symbols)} symbols x {self.bar_size} x {self.start}..{self.end} "
             f"({self.sessions} exchange sessions): {self.n_requests} paced provider requests "
-            f"in {self.chunk_years}-year chunks, ~{self.minutes:.1f} min at "
+            f"in {self.chunk_months}-month chunks, ~{self.minutes:.1f} min at "
             f"{self.request_spacing_s:.1f}s spacing, <= {self.max_rows_per_request:,} rows per "
             f"request (provider cap {PROVIDER_ROW_CAP:,}), ~{self.rth_rows:,} RTH rows stored"
         )
@@ -685,7 +690,7 @@ class IntradayRequestPlan:
             "bar_size": self.bar_size,
             "span": f"{self.start}..{self.end}",
             "sessions": self.sessions,
-            "chunk_years": self.chunk_years,
+            "chunk_months": self.chunk_months,
             "requests": self.n_requests,
             "minutes": round(self.minutes, 1),
             "request_spacing_s": self.request_spacing_s,
@@ -701,16 +706,23 @@ def _calendar_sessions(start: date, end: date) -> tuple[date, ...]:
     return _sessions(start, end)
 
 
-def _year_chunks(start: date, end: date, chunk_years: int) -> list[tuple[date, date]]:
-    """Split ``[start, end]`` on calendar-year boundaries, ``chunk_years`` at a
-    time. Year boundaries (rather than a rolling N-day window) keep a resumed
-    or re-run backfill asking for the IDENTICAL windows, so the provider's
-    responses — and therefore the dedupe — are reproducible."""
+def _month_chunks(start: date, end: date, chunk_months: int) -> list[tuple[date, date]]:
+    """Split ``[start, end]`` on calendar-month boundaries, ``chunk_months`` at a
+    time, aligned to January (2 -> Jan-Feb, Mar-Apr, ...). Fixed calendar
+    boundaries (rather than a rolling N-day window) keep a resumed or re-run
+    backfill asking for the IDENTICAL windows, so the provider's responses —
+    and therefore the dedupe — are reproducible."""
+    if chunk_months < 1 or 12 % chunk_months:
+        raise ValueError("chunk_months must divide 12 (1, 2, 3, 4, 6 or 12)")
     out: list[tuple[date, date]] = []
     lo = start
     while lo <= end:
-        year_end = date(lo.year + chunk_years - 1, 12, 31)
-        hi = min(year_end, end)
+        block_start_month = ((lo.month - 1) // chunk_months) * chunk_months + 1
+        last_month = block_start_month + chunk_months - 1
+        nxt = date(
+            lo.year + (1 if last_month == 12 else 0), 1 if last_month == 12 else last_month + 1, 1
+        )
+        hi = min(nxt - timedelta(days=1), end)
         out.append((lo, hi))
         lo = hi + timedelta(days=1)
     return out
@@ -722,7 +734,7 @@ def intraday_request_plan(
     end: date,
     *,
     bar_size: str = "15m",
-    chunk_years: int = 1,
+    chunk_months: int = 2,
     request_spacing_s: float | None = None,
 ) -> IntradayRequestPlan:
     """Cost a backfill without making any request.
@@ -735,17 +747,19 @@ def intraday_request_plan(
 
     if request_spacing_s is None:
         request_spacing_s = float(get_settings().market_data_min_request_spacing_s)
-    minutes = bar_minutes(bar_size)
+    bar_minutes(bar_size)  # validates the bar size
     syms = [s.strip().upper() for s in symbols]
 
     chunks: list[IntradayChunk] = []
-    for lo, hi in _year_chunks(start, end, chunk_years):
+    for lo, hi in _month_chunks(start, end, chunk_months):
         n_sessions = len(_calendar_sessions(lo, hi))
-        max_rows = n_sessions * (_EXTENDED_MINUTES_PER_SESSION // minutes)
+        # base one-minute aggregates the provider counts against its cap
+        max_rows = n_sessions * _EXTENDED_MINUTES_PER_SESSION
         if max_rows > PROVIDER_ROW_CAP:
             raise ValueError(
-                f"a {chunk_years}-year chunk at {bar_size} could return up to {max_rows:,} rows, "
-                f"above the provider's {PROVIDER_ROW_CAP:,} cap — use a smaller --chunk-years"
+                f"a {chunk_months}-month chunk could need up to {max_rows:,} one-minute base "
+                f"aggregates, above the provider's {PROVIDER_ROW_CAP:,} cap — use a smaller "
+                "--chunk-months"
             )
         for sym in syms:
             chunks.append(
@@ -756,7 +770,7 @@ def intraday_request_plan(
         bar_size=bar_size,
         start=start,
         end=end,
-        chunk_years=chunk_years,
+        chunk_months=chunk_months,
         chunks=chunks,
         request_spacing_s=request_spacing_s,
         sessions=len(_calendar_sessions(start, end)),
@@ -816,7 +830,7 @@ def ingest_intraday_history(
     end: date,
     *,
     bar_size: str = "15m",
-    chunk_years: int = 1,
+    chunk_months: int = 2,
     kind: str = "full_history",
     resume_run_id: int | None = None,
     record_feed_status: bool = False,
@@ -846,7 +860,7 @@ def ingest_intraday_history(
     from signalforge.db.models import IngestionRun as _Run
     from signalforge.db.models import Instrument as _Inst
 
-    plan = intraday_request_plan(symbols, start, end, bar_size=bar_size, chunk_years=chunk_years)
+    plan = intraday_request_plan(symbols, start, end, bar_size=bar_size, chunk_months=chunk_months)
 
     run: _Run
     if resume_run_id is not None:
