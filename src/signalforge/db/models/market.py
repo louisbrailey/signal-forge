@@ -447,6 +447,35 @@ class FxBarDaily(Base, IntPK, CreatedAt):
     quality_flags: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
+class CryptoBarDaily(Base, IntPK, CreatedAt):
+    """Completed daily bars for one crypto pair (Massive Currencies).
+
+    Separate from ``ohlcv_daily`` and ``fx_bar_daily`` for the same reason as
+    forex: no equity path may read it by accident. Crypto trades every day, so
+    ``session_date`` covers all seven UTC days. ``volume`` is in base-asset
+    units (e.g. BTC), not shares or ticks."""
+
+    __tablename__ = "crypto_bar_daily"
+    __table_args__ = (
+        UniqueConstraint("pair", "session_date", "source"),
+        Index("ix_crypto_bar_daily_pair_date", "pair", "session_date"),
+    )
+
+    pair: Mapped[str] = mapped_column(String(16), index=True)  # e.g. BTCUSD
+    session_date: Mapped[date] = mapped_column(index=True)
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float | None] = mapped_column(Float, default=None)
+    vwap: Mapped[float | None] = mapped_column(Float, default=None)
+    transactions: Mapped[int | None] = mapped_column(Integer, default=None)
+    source: Mapped[str] = mapped_column(String(40), index=True)
+    latency_category: Mapped[LatencyCategory] = mapped_column(SAEnum(LatencyCategory, **_ENUM_KW))
+    ingested_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    quality_flags: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
 class FundamentalsSnapshot(Base, IntPK, CreatedAt):
     __tablename__ = "fundamentals_snapshot"
     __table_args__ = (UniqueConstraint("instrument_id", "as_of", "source"),)
