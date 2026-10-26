@@ -987,7 +987,7 @@ def ops_status_context(session: Session) -> dict[str, Any]:
     }
     next_runs: dict[str, str | None] = dict(hb.next_runs_json) if hb else {}
     execution_enabled = effective_research_config(session).execution.enabled
-    cycle_registered = "execution_cycle" in next_runs
+    cycle_registered = next_runs.get("execution_cycle") is not None
     execution_posture = {
         "enabled": execution_enabled,
         "scheduled": cycle_registered,

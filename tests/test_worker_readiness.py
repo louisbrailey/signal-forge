@@ -360,7 +360,7 @@ def test_future_worker_heartbeat_is_not_healthy(ops_client):
     assert "disabled (expected" in ops_client.get("/ops").text
 
 
-@pytest.mark.parametrize("registered,expected", [(False, False), (True, True)])
+@pytest.mark.parametrize("registered,expected", [(False, False), (True, True), (None, False)])
 def test_enabled_execution_requires_registered_cycle(ops_client, monkeypatch, registered, expected):
     from signalforge.settings_store import effective_research_config
 
@@ -377,7 +377,11 @@ def test_enabled_execution_requires_registered_cycle(ops_client, monkeypatch, re
                 pid=123,
                 started_at=now,
                 last_beat_at=now,
-                next_runs_json={"execution_cycle": now.isoformat()} if registered else {},
+                next_runs_json=(
+                    {"execution_cycle": now.isoformat() if registered else None}
+                    if registered is not False
+                    else {}
+                ),
             )
         )
     monkeypatch.setattr("signalforge.app.views.effective_research_config", lambda session: cfg)
