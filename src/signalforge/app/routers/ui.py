@@ -54,6 +54,16 @@ def chart_paper_crypto(key: str, db: DbDep, _: ApiUser) -> dict[str, Any]:
     return charts.crypto_paper_curve(db, key)
 
 
+@router.get("/api/charts/scanner/activity")
+def chart_scanner(db: DbDep, _: ApiUser, days: Days = 180) -> dict[str, Any]:
+    return charts.scanner_activity(db, days)
+
+
+@router.get("/api/charts/grid")
+def chart_grid(db: DbDep, _: ApiUser, days: Days = 365) -> dict[str, Any]:
+    return charts.grid_activity(db, days)
+
+
 @router.get("/api/charts/snapshot/{market}")
 def chart_snapshot(market: str, db: DbDep, _: ApiUser) -> dict[str, Any]:
     from signalforge.config import get_settings

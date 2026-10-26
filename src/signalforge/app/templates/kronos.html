@@ -1,7 +1,9 @@
 {% extends "base.html" %}
+{% from "_macros.html" import page_intro, chart_card %}
 {% block title %}Kronos Research · Signal Forge{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-bold">Kronos Research</h1>
+{{ page_intro('Research on Kronos, an open-source AI model that forecasts price paths. It runs in shadow: forecasts are recorded and scored later, but never used to trade.') }}
 <section id="shadow-panel" class="my-4 border rounded p-4 overflow-x-auto" hx-get="/kronos" hx-trigger="every 60s" hx-select="#shadow-panel" hx-swap="outerHTML">
 <h2 class="text-xl font-semibold">Background research queue</h2>
 <p>Status: <strong>{{ shadow.status }}</strong> · Last check: {{ shadow.heartbeat or 'No heartbeat recorded' }} UTC.</p>

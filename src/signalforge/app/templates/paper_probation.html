@@ -1,7 +1,10 @@
 {% extends "base.html" %}
+{% from "_macros.html" import page_intro, chart_card %}
 {% block title %}Paper Probation — Signal Forge{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-semibold text-slate-900">Paper Probation</h1>
+{{ page_intro('Strategies earning their place: each trades on paper for a fixed period, and its real-time paper results are compared with what its backtest promised.') }}
+<div class="mb-6">{{ chart_card('pp-eq','Paper books — realized equity','/api/charts/paper/equity', ranges=False, height=240) }}</div>
 <p class="mt-1 text-sm text-slate-500">
   Supervised paper-trading evidence for every <code>paper_approved</code> strategy, restricted to its
   exact approved data snapshot. A candidate is alert-eligible only when its scan's dataset snapshot,

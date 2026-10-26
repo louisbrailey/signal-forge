@@ -1,7 +1,9 @@
 {% extends "base.html" %}
+{% from "_macros.html" import page_intro, chart_card %}
 {% block title %}Research Agents — Signal Forge{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-semibold text-slate-900">Research Agents</h1>
+{{ page_intro('Small automated helpers that write read-only research reports on data quality, operations and news. They never change a trade or a setting.') }}
 <p class="mt-1 text-sm text-slate-500">
   Seven bounded, read-only reporters. Each reads deterministic outputs, writes exactly one report + one audit event,
   and can never create a candidate, paper trade, alert, setting, or status change (import contract S14).

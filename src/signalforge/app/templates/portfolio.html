@@ -1,8 +1,10 @@
 {% extends "base.html" %}
+{% from "_macros.html" import page_intro, chart_card %}
 {% block title %}Portfolio — Signal Forge{% endblock %}
 {% from "_macros.html" import paper_books %}
 {% block content %}
 <h1 class="text-2xl font-semibold text-slate-900">Portfolio &amp; Import</h1>
+{{ page_intro('Your own positions, imported from a CSV, next to the simulated paper books. Imports stay on this computer — nothing is sent anywhere.') }}
 
 <section class="mt-4 rounded-lg border border-slate-200 bg-white p-4">
   <div class="flex items-center justify-between">

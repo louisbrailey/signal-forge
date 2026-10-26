@@ -1,7 +1,10 @@
 {% extends "base.html" %}
+{% from "_macros.html" import page_intro, chart_card %}
 {% block title %}Grid — Signal Forge{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-semibold text-slate-900">Mechanical Grid</h1>
+{{ page_intro('A mechanical grid that buys a little on dips and sells a little on rises around an anchor price. Simulated only, and not judged by the strategy promotion gates.') }}
+<div class="mb-6">{{ chart_card('grid-act','Grid fills per day','/api/charts/grid?days=365', ranges=False, height=220, hint='Simulated dollars bought and sold each day.') }}</div>
 <p class="mt-1 text-sm text-slate-500">
   A mechanical rebalancing rule on daily closes: per symbol, buy a fixed dollar amount after a fixed
   percentage drop from the anchor, sell a fixed dollar amount after a fixed percentage rise, and move the

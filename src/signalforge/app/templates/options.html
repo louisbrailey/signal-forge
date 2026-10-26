@@ -1,7 +1,9 @@
 {% extends "base.html" %}
+{% from "_macros.html" import page_intro, chart_card %}
 {% block title %}Options — learn & simulate — Signal Forge{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-semibold text-slate-900">Options — Education &amp; Simulation</h1>
+{{ page_intro("Learn how options work: browse a chain, see a contract's payoff and simulate simple positions. Quotes are delayed and bid/ask spreads are estimated.") }}
 <p class="mt-1 text-sm text-slate-500">{{ disclaimer }} {{ computed_note }}</p>
 
 <div class="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">

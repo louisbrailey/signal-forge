@@ -1,8 +1,10 @@
 {% extends "base.html" %}
+{% from "_macros.html" import page_intro, chart_card %}
 {% from "_macros.html" import news_timeline %}
 {% block title %}News — Signal Forge{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-semibold text-slate-900">News</h1>
+{{ page_intro('Recent licensed headlines for the stocks you track. News is context only — it never creates, ranks or changes a trade idea.') }}
 <p class="mt-1 text-sm text-slate-500">
   Source: <strong>{{ news_source_label }}</strong>. Read-only. News never creates, ranks, alters,
   or overrides a recommendation, risk limit, entry, exit, or position size.
