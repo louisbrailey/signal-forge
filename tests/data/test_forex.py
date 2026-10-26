@@ -253,3 +253,25 @@ def test_crypto_job_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fx, "ingest_crypto", lambda *a, **k: called.append(True))
     scheduler.job_crypto_ingest()
     assert called == []
+
+
+def test_from_date_backfills_older_history_only(session: Session) -> None:
+    api = FakeAPI()
+    api.bars["EURUSD"] = [_bar(date(2026, 10, d)) for d in (13, 14, 15, 16, 19, 20)]
+    fx.ingest_forex(session, ["EURUSD"], lookback_days=1, client=api.client(), now=NOW)
+    assert {b.session_date.day for b in session.scalars(select(FxBarDaily))} == {19, 20}
+
+    api.calls.clear()
+    rep = fx.ingest_forex(
+        session,
+        ["EURUSD"],
+        lookback_days=1,
+        client=api.client(),
+        now=NOW,
+        from_date=date(2026, 10, 13),
+    )
+
+    assert "/2026-10-13/2026-10-18" in api.calls[0]  # stops the day before the oldest bar
+    assert rep.pairs[0].written == 4
+    days = sorted(b.session_date.day for b in session.scalars(select(FxBarDaily)))
+    assert days == [13, 14, 15, 16, 19, 20]

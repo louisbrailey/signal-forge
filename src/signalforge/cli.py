@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
@@ -249,6 +250,13 @@ def data_forex_ingest(
             help="Days back for a pair with no stored bars (default: FOREX_LOOKBACK_DAYS)."
         ),
     ] = None,
+    from_date: Annotated[
+        str | None,
+        typer.Option(
+            "--from-date",
+            help="Backfill OLDER history from this date (YYYY-MM-DD) up to the oldest stored bar.",
+        ),
+    ] = None,
 ) -> None:
     """Top up completed daily forex bars into fx_bar_daily. Research data only:
     no signal, alert, candidate or paper trade reads them."""
@@ -260,7 +268,12 @@ def data_forex_ingest(
     chosen = parse_pairs(pairs if pairs is not None else settings.forex_pairs)
     days = lookback_days if lookback_days is not None else settings.forex_lookback_days
     with session_scope(write=True) as session:
-        rep = ingest_forex(session, chosen, lookback_days=days)
+        rep = ingest_forex(
+            session,
+            chosen,
+            lookback_days=days,
+            from_date=date.fromisoformat(from_date) if from_date else None,
+        )
     typer.echo(f"Forex daily bars through {rep.end} (UTC, END-OF-DAY):")
     for pr in rep.pairs:
         detail = (
@@ -289,6 +302,13 @@ def data_crypto_ingest(
             help="Days back for a pair with no stored bars (default: CRYPTO_LOOKBACK_DAYS)."
         ),
     ] = None,
+    from_date: Annotated[
+        str | None,
+        typer.Option(
+            "--from-date",
+            help="Backfill OLDER history from this date (YYYY-MM-DD) up to the oldest stored bar.",
+        ),
+    ] = None,
 ) -> None:
     """Top up completed daily crypto bars into crypto_bar_daily. Research data
     only: no signal, alert, candidate or paper trade reads them."""
@@ -300,7 +320,12 @@ def data_crypto_ingest(
     chosen = parse_pairs(pairs if pairs is not None else settings.crypto_pairs, CRYPTO)
     days = lookback_days if lookback_days is not None else settings.crypto_lookback_days
     with session_scope(write=True) as session:
-        rep = ingest_crypto(session, chosen, lookback_days=days)
+        rep = ingest_crypto(
+            session,
+            chosen,
+            lookback_days=days,
+            from_date=date.fromisoformat(from_date) if from_date else None,
+        )
     typer.echo(f"Crypto daily bars through {rep.end} (UTC, END-OF-DAY, 7 days/week):")
     for pr in rep.pairs:
         detail = (
@@ -312,6 +337,52 @@ def data_crypto_ingest(
     typer.echo("Research data only — no order was placed.")
     if rep.failed:
         raise typer.Exit(1)
+
+
+fx_app = typer.Typer(help="Forex research (research only; never a signal, alert or trade).")
+app.add_typer(fx_app, name="fx")
+
+
+@fx_app.command("research")
+def fx_research(
+    pairs: Annotated[
+        str | None,
+        typer.Option(help="Comma-separated pairs (default: FOREX_PAIRS)."),
+    ] = None,
+    out: Annotated[
+        Path | None,
+        typer.Option(help="Write the markdown report here (default: <data dir>/research/fx/)."),
+    ] = None,
+) -> None:
+    """Evaluate the pre-registered FX strategies on the development window.
+    The sealed final year is never evaluated here. Research only."""
+    import json as _json
+
+    from signalforge.config import get_settings
+    from signalforge.config.paths import data_dir
+    from signalforge.data.forex import parse_pairs
+    from signalforge.db.session import session_scope
+    from signalforge.research.fx.harness import render_markdown, run_fx_research
+
+    chosen = parse_pairs(pairs if pairs is not None else get_settings().forex_pairs)
+    with session_scope() as session:
+        report = run_fx_research(session, chosen)
+    md = render_markdown(report)
+    target = out or (
+        data_dir() / "research" / "fx" / f"fx_research_{report['version']}_{date.today()}.md"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(md)
+    target.with_suffix(".json").write_text(_json.dumps(report, indent=2, default=str))
+    for s in report["strategies"]:
+        m = s["pooled"]
+        typer.echo(
+            f"  {s['key']:20} {s['verdict']:9} trades={m['n_trades']:4d} "
+            f"exp={m['expectancy_r']:+.3f}R ci_low={s['ci_expectancy_r']['low']:+.3f}R "
+            f"2x={s['stress_expectancy_r']:+.3f}R"
+        )
+    typer.echo(f"Sealed from {report['sealed_from']} (not evaluated). Report: {target}")
+    typer.echo("Research only — no order was placed.")
 
 
 @providers_app.command("verify")
