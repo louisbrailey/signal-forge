@@ -132,7 +132,7 @@ pre-flight now judges a snapshot on its own underlyings, at the same floors.
 |---|---|---|
 | OR-0c | Gate 0.c read pooled over the set (SPY, QQQ, IWM: 0.902) or per symbol (QQQ and IWM are 0.882 each, leaving SPY alone) | **Open — before the first `--confirm`** |
 | OR-F15 | Band population (put-only vs pooled) | Open, unchanged |
-| IMPL-3.3 | 4-structure concurrency cap | Open, unchanged |
+| IMPL-3.3 | 4-structure concurrency cap | **Implemented 2026-10-26** (`options_evidence.cap_concurrent`; see addendum) |
 
 *Decision memo: `options_designs/OR-0c_DECISION_MEMO_2026-10-06.md` (states both readings, the numbers, and how to record either decision; decides nothing).*
 
@@ -141,3 +141,16 @@ pre-flight now judges a snapshot on its own underlyings, at the same floors.
 numbers unless the command carries `--accept-pooled-coverage OR-0c` and this file contains a
 line beginning with the exact text* `OR-0c: DECIDED pooled`*. This note is not that line and the
 item is still Open. Only the operator adds it.*
+
+
+---
+
+*Addendum (2026-10-26, implementation status only — not a decision): IMPL-3.3 is
+implemented exactly as D5a §3.5 and Amendment 2 §3.3 pre-register it. The evidence
+assembler and the sensitivity grid both cap the pooled population at
+`OptionsShortVertical.portfolio_concurrency_cap = 4` open structures, take candidates in
+entry-date then ascending-symbol order, keep the same structures in the 2x-spread cell, and
+count refused entries as `skipped_portfolio_concurrency` (gate-8 evidence). A slot occupied
+through an exit date is reusable from the next session. The sensitivity cache key gained a
+`cc1` tag so grids cached before the cap are misses. No look was taken; k = 0 is unchanged.
+OR-0c and OR-F15 remain Open and are the operator's.*

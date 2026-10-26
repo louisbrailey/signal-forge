@@ -348,6 +348,9 @@ class OptionsCounters:
     stop_non_binding: int = 0
     n_losing_trades: int = 0
     exit_deferred_sessions: list[int] = field(default_factory=list)
+    # D5a §3.5 / Amendment 2 §3.3: entries a pooled evaluation refused because the
+    # book already held its pre-registered maximum of concurrent structures.
+    skipped_portfolio_concurrency: int = 0
 
     def bump(self, name: str, by: int = 1) -> None:
         setattr(self, name, getattr(self, name) + by)

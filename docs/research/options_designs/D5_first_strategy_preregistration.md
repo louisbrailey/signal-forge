@@ -6,6 +6,10 @@
 **Version pre-registered here:** `v0.1.0`
 **Written:** 2026-09-11. **Revised:** 2026-09-11 (rev 2, adversarial review — see §14).
 **Status: DESIGN ONLY — nothing here is implemented.**
+*Status note (2026-10-26): superseded as a status line. The strategy is implemented as
+`v0.1.2` in `src/signalforge/research/options_strategies/short_vertical.py`, as amended by
+D5a Amendments 1–3. No sealed look has been taken (k = 0). This document's design text is
+unchanged; read the amendments for the binding parameters.*
 
 ---
 
