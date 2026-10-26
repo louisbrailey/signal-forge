@@ -28,6 +28,10 @@ def _seed_feed_and_briefing(session: Session) -> None:
     ingest_universe(
         session, FixtureMarketDataAdapter(), ["SPY"], date(2024, 1, 1), date(2024, 6, 30)
     )
+    # Align ingestion metadata with the explicit alert clock, not wall time.
+    # Future successful fetches correctly fail the production freshness gate.
+    for row in session.scalars(select(DataFeedStatus)):
+        row.last_success_at = NOON.replace(hour=0, minute=0)
     session.flush()
     set_setting(
         session, "last_briefing", {"as_of": "2024-06-30", "text": "brief", "narrative": None}

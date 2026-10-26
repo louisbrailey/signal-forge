@@ -59,7 +59,11 @@ def check_feeds_fresh(
             "rate_limited": rate_limited,
             "latency_category": row.latency_category.value,
         }
-        if age > budget:
+        if age < timedelta(0):
+            result.fresh = False
+            result.reasons.append(f"{key}: future timestamp; check clock synchronization")
+            entry["status"] = "future_timestamp"
+        elif age > budget:
             result.fresh = False
             result.reasons.append(
                 f"{key}: stale ({int(age.total_seconds())}s old > "

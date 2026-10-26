@@ -337,3 +337,55 @@ def test_eod_update_and_catch_up_never_overlap(monkeypatch: pytest.MonkeyPatch) 
     sched.job_catch_up()  # once free, catch-up runs the full update exactly once
     assert calls == ["ingest", "scan", "approved"]
     assert not sched._EOD_UPDATE_LOCK.locked()  # released after the run
+
+
+def test_future_worker_heartbeat_is_not_healthy(ops_client):
+    now = datetime.now(UTC)
+    with session_scope() as session:
+        session.add(
+            WorkerHeartbeat(
+                worker="scheduler",
+                host="testhost",
+                pid=4321,
+                started_at=now,
+                last_beat_at=now + timedelta(hours=1),
+                next_runs_json={},
+            )
+        )
+    with get_sessionmaker()() as session:
+        ctx = ops_status_context(session)
+    assert not ctx["worker"]["running"]
+    assert ctx["execution_posture"]["healthy"]
+    assert not ctx["execution_posture"]["enabled"]
+    assert "disabled (expected" in ops_client.get("/ops").text
+
+
+@pytest.mark.parametrize("registered,expected", [(False, False), (True, True), (None, False)])
+def test_enabled_execution_requires_registered_cycle(ops_client, monkeypatch, registered, expected):
+    from signalforge.settings_store import effective_research_config
+
+    now = datetime.now(UTC)
+    with session_scope() as session:
+        cfg = effective_research_config(session)
+        cfg = cfg.model_copy(
+            update={"execution": cfg.execution.model_copy(update={"enabled": True})}
+        )
+        session.add(
+            WorkerHeartbeat(
+                worker="scheduler",
+                host="test",
+                pid=123,
+                started_at=now,
+                last_beat_at=now,
+                next_runs_json=(
+                    {"execution_cycle": now.isoformat() if registered else None}
+                    if registered is not False
+                    else {}
+                ),
+            )
+        )
+    monkeypatch.setattr("signalforge.app.views.effective_research_config", lambda session: cfg)
+    with get_sessionmaker()() as session:
+        ctx = ops_status_context(session)
+    assert ctx["execution_posture"]["healthy"] is expected
+    assert ops_client.get("/ops").status_code == 200

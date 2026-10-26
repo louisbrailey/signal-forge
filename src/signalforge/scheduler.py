@@ -1195,7 +1195,7 @@ def other_live_worker() -> str | None:
                     f"({age:.0f}s ago) — stop it first"
                 )
     except Exception:
-        return None
+        return "unable to verify existing worker heartbeat — startup refused"
     return None
 
 

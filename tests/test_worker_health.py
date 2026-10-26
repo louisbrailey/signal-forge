@@ -31,3 +31,16 @@ def test_holiday_does_not_require_nonexistent_bar():
 
 def test_before_publication_cutoff_uses_previous_session():
     assert last_completed_session(datetime(2026, 9, 8, 18, tzinfo=UTC)) == date(2026, 9, 4)
+
+
+def test_worker_startup_refuses_when_database_cannot_be_checked(monkeypatch):
+    from signalforge.scheduler import other_live_worker
+
+    def unavailable():
+        raise RuntimeError("private connection details must not escape")
+
+    monkeypatch.setattr("signalforge.db.session.session_scope", unavailable)
+    reason = other_live_worker()
+    assert reason is not None
+    assert "unable to verify" in reason
+    assert "private" not in reason

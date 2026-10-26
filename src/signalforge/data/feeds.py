@@ -25,7 +25,7 @@ DEFAULT_STALE_AFTER = timedelta(hours=36)
 def _row_to_dict(row: DataFeedStatus, *, stale_after: timedelta, now: datetime) -> dict[str, Any]:
     last = row.last_success_at
     age_seconds = (now - last).total_seconds() if last else None
-    is_stale = last is None or (now - last) > stale_after
+    is_stale = last is None or last > now or (now - last) > stale_after
     return {
         "provider": row.provider,
         "feed_type": row.feed_type.value,

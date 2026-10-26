@@ -11,14 +11,18 @@ import os
 import re
 import sqlite3
 import time
+from dataclasses import asdict
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
+from signalforge.backtest.costs import CostModel
 from signalforge.data.calendar import last_closed_session
-from signalforge.db.models import Candidate, Instrument, OHLCVDaily
+from signalforge.db.models import Candidate, Instrument, OHLCVDaily, ScanRun
+from signalforge.domain import Horizon
+from signalforge.kronos.outcomes import PROTOCOL, candidate_window_start
 from signalforge.kronos.shadow import forecast, inputs, partition
 from signalforge.settings_store import effective_research_config
 
@@ -46,7 +50,12 @@ def run(args: argparse.Namespace) -> int:
         except BlockingIOError:
             print("Shadow queue already running")
             return 0
-        return _run(args)
+        result = _run(args)
+        if not stopped(args.kill_switch):
+            from signalforge.kronos.outcome_store import run as resolve_outcomes
+
+            resolve_outcomes(args.source_db, args.output_db)
+        return result
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -161,11 +170,52 @@ def _run(args: argparse.Namespace) -> int:
             ledger.commit()
             calls += 1
             try:
+                comparison_start = candidate_window_start(cutoff)
+                with Session(engine) as session:
+                    snapshots = [
+                        {
+                            "id": c.id,
+                            "strategy_version_id": c.strategy_version_id,
+                            "created_at": c.created_at.isoformat(),
+                            "direction": c.direction.value,
+                            "gate": c.quality_gate_status.value,
+                            "horizon": c.horizon.value,
+                            "failed_gates": c.failed_gates,
+                        }
+                        for c in session.scalars(
+                            select(Candidate)
+                            .join(Instrument)
+                            .join(ScanRun, Candidate.scan_run_id == ScanRun.id)
+                            .where(
+                                Instrument.symbol == symbol,
+                                Candidate.structure_kind.is_(None),
+                                ScanRun.source == "massive",
+                                ScanRun.finished_at <= datetime.fromisoformat(stamp),
+                                Candidate.horizon
+                                == (
+                                    Horizon.SHORT_SWING
+                                    if args.horizon == 5
+                                    else Horizon.MEDIUM_SWING
+                                ),
+                                Candidate.created_at <= datetime.fromisoformat(stamp),
+                                Candidate.created_at >= comparison_start,
+                            )
+                            .order_by(Candidate.id)
+                            .limit(1001)
+                        )
+                    ]
+                if len(snapshots) > 1000:
+                    raise ValueError("candidate snapshot cap exceeded")
                 if stopped(args.kill_switch):
                     raise ValueError("kill switch engaged")
                 result = forecast(
                     history, symbol, args.horizon, cancelled=lambda: stopped(args.kill_switch)
                 )
+                result["evaluation_protocol"] = PROTOCOL
+                result["candidate_snapshot"] = snapshots
+                result["candidate_window_start"] = comparison_start.isoformat()
+                result["evaluation_costs"] = {"model": asdict(CostModel()), "spread_bps": 5.0}
+                result["completed_at"] = datetime.now(UTC).isoformat()
                 result["existing_strategy_candidate"] = symbol in candidate_symbols
                 result["lane"] = "strategy_check" if symbol in candidate_symbols else "discovery"
                 result["worker_code_sha256"] = hashlib.sha256(

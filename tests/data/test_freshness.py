@@ -69,3 +69,14 @@ def test_gate_for_horizon_uses_config_budget(session: Session) -> None:
     _age_last_success(session, "fixture", timedelta(days=2))
     result = gate_for_horizon(session, Horizon.SHORT_SWING, REQUIRED)
     assert result.fresh is False
+
+
+def test_future_feed_timestamp_fails_closed(session: Session) -> None:
+    from signalforge.data.feeds import feed_status_report
+
+    _ingest(session)
+    _age_last_success(session, "fixture", -timedelta(hours=1))
+    result = check_feeds_fresh(session, REQUIRED, timedelta(hours=48))
+    assert not result.fresh
+    assert result.per_feed["fixture:BAR_DAILY"]["status"] == "future_timestamp"
+    assert feed_status_report(session)["feeds"][0]["is_stale"]
