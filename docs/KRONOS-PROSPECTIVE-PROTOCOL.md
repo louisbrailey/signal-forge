@@ -15,7 +15,10 @@ price. Model weights remain unverified cached weights; this limits reproducibili
 
 A positive Kronos diagnostic means the terminal mean exceeds the origin close
 plus modeled round-trip costs. A positive strategy diagnostic means at least
-one same-UTC-day, pre-inference, long equity candidate passed its existing gates.
+one pre-inference, long equity candidate from a completed Massive scan passed
+its existing gates. Include candidates created since the input session closed,
+not since UTC midnight: the post-close scan can precede the forecast by a UTC
+date boundary. Never include a scan that completed after inference began.
 Use short-swing candidates for 5-session diagnostics and medium-swing candidates
 for 20-session diagnostics; do not blend horizons. Snapshot all candidate IDs, versions, horizons, gates and timestamps, including
 rejections. This is a bounded sampled watchlist, not all strategy opportunities.

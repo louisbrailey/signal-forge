@@ -105,3 +105,15 @@ def test_agreement_requires_recorded_candidate_context():
     assert evaluate(p, t, bars)["cohorts"] == ["strategy_positive", "kronos_positive", "agreement"]
     p["candidate_snapshot"][0]["gate"] = "NO_TRADE"
     assert evaluate(p, t, bars)["cohorts"] == ["kronos_positive", "disagreement"]
+
+
+def test_candidate_window_keeps_postclose_scans_across_utc_midnight():
+    from datetime import UTC, date, datetime
+
+    from signalforge.kronos.outcomes import candidate_window_start
+
+    start = candidate_window_start(date(2026, 10, 26))
+    scan = datetime(2026, 10, 26, 22, tzinfo=UTC)
+    forecast = datetime(2026, 10, 27, 0, 5, tzinfo=UTC)
+    assert start <= scan < forecast
+    assert start == datetime(2026, 10, 26, 20, tzinfo=UTC)

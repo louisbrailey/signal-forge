@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from datetime import datetime
+from datetime import date, datetime
 from statistics import mean
 from typing import Any
 
@@ -17,6 +17,14 @@ from signalforge.backtest.costs import CostModel
 from signalforge.data.calendar import rth_bounds_utc
 
 PROTOCOL = "shadow-outcomes-v1"
+
+
+def candidate_window_start(origin: date) -> datetime:
+    """Keep the origin session's post-close scan across a UTC midnight."""
+    bounds = rth_bounds_utc(origin)
+    if bounds is None:
+        raise ValueError("Origin must be an exchange session")
+    return bounds[1]
 
 
 def evaluate(payload: dict[str, Any], generated: str, bars: list[dict[str, Any]]) -> dict[str, Any]:

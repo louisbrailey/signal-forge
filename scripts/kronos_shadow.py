@@ -20,9 +20,9 @@ from sqlalchemy.orm import Session
 
 from signalforge.backtest.costs import CostModel
 from signalforge.data.calendar import last_closed_session
-from signalforge.db.models import Candidate, Instrument, OHLCVDaily
+from signalforge.db.models import Candidate, Instrument, OHLCVDaily, ScanRun
 from signalforge.domain import Horizon
-from signalforge.kronos.outcomes import PROTOCOL
+from signalforge.kronos.outcomes import PROTOCOL, candidate_window_start
 from signalforge.kronos.shadow import forecast, inputs, partition
 from signalforge.settings_store import effective_research_config
 
@@ -170,6 +170,7 @@ def _run(args: argparse.Namespace) -> int:
             ledger.commit()
             calls += 1
             try:
+                comparison_start = candidate_window_start(cutoff)
                 with Session(engine) as session:
                     snapshots = [
                         {
@@ -184,9 +185,12 @@ def _run(args: argparse.Namespace) -> int:
                         for c in session.scalars(
                             select(Candidate)
                             .join(Instrument)
+                            .join(ScanRun, Candidate.scan_run_id == ScanRun.id)
                             .where(
                                 Instrument.symbol == symbol,
                                 Candidate.structure_kind.is_(None),
+                                ScanRun.source == "massive",
+                                ScanRun.finished_at <= datetime.fromisoformat(stamp),
                                 Candidate.horizon
                                 == (
                                     Horizon.SHORT_SWING
@@ -194,10 +198,7 @@ def _run(args: argparse.Namespace) -> int:
                                     else Horizon.MEDIUM_SWING
                                 ),
                                 Candidate.created_at <= datetime.fromisoformat(stamp),
-                                Candidate.created_at
-                                >= datetime.fromisoformat(stamp).replace(
-                                    hour=0, minute=0, second=0, microsecond=0
-                                ),
+                                Candidate.created_at >= comparison_start,
                             )
                             .order_by(Candidate.id)
                             .limit(1001)
@@ -212,6 +213,7 @@ def _run(args: argparse.Namespace) -> int:
                 )
                 result["evaluation_protocol"] = PROTOCOL
                 result["candidate_snapshot"] = snapshots
+                result["candidate_window_start"] = comparison_start.isoformat()
                 result["evaluation_costs"] = {"model": asdict(CostModel()), "spread_bps": 5.0}
                 result["completed_at"] = datetime.now(UTC).isoformat()
                 result["existing_strategy_candidate"] = symbol in candidate_symbols
