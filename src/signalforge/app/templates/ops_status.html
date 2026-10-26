@@ -8,6 +8,7 @@
 <span class="font-medium {{ 'text-emerald-700' if flag else 'text-slate-500' }}">{{ 'ON' if flag else 'OFF' }}</span>
 {%- endmacro %}
 
+<div id="ops-panel" hx-get="/ops" hx-trigger="every 60s" hx-select="#ops-panel" hx-swap="outerHTML">
 <h1 class="text-2xl font-semibold text-slate-900">Operational Status</h1>
 <p class="mt-1 text-sm text-slate-500">
   Read-only view of the always-on runtime. No key or webhook URL is ever shown here.
@@ -45,7 +46,9 @@
   <h2 class="text-sm font-medium text-slate-500">Worker · schedule · freshness · catch-up</h2>
   <dl class="mt-2 grid grid-cols-2 gap-y-1 text-xs text-slate-600 sm:grid-cols-4">
     <dt class="text-slate-400">Worker</dt>
-    <dd>{% if worker.running %}{{ pill(true, 'running') }} pid {{ worker.pid }} on {{ worker.host }} · beat {{ worker.beat_age_s }}s ago · up since {{ (worker.started_at or '')[:16] }}{% elif worker.seen %}{{ pill(false, '', 'STALE') }} last beat {{ (worker.last_beat_at or '')[:16] }} ({{ worker.beat_age_s }}s ago) — process gone{% else %}{{ pill(false, '', 'not running') }} no heartbeat ever — <code>signalforge run-scheduler</code> has not been started{% endif %}</dd>
+    <dd>{% if worker.running %}{{ pill(true, 'running') }} pid {{ worker.pid }} on {{ worker.host }} · beat {{ worker.beat_age_s }}s ago · up since {{ (worker.started_at or '')[:16] }}{% elif worker.seen %}{{ pill(false, '', 'STALE') }} last beat {{ (worker.last_beat_at or '')[:16] }} ({{ worker.beat_age_s }}s ago) — heartbeat stale or clock invalid; process state unverified{% else %}{{ pill(false, '', 'not running') }} no heartbeat ever — <code>signalforge run-scheduler</code> has not been started{% endif %}</dd>
+    <dt class="text-slate-400">Paper execution cycle</dt>
+    <dd>{{ pill(execution_posture.healthy) }} {{ execution_posture.state }}</dd>
     <dt class="text-slate-400">Next scheduled EOD update</dt>
     <dd>{% if next_scheduled.eod_update_from_worker %}{{ next_scheduled.eod_update_from_worker[:16] }} UTC (from worker){% else %}intended {{ next_scheduled.eod_update_intended_et[:16] }} ET — <span class="text-red-700">will not fire: no worker</span>{% endif %}</dd>
     <dt class="text-slate-400">Daily-bar freshness</dt>
@@ -182,4 +185,5 @@
 </section>
 
 <p class="mt-6 text-xs text-slate-400">Generated {{ generated_at[:19] }} UTC.</p>
+</div>
 {% endblock %}

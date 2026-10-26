@@ -12,6 +12,11 @@
 <table class="w-full text-left text-sm"><thead><tr><th>Symbol</th><th>Input session</th><th>Generated UTC</th><th>Status / reason</th><th>Mode</th><th>Source / latency</th><th>Stale at generation</th></tr></thead><tbody>
 {% for row in shadow.rows %}<tr class="border-t"><td>{{ row.symbol }}</td><td>{{ row.origin }}</td><td>{{ row.generated }}</td><td>{{ row.status }} {{ row.reason }}</td><td>{{ row.mode }}</td><td>{{ row.source }} / {{ row.latency }}</td><td>{{ row.stale }}</td></tr>{% else %}<tr><td colspan="7">No shadow records available.</td></tr>{% endfor %}</tbody></table>
 <p>Unvalidated research. Research signal only — no order was placed.</p>
+<h3 class="font-semibold mt-4">Prospective outcome diagnostics</h3>
+<p class="text-sm">{{ shadow.outcomes or 'No resolved outcomes yet.' }} Older records without frozen context are excluded. Pending horizons require complete future sessions. These fixed-horizon comparisons are not strategy P&amp;L or evidence of profitability.</p>
+<table class="text-sm w-full"><caption>Latest persisted outcomes, separated by horizon</caption><thead><tr><th>Symbol</th><th>Sessions</th><th>Outcome</th><th>Net diagnostic return</th><th>Price MAE / baseline (USD)</th></tr></thead><tbody>
+{% for o in shadow.recent_outcomes %}<tr><td>{{ o.symbol }}</td><td>{{ o.horizon }}</td><td>{{ o.status }} {{ o.reason or '' }}</td><td>{{ ('%.3f%%'|format(o.net_fixed_horizon_return * 100)) if o.status == 'mature' else '—' }}</td><td>{{ ('%.3f / %.3f'|format(o.mae, o.baseline_mae)) if o.status == 'mature' else '—' }}</td></tr>{% endfor %}
+</tbody></table>
 </section>
 <div class="my-4 border border-amber-400 bg-amber-50 rounded p-4"><strong>HISTORICAL REPLAY · experimental AI research</strong><p>{{ runtime.notice }}</p><p>Research signal only — no order was placed.</p></div>
 <p>{{ runtime.model }} · {{ 'Local runtime present (inference not yet verified)' if runtime.configured else 'Local runtime unavailable' }} · Offline CPU inference. No model prediction changes entries, exits, ranking, or sizing.</p>

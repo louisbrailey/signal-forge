@@ -33,6 +33,23 @@ def shadow_status(path: Path | None = None) -> dict[str, Any]:
             report["counts"] = dict(
                 db.execute("SELECT status, COUNT(*) FROM forecasts GROUP BY status")
             )
+            try:
+                report["outcomes"] = dict(
+                    db.execute(
+                        "SELECT json_extract(payload, '$.status'), COUNT(*) FROM outcomes "
+                        "GROUP BY 1"
+                    )
+                )
+                report["recent_outcomes"] = [
+                    {"symbol": s, "horizon": h, **json.loads(p)}
+                    for s, h, p in db.execute(
+                        "SELECT symbol,horizon,payload FROM outcomes ORDER BY evaluated_at "
+                        "DESC LIMIT 25"
+                    )
+                ]
+            except sqlite3.OperationalError:
+                report["outcomes"] = {}
+                report["recent_outcomes"] = []
             report["attempts_today"] = db.execute(
                 "SELECT COUNT(*) FROM forecasts WHERE generated_at LIKE ?",
                 (datetime.now(UTC).date().isoformat() + "%",),

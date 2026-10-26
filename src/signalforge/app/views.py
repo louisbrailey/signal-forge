@@ -977,7 +977,7 @@ def ops_status_context(session: Session) -> dict[str, Any]:
     hb_age = (now - hb.last_beat_at).total_seconds() if hb else None
     worker = {
         "seen": hb is not None,
-        "running": hb is not None and hb_age is not None and hb_age <= WORKER_STALE_AFTER_S,
+        "running": hb is not None and hb_age is not None and 0 <= hb_age <= WORKER_STALE_AFTER_S,
         "host": hb.host if hb else None,
         "pid": hb.pid if hb else None,
         "started_at": hb.started_at.isoformat() if hb else None,
@@ -986,6 +986,22 @@ def ops_status_context(session: Session) -> dict[str, Any]:
         "detail": hb.detail if hb else "",
     }
     next_runs: dict[str, str | None] = dict(hb.next_runs_json) if hb else {}
+    execution_enabled = effective_research_config(session).execution.enabled
+    cycle_registered = "execution_cycle" in next_runs
+    execution_posture = {
+        "enabled": execution_enabled,
+        "scheduled": cycle_registered,
+        "healthy": not execution_enabled or (bool(worker["running"]) and cycle_registered),
+        "state": (
+            "disabled (expected; no execution cycle required)"
+            if not execution_enabled
+            else (
+                "scheduled; heartbeat is not proof of successful reconciliation"
+                if worker["running"] and cycle_registered
+                else "unavailable: worker heartbeat or execution cycle missing"
+            )
+        ),
+    }
     for j in jobs:
         j["next_run"] = next_runs.get(j["name"])
     # what the cron table intends for the EOD job even when no worker is alive
@@ -1186,6 +1202,11 @@ def ops_status_context(session: Session) -> dict[str, Any]:
                 else "no heartbeat ever recorded — run-scheduler has not been started"
             ),
         ),
+        (
+            "Paper execution worker posture",
+            execution_posture["healthy"],
+            execution_posture["state"],
+        ),
         *bars_checks,
         ("No catch-up pending", not catch_up["pending"], catch_up["reason"]),
         (
@@ -1247,6 +1268,7 @@ def ops_status_context(session: Session) -> dict[str, Any]:
         "briefing_as_of": briefing_as_of,
         "readiness": readiness,
         "worker": worker,
+        "execution_posture": execution_posture,
         "next_scheduled": next_scheduled,
         "freshness": freshness,
         "catch_up": catch_up,
