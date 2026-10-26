@@ -221,6 +221,21 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "S17: FX research is research only — no alerts, LLM, candidates, scans, paper or execution"
+type = "forbidden"
+source_modules = ["signalforge.research.fx"]
+forbidden_modules = [
+    "signalforge.alerts",
+    "signalforge.llm",
+    "signalforge.paper",
+    "signalforge.execution",
+    "signalforge.research.candidates",
+    "signalforge.research.scan",
+    "signalforge.research.promotion",
+    "signalforge.research.registry",
+]
+
+[[tool.importlinter.contracts]]
 name = "S11: options are education/simulation only — no alerts, no LLM, no decision path"
 type = "forbidden"
 # Widened, never narrowed: the two new options data modules are covered by the

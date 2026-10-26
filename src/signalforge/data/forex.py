@@ -327,6 +327,13 @@ def _latest_stored(session: Session, market: DailyMarket, pair: str) -> date | N
     )
 
 
+def _oldest_stored(session: Session, market: DailyMarket, pair: str) -> date | None:
+    m = market.model
+    return session.scalar(
+        select(func.min(m.session_date)).where(m.pair == pair, m.source == market.provider)
+    )
+
+
 def ingest_forex(
     session: Session,
     pairs: Sequence[str],
@@ -334,10 +341,17 @@ def ingest_forex(
     lookback_days: int,
     client: ForexClient | None = None,
     now: datetime | None = None,
+    from_date: date | None = None,
 ) -> ForexIngestReport:
-    """Top up each forex pair (see :func:`ingest_daily`)."""
+    """Top up (or, with ``from_date``, backfill) each forex pair."""
     return ingest_daily(
-        session, pairs, market=FOREX, lookback_days=lookback_days, client=client, now=now
+        session,
+        pairs,
+        market=FOREX,
+        lookback_days=lookback_days,
+        client=client,
+        now=now,
+        from_date=from_date,
     )
 
 
@@ -348,10 +362,17 @@ def ingest_crypto(
     lookback_days: int,
     client: ForexClient | None = None,
     now: datetime | None = None,
+    from_date: date | None = None,
 ) -> ForexIngestReport:
-    """Top up each crypto pair (see :func:`ingest_daily`)."""
+    """Top up (or, with ``from_date``, backfill) each crypto pair."""
     return ingest_daily(
-        session, pairs, market=CRYPTO, lookback_days=lookback_days, client=client, now=now
+        session,
+        pairs,
+        market=CRYPTO,
+        lookback_days=lookback_days,
+        client=client,
+        now=now,
+        from_date=from_date,
     )
 
 
@@ -363,10 +384,15 @@ def ingest_daily(
     lookback_days: int,
     client: ForexClient | None = None,
     now: datetime | None = None,
+    from_date: date | None = None,
 ) -> ForexIngestReport:
     """Top up each pair from its newest stored bar (or ``lookback_days`` back)
     to the last completed UTC day. Idempotent: an existing
-    (pair, date, source) row is never rewritten."""
+    (pair, date, source) row is never rewritten.
+
+    With ``from_date`` the run instead BACKFILLS older history: it requests
+    ``[from_date, oldest stored - 1 day]`` (or up to the last completed day for
+    a pair with nothing stored) and leaves the forward top-up to normal runs."""
     if lookback_days <= 0:
         raise ValueError("lookback_days must be positive")
     pairs = parse_pairs(pairs, market)
@@ -379,16 +405,23 @@ def ingest_daily(
         ensure_not_engaged()
         pr = PairReport(pair=pair)
         rep.pairs.append(pr)
-        latest = _latest_stored(session, market, pair)
-        start = (latest + timedelta(days=1)) if latest else end - timedelta(days=lookback_days)
+        pair_end = end
+        if from_date is not None:
+            oldest = _oldest_stored(session, market, pair)
+            start = from_date
+            if oldest is not None:
+                pair_end = min(end, oldest - timedelta(days=1))
+        else:
+            latest = _latest_stored(session, market, pair)
+            start = (latest + timedelta(days=1)) if latest else end - timedelta(days=lookback_days)
         session.commit()  # release any read transaction before network I/O
-        if start > end:
+        if start > pair_end:
             pr.status = "up_to_date"
             continue
-        pr.requested_from, pr.requested_to = start.isoformat(), end.isoformat()
+        pr.requested_from, pr.requested_to = start.isoformat(), pair_end.isoformat()
         try:
-            body = client.daily(pair, start, end)
-            parsed = parse_bars(body, start=start, end=end, trades_weekends=weekends)
+            payload = client.daily(pair, start, pair_end)
+            parsed = parse_bars(payload, start=start, end=pair_end, trades_weekends=weekends)
         except (AdapterError, ValueError, KeyError, TypeError, OverflowError) as exc:
             pr.status = "failed"
             pr.error = str(exc)[:200]
@@ -410,7 +443,7 @@ def ingest_daily(
                     m.pair == pair,
                     m.source == market.provider,
                     m.session_date >= start,
-                    m.session_date <= end,
+                    m.session_date <= pair_end,
                 )
             )
         )
@@ -435,7 +468,7 @@ def ingest_daily(
         have = existing | {b["session_date"] for b in parsed.bars}
         pr.gaps = [
             d.isoformat()
-            for d in fx_weekdays(start, end, trades_weekends=weekends)
+            for d in fx_weekdays(start, pair_end, trades_weekends=weekends)
             if d not in have
         ]
         record_feed_success(session, market.capability)
