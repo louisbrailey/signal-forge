@@ -25,6 +25,8 @@ def run(source: Path, ledger: Path, limit: int = 250) -> dict[str, int]:
     counts: dict[str, int] = {}
     try:
         with sqlite3.connect(ledger, timeout=1) as db, Session(engine) as session:
+            page_size = db.execute("PRAGMA page_size").fetchone()[0]
+            db.execute(f"PRAGMA max_page_count={256 * 1024 * 1024 // page_size}")
             db.execute(
                 "CREATE TABLE IF NOT EXISTS outcomes (symbol TEXT, origin TEXT, "
                 "horizon INTEGER, evaluated_at TEXT, payload TEXT, PRIMARY "

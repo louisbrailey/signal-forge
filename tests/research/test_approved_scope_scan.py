@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
+from freezegun import freeze_time
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -672,6 +673,7 @@ def _ingest_fixture_universe(session: Session, symbols: list[str]) -> tuple[str,
     return adapter.provider_name, now, as_of
 
 
+@freeze_time("2024-07-01T21:45:00Z")
 def test_real_run_scan_resolves_the_approved_snapshot_end_to_end(session: Session) -> None:
     """Integration: the un-mocked run_scan/persist_scan on the approved symbol
     set resolves the SAME DataSnapshot row the approval was keyed on."""
@@ -702,6 +704,7 @@ def test_real_run_scan_resolves_the_approved_snapshot_end_to_end(session: Sessio
     assert all(r["source"] == src for r in report.runs)
 
 
+@freeze_time("2024-07-01T21:45:00Z")
 def test_each_versions_candidates_match_only_its_own_scope(session: Session) -> None:
     """Two approved versions on two different dataset snapshots: every scan
     run (and every candidate on it) must satisfy research.approval_scope's
