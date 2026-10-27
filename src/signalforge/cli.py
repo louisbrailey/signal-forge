@@ -632,6 +632,84 @@ def crypto_paper_status(
     typer.echo(st["notice"])
 
 
+@data_app.command("crypto-hourly-ingest")
+def data_crypto_hourly_ingest(
+    since: Annotated[str, typer.Option(help="First UTC day to fetch (YYYY-MM-DD).")] = "2017-01-01",
+    until: Annotated[str, typer.Option(help="Last UTC day (default: last complete hour).")] = "",
+    pairs: Annotated[
+        str | None, typer.Option(help="Comma-separated pairs (default: CRYPTO_PAIRS).")
+    ] = None,
+) -> None:
+    """Backfill / top up hourly crypto bars into crypto_bar_intraday, one
+    request per pair-month (months already complete are skipped). Research only."""
+    from signalforge.config import get_settings
+    from signalforge.data.crypto_intraday import ingest_crypto_hourly
+    from signalforge.data.forex import CRYPTO, parse_pairs
+    from signalforge.db.session import session_scope
+
+    chosen = parse_pairs(pairs if pairs is not None else get_settings().crypto_pairs, CRYPTO)
+    with session_scope(write=True) as session:
+        rep = ingest_crypto_hourly(
+            session,
+            chosen,
+            start=date.fromisoformat(since),
+            end=date.fromisoformat(until) if until else None,
+        )
+    typer.echo(f"Hourly crypto bars {rep.start}..{rep.end} (UTC, completed hours only):")
+    for pr in rep.pairs:
+        typer.echo(
+            f"  {pr.pair:8} requests={pr.requests} +{pr.written} written, "
+            f"{pr.skipped_existing} existing, {pr.missing_hours} missing hours, "
+            f"{len(pr.failed_months)} failed months"
+        )
+        for f in pr.failed_months[:5]:
+            typer.echo(f"    ! {f}")
+    typer.echo("Research data only — no order was placed.")
+    if any(pr.failed_months for pr in rep.pairs):
+        raise typer.Exit(1)
+
+
+@crypto_app.command("research-hourly")
+def crypto_research_hourly(
+    pairs: Annotated[
+        str | None, typer.Option(help="Comma-separated pairs (default: CRYPTO_PAIRS).")
+    ] = None,
+    out: Annotated[
+        Path | None,
+        typer.Option(help="Report path (default: <data dir>/research/crypto/)."),
+    ] = None,
+) -> None:
+    """Evaluate the pre-registered CRYPTO-H1 hourly rules on the development
+    window. The sealed final year is never evaluated here. Research only."""
+    import json as _json
+
+    from signalforge.config import get_settings
+    from signalforge.config.paths import data_dir
+    from signalforge.data.forex import CRYPTO, parse_pairs
+    from signalforge.db.session import session_scope
+    from signalforge.research.fx.harness import render_markdown
+    from signalforge.research.fx.hourly import run_crypto_hourly_research
+
+    chosen = parse_pairs(pairs if pairs is not None else get_settings().crypto_pairs, CRYPTO)
+    with session_scope() as session:
+        report = run_crypto_hourly_research(session, chosen)
+    target = out or (
+        data_dir() / "research" / "crypto" / f"crypto_hourly_{report['version']}_{date.today()}.md"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(render_markdown(report))
+    target.with_suffix(".json").write_text(_json.dumps(report, indent=2, default=str))
+    for s in report["strategies"]:
+        m = s["pooled"]
+        typer.echo(
+            f"  {s['key']:30} {s['verdict']:9} trades={m['n_trades']:5d} "
+            f"exp={m['expectancy_r']:+.3f}R ci_low={s['ci_expectancy_r']['low']:+.3f}R "
+            f"2x={s['stress_expectancy_r']:+.3f}R"
+        )
+    typer.echo(f"Sealed from {report['sealed_from']} (not evaluated). Report: {target}")
+    typer.echo("Research only — no order was placed.")
+
+
 @providers_app.command("verify")
 def providers_verify(
     no_store: Annotated[

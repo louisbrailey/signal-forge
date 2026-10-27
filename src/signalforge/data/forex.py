@@ -234,10 +234,19 @@ class ForexClient:
         self._last: float | None = None
 
     def daily(self, pair: str, start: date, end: date) -> dict[str, Any]:
+        return self.aggregates(pair, start, end, multiplier=1, timespan="day")
+
+    def aggregates(
+        self, pair: str, start: date, end: date, *, multiplier: int, timespan: str
+    ) -> dict[str, Any]:
+        """One un-paginated aggregates request (``day`` or ``hour`` bars)."""
+        if timespan not in ("day", "hour") or multiplier < 1:
+            raise ValueError("timespan must be day or hour, multiplier >= 1")
         if not self._key:
             raise AdapterError("forex: MARKET_DATA_API_KEY missing")
         path = (
-            f"/v2/aggs/ticker/{self._prefix}:{pair}/range/1/day/{start.isoformat()}/{end.isoformat()}"
+            f"/v2/aggs/ticker/{self._prefix}:{pair}/range/{multiplier}/{timespan}/"
+            f"{start.isoformat()}/{end.isoformat()}"
             f"?adjusted=true&sort=asc&limit={_PAGE_LIMIT}"
         )
         last_status: int | None = None

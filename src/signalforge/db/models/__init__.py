@@ -21,6 +21,7 @@ from signalforge.db.models.grid import (
 from signalforge.db.models.market import (
     CorporateAction,
     CryptoBarDaily,
+    CryptoBarIntraday,
     DataFeedStatus,
     DataQualityFlagRow,
     DataValidationReport,
@@ -120,6 +121,7 @@ __all__ = [
     "QuoteSnapshot",
     "CorporateAction",
     "CryptoBarDaily",
+    "CryptoBarIntraday",
     "DividendEvent",
     "DividendYieldDaily",
     "SplitEvent",
