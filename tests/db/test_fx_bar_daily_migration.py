@@ -37,4 +37,5 @@ def test_upgrade_creates_the_table_and_downgrade_removes_only_it(db_url: str) ->
         "currency_sealed_test",
         "crypto_paper_book",
         "crypto_paper_trade",
+        "crypto_bar_intraday",
     }

@@ -447,6 +447,34 @@ class FxBarDaily(Base, IntPK, CreatedAt):
     quality_flags: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
+class CryptoBarIntraday(Base, IntPK, CreatedAt):
+    """Completed hourly (or other intraday) bars for one crypto pair.
+
+    Separate from every equity table for the same reason as the daily crypto
+    table. ``bar_start`` is the UTC start of the bar. Crypto trades around the
+    clock, so there are no sessions: every hour of every day is a bar."""
+
+    __tablename__ = "crypto_bar_intraday"
+    __table_args__ = (
+        UniqueConstraint("pair", "bar_size", "bar_start", "source"),
+        Index("ix_crypto_bar_intraday_pair_size_start", "pair", "bar_size", "bar_start"),
+    )
+
+    pair: Mapped[str] = mapped_column(String(16), index=True)
+    bar_size: Mapped[str] = mapped_column(String(8))  # e.g. 1h
+    bar_start: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float | None] = mapped_column(Float, default=None)
+    vwap: Mapped[float | None] = mapped_column(Float, default=None)
+    transactions: Mapped[int | None] = mapped_column(Integer, default=None)
+    source: Mapped[str] = mapped_column(String(40), index=True)
+    latency_category: Mapped[LatencyCategory] = mapped_column(SAEnum(LatencyCategory, **_ENUM_KW))
+    ingested_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
 class CryptoBarDaily(Base, IntPK, CreatedAt):
     """Completed daily bars for one crypto pair (Massive Currencies).
 
