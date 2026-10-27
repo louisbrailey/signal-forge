@@ -129,6 +129,46 @@ def test_history_records_an_ingestion_run_and_is_resumable(session: Session) -> 
     assert session.scalar(select(IngestionRun.id).where(IngestionRun.id == run.id)) == run.id
 
 
+def test_history_releases_writer_during_fetch_and_resumes_committed_chunk(session: Session) -> None:
+    import sqlite3
+
+    class InterruptedAdapter(FixtureMarketDataAdapter):
+        calls = 0
+
+        def fetch_intraday_bars(self, symbol, start, end, *, bar_size="5m"):
+            self.calls += 1
+            # A separate connection must be able to write while the provider
+            # request is in flight. A write-intent transaction here would fail.
+            db_path = session.get_bind().url.database
+            with sqlite3.connect(db_path, timeout=0.1) as conn:
+                conn.execute("CREATE TABLE IF NOT EXISTS heartbeat_probe (n INTEGER)")
+                conn.execute("INSERT INTO heartbeat_probe VALUES (1)")
+            if self.calls == 2:
+                raise KeyboardInterrupt()
+            return super().fetch_intraday_bars(symbol, start, end, bar_size=bar_size)
+
+    start, end = date(2024, 6, 3), date(2024, 7, 12)
+    adapter = InterruptedAdapter()
+    with pytest.raises(KeyboardInterrupt):
+        ingest_intraday_history(session, adapter, ["SPY"], start, end, bar_size="15m")
+    run = session.scalar(select(IngestionRun).order_by(IngestionRun.id.desc()))
+    assert run is not None and run.status == "running"
+    first_count = run.bars_written
+    assert first_count > 0 and run.symbols_ok == []
+    session.commit()
+    resumed = ingest_intraday_history(
+        session,
+        FixtureMarketDataAdapter(),
+        ["SPY"],
+        start,
+        end,
+        bar_size="15m",
+        resume_run_id=run.id,
+    )
+    assert resumed.status == "ok" and resumed.bars_written > first_count
+    assert len(session.scalars(select(OHLCVIntraday)).all()) == resumed.bars_written
+
+
 def test_history_reports_gaps_for_a_symbol_with_no_data(session: Session) -> None:
     class _NoBars:
         provider_name = "fixture"
