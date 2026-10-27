@@ -121,6 +121,9 @@ def test_job_news_poll_ingests_generic_and_benzinga_feeds_separately(
         research=fake_research, news_api_key=_FakeSecret(), market_data_api_key=_FakeSecret()
     )
     monkeypatch.setattr("signalforge.config.get_settings", lambda: fake_settings)
+    monkeypatch.setattr(
+        "signalforge.settings_store.effective_research_config", lambda _session: fake_research
+    )
 
     seen_providers: list[str] = []
 
@@ -472,3 +475,33 @@ def test_catch_up_is_not_owed_when_a_partial_run_got_the_whole_configured_univer
     _write({}, [*configured, "ZZA"])
     pending, reason = sched.catch_up_pending(now)
     assert pending is True, reason
+
+
+def test_job_news_poll_follows_the_operators_saved_setting(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The news switch saved from the dashboard (research overrides) must take
+    effect. The job used to read only static settings, so a saved toggle was
+    silently ignored."""
+    from signalforge.db.session import session_scope
+    from signalforge.settings_store import RESEARCH_OVERRIDES_KEY, set_setting
+
+    calls: list[str] = []
+
+    def fake_ingest_news(session, adapter, tickers, *, lookback_days=3, limit=50):
+        from signalforge.data.news_ingest import NewsIngestReport
+
+        calls.append(adapter.provider_name)
+        return NewsIngestReport(fetched=0, written=0, duplicates=0, publishers=[])
+
+    monkeypatch.setattr("signalforge.data.news_ingest.ingest_news", fake_ingest_news)
+
+    sched.job_news_poll()  # default config: polling off
+    assert calls == []
+
+    with session_scope(write=True) as s:
+        set_setting(
+            s, RESEARCH_OVERRIDES_KEY, {"news": {"poll_enabled": True, "us_session_only": False}}
+        )
+    sched.job_news_poll()
+    assert calls == ["massive_news_generic", "massive_benzinga_news"]
