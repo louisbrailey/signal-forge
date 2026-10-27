@@ -22,6 +22,7 @@ from signalforge.data.adapters.base import (
     AdapterError,
     DailyBar,
     FeedType,
+    IntradayBar,
     IntradayBarAdapter,
     LatencyCategory,
     MarketDataAdapter,
@@ -485,6 +486,7 @@ def ingest_intraday_symbol(
     bar_size: str = "5m",
     rth_only: bool = True,
     record_feed_status: bool = True,
+    prefetched_bars: list[IntradayBar] | None = None,
 ) -> SymbolIngestResult:
     """Fetch and store one symbol's intraday bars for ``[start, end]``.
 
@@ -501,7 +503,11 @@ def ingest_intraday_symbol(
     inst = get_or_create_instrument(session, symbol)
     cap = _capability(adapter, FeedType.BAR_INTRADAY)
     try:
-        bars = list(adapter.fetch_intraday_bars(symbol, start, end, bar_size=bar_size))
+        bars = (
+            prefetched_bars
+            if prefetched_bars is not None
+            else list(adapter.fetch_intraday_bars(symbol, start, end, bar_size=bar_size))
+        )
     except AdapterError as exc:
         result.error = str(exc)
         # A historical backfill must not touch the live feed row on failure
@@ -847,9 +853,8 @@ def ingest_intraday_history(
     Mirrors :func:`ingest_daily_history`'s persistence and resume contract:
     one ``IngestionRun`` row records the requested window, per-symbol success,
     failures, coverage gaps and row counts; a symbol already recorded in
-    ``symbols_ok`` is skipped on resume; and the run is COMMITTED after every
-    symbol, so each symbol is one short write transaction and the SQLite write
-    lock is released before the next symbol's paced network fetch
+    ``symbols_ok`` is skipped on resume. Each chunk and its counters commit
+    together, and no transaction is held during paced network fetches
     (docs/SQLITE_CONCURRENCY.md).
 
     The span is split into calendar chunks that each fit under the provider's
@@ -896,6 +901,9 @@ def ingest_intraday_history(
     gaps: dict[str, list[list[str]]] = dict(run.gaps_json or {})
     written = int(run.bars_written or 0)
     skipped = int(run.bars_skipped or 0)
+    run.status = "running"
+    run.finished_at = None
+    session.commit()  # release the initial write lock before any network I/O
 
     for sym in plan.symbols:
         if sym in ok:  # resume: already done cleanly
@@ -908,6 +916,23 @@ def ingest_intraday_history(
             # ends on a trading day (incident 2026-10-26, ingestion_run 73).
             lo = datetime.combine(chunk.start, datetime.min.time(), tzinfo=_NY)
             hi = datetime.combine(chunk.end, datetime.max.time(), tzinfo=_NY)
+            from signalforge.killswitch import ensure_not_engaged
+
+            ensure_not_engaged()
+            try:
+                bars = list(adapter.fetch_intraday_bars(sym, lo, hi, bar_size=bar_size))
+            except AdapterError as exc:
+                sym_error = f"{chunk.start}..{chunk.end}: {exc}"
+                if record_feed_status:
+                    record_feed_failure(
+                        session,
+                        adapter.provider_name,
+                        FeedType.BAR_INTRADAY,
+                        str(exc),
+                        rate_limited=exc.rate_limited,
+                        capability=_capability(adapter, FeedType.BAR_INTRADAY),
+                    )
+                break
             r = ingest_intraday_symbol(
                 session,
                 adapter,
@@ -917,9 +942,13 @@ def ingest_intraday_history(
                 bar_size=bar_size,
                 rth_only=True,
                 record_feed_status=record_feed_status,
+                prefetched_bars=bars,
             )
             written += r.bars_written
             skipped += r.bars_skipped
+            run.bars_written = written
+            run.bars_skipped = skipped
+            session.commit()  # bars and counters are atomic; release lock before next fetch
             if r.error:
                 sym_error = f"{chunk.start}..{chunk.end}: {r.error}"
                 break  # a hole mid-history is not repaired by fetching later years
@@ -932,6 +961,8 @@ def ingest_intraday_history(
             if sym not in ok:
                 ok.append(sym)
         inst = session.scalar(select(_Inst).where(_Inst.symbol == sym))
+        if inst is None:
+            inst = get_or_create_instrument(session, sym)
         if inst is not None:
             g = _intraday_symbol_gaps(session, inst.id, adapter.provider_name, bar_size, start, end)
             if g:
