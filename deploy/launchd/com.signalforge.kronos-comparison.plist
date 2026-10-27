@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/Users/louisbrailey/Projects/signal-forge/.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>PYTHONPATH</key>
+		<string>/Users/louisbrailey/.codex/worktrees/kronos-shadow-research/signal-forge/src</string>
+		<key>PYTHONUNBUFFERED</key>
+		<string>1</string>
+		<key>SIGNALFORGE_DATA_DIR</key>
+		<string>/Users/louisbrailey/Projects/signal-forge/data</string>
+	</dict>
+	<key>Label</key>
+	<string>com.signalforge.kronos-comparison</string>
+	<key>Nice</key>
+	<integer>10</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/louisbrailey/Projects/signal-forge/.venv/bin/python</string>
+		<string>-u</string>
+		<string>/Users/louisbrailey/.codex/worktrees/kronos-comparison-collector/signal-forge/scripts/kronos_comparison_collect.py</string>
+		<string>--checkout</string>
+		<string>/Users/louisbrailey/.codex/worktrees/kronos-shadow-research/signal-forge</string>
+		<string>--experiment</string>
+		<string>/Users/louisbrailey/.codex/worktrees/kronos-shadow-research/signal-forge/data/kronos-comparison-v1-short</string>
+		<string>--experiment</string>
+		<string>/Users/louisbrailey/.codex/worktrees/kronos-shadow-research/signal-forge/data/kronos-comparison-v1-medium</string>
+		<string>--env-file</string>
+		<string>/Users/louisbrailey/Projects/signal-forge/.env</string>
+		<string>--state-dir</string>
+		<string>/Users/louisbrailey/.codex/worktrees/kronos-shadow-research/signal-forge/data/comparison-collector</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/dev/null</string>
+	<key>StandardOutPath</key>
+	<string>/dev/null</string>
+	<key>StartInterval</key>
+	<integer>60</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/louisbrailey/.codex/worktrees/kronos-shadow-research/signal-forge</string>
+</dict>
+</plist>

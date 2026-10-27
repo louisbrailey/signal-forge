@@ -20,3 +20,12 @@ The paths are absolute for `/Users/louisbrailey/signal-forge`; edit them if
 the repo lives elsewhere. `KeepAlive` restarts a crashed process after
 `ThrottleInterval` (30 s). Alerts, paper probation, and auto-simulation stay
 OFF regardless of these agents — they only keep ingestion/scans/health running.
+
+## Isolated Kronos comparison collector
+
+The separate `com.signalforge.kronos-comparison` LaunchAgent observes successful
+post-close scans and advances the frozen private comparison books once per session.
+It does not add jobs to, or restart, the operating worker. See
+[the collector runbook](../../docs/KRONOS-COMPARISON-COLLECTOR.md) for pinned paths,
+status, installation and stopping only this service. Keep both its runner worktree
+and the frozen comparison worktree while the experiment is active.
