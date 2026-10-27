@@ -503,14 +503,19 @@ def ingest_intraday_symbol(
         bars = list(adapter.fetch_intraday_bars(symbol, start, end, bar_size=bar_size))
     except AdapterError as exc:
         result.error = str(exc)
-        record_feed_failure(
-            session,
-            adapter.provider_name,
-            FeedType.BAR_INTRADAY,
-            str(exc),
-            rate_limited=exc.rate_limited,
-            capability=cap,
-        )
+        # A historical backfill must not touch the live feed row on failure
+        # either: on 2026-10-26 a failing backfill created a BAR_INTRADAY row
+        # that had never succeeded, and any stale feed row blocks every
+        # candidate and briefing alert (alerts/dispatch.py, research/briefing.py).
+        if record_feed_status:
+            record_feed_failure(
+                session,
+                adapter.provider_name,
+                FeedType.BAR_INTRADAY,
+                str(exc),
+                rate_limited=exc.rate_limited,
+                capability=cap,
+            )
         return result
 
     existing = {

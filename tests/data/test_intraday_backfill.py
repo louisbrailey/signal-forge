@@ -405,3 +405,25 @@ def test_massive_intraday_never_leaks_the_key() -> None:
             "SPY", _OPEN, _OPEN + timedelta(hours=1), bar_size="15m"
         )
     assert "test-placeholder" not in str(exc.value)
+
+
+def test_a_failing_backfill_never_creates_a_feed_status_row(session: Session) -> None:
+    """Incident 2026-10-26: failed backfill chunks recorded BAR_INTRADAY
+    failures, creating a never-successful feed row that blocks every candidate
+    and briefing alert. A backfill must leave feed status untouched on failure."""
+
+    class _AlwaysFails:
+        provider_name = "fixture"
+
+        @property
+        def capabilities(self):  # pragma: no cover - trivial
+            return FixtureMarketDataAdapter().capabilities
+
+        def fetch_intraday_bars(self, symbol, start, end, *, bar_size="5m"):
+            raise AdapterError("provider says no")
+
+    run = ingest_intraday_history(
+        session, _AlwaysFails(), ["SPY"], date(2024, 6, 3), date(2024, 6, 14), bar_size="15m"
+    )
+    assert run.symbols_failed
+    assert session.scalars(select(DataFeedStatus)).all() == []

@@ -975,17 +975,22 @@ def job_news_poll() -> None:
     Ingests the generic multi-publisher feed and the dedicated Benzinga News
     add-on feed as two separate calls, through two separate adapters — they
     stay distinct in the database (``NewsItem.provider``) and never merge."""
-    from signalforge.config import get_settings
     from signalforge.data.adapters.massive_news import BenzingaNewsAdapter, MassiveNewsAdapter
     from signalforge.data.news_ingest import ingest_news
     from signalforge.db.session import session_scope
+    from signalforge.settings_store import effective_research_config
 
-    cfg = get_settings().research.news
+    # Read the EFFECTIVE config (env defaults + the operator's saved overrides),
+    # like every other gated job. Reading ``get_settings().research`` here meant
+    # a news toggle saved from the dashboard never took effect.
+    with session_scope() as reader:
+        research = effective_research_config(reader)
+    cfg = research.news
     if not cfg.poll_enabled:
         return
     if cfg.us_session_only and not _in_us_market_session():
         return
-    tickers = list(get_settings().research.universe)
+    tickers = list(research.universe)
     with session_scope(write=True) as session:
         ingest_news(
             session,
