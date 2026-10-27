@@ -27,7 +27,10 @@ PERSISTENT_AGENTS = {
     "com.signalforge.worker.plist",
     "com.signalforge.kronos.plist",
 }
-PERIODIC_AGENTS = {"com.signalforge.kronos-comparison.plist"}
+PERIODIC_AGENTS = {
+    "com.signalforge.kronos-comparison.plist",
+    "com.signalforge.intraday-backfill.plist",
+}
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -103,7 +106,7 @@ def test_log_paths_are_under_library_logs_signalforge(plist: tuple[Path, dict[st
     err = data["StandardErrorPath"]
     assert Path(out).is_absolute()
     assert Path(err).is_absolute()
-    if path.name in PERSISTENT_AGENTS:
+    if path.name != "com.signalforge.kronos-comparison.plist":
         assert LOG_DIR_SUFFIX in out, out
         assert LOG_DIR_SUFFIX in err, err
     else:

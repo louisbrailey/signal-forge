@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.signalforge.intraday-backfill</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/louisbrailey/Projects/signal-forge/.venv/bin/python</string>
+    <string>/Users/louisbrailey/.local/share/signalforge/resume_intraday_backfill.py</string>
+    <string>--run-id</string><string>73</string>
+    <string>--bar-size</string><string>15m</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/louisbrailey/Projects/signal-forge</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/Users/louisbrailey/Projects/signal-forge/.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>1800</integer>
+  <key>Nice</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/Users/louisbrailey/Library/Logs/signalforge/intraday_resume.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/louisbrailey/Library/Logs/signalforge/intraday_resume.err.log</string>
+</dict></plist>
