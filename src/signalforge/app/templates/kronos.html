@@ -4,6 +4,15 @@
 {% block content %}
 <h1 class="text-2xl font-bold">Kronos Research</h1>
 {{ page_intro('Research on Kronos, an open-source AI model that forecasts price paths. It runs in shadow: forecasts are recorded and scored later, but never used to trade.') }}
+<section id="collection-panel" class="my-4 border rounded p-4 overflow-x-auto" hx-get="/kronos" hx-trigger="every 60s" hx-select="#collection-panel" hx-swap="outerHTML" aria-labelledby="collection-title">
+<h2 id="collection-title" class="text-xl font-semibold">Comparison books · automatic collection</h2>
+<p role="status"><strong>{{ collection.health }}</strong> · Last collector check: {{ collection.checked_at or 'Unavailable' }} UTC</p>
+<p class="text-sm">Checks every minute while this Mac is awake. Collects once after a successful approved daily scan. Waiting outside the eligible window is normal.</p>
+<table class="w-full text-left text-sm"><thead><tr><th>Book</th><th>Collection status</th><th>Last successful collection (UTC)</th><th>Market session</th></tr></thead><tbody>
+{% for book in collection.books %}<tr class="border-t"><td>{{ book.name }}</td><td>{{ book.status }}</td><td>{{ book.last_success or 'No successful collection in retained metadata' }}</td><td>{{ book.session or '—' }}</td></tr>{% else %}<tr><td colspan="4">Collection metadata unavailable. This does not establish a successful collection.</td></tr>{% endfor %}
+</tbody></table>
+<p class="text-sm">Operational status only. Frozen study rules and interim performance are not displayed. Research signal only — no order was placed.</p>
+</section>
 <section id="shadow-panel" class="my-4 border rounded p-4 overflow-x-auto" hx-get="/kronos" hx-trigger="every 60s" hx-select="#shadow-panel" hx-swap="outerHTML">
 <h2 class="text-xl font-semibold">Background research queue</h2>
 <p>Status: <strong>{{ shadow.status }}</strong> · Last check: {{ shadow.heartbeat or 'No heartbeat recorded' }} UTC.</p>

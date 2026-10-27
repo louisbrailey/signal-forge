@@ -209,6 +209,13 @@ def save_status(path: Path, results: list[dict]) -> None:
     old = [{k: v for k, v in r.items() if k != "checked_at"} for r in previous.get("results", [])]
     if brief != old:
         history = [*history, {"at": datetime.now(UTC).isoformat(), "results": brief}][-64:]
+    # Keep successful collection metadata after the transition ring rotates.
+    # This contains no positions, forecasts, outcomes or performance values.
+    successes = dict(previous.get("last_success", {}))
+    for transition in history:
+        for item in transition.get("results", []):
+            if item.get("status") == "complete":
+                successes[item["experiment"]] = {"at": transition["at"], "day": item["day"]}
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".status-")
     try:
         with os.fdopen(fd, "w") as f:
@@ -217,6 +224,7 @@ def save_status(path: Path, results: list[dict]) -> None:
                     "checked_at": datetime.now(UTC).isoformat(),
                     "results": results,
                     "transitions": history,
+                    "last_success": successes,
                 },
                 f,
                 indent=2,

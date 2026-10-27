@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     # tests self-contained). Set DATABASE_URL to override (e.g. Postgres).
     database_url: str = ""
 
+    # Operational metadata only; never read private comparison performance.
+    kronos_comparison_status_path: str = ""
+
     # --- Market data ---
     market_data_provider: str = "fixture"
     market_data_api_key: SecretStr = SecretStr("")
