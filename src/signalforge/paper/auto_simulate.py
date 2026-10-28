@@ -149,6 +149,9 @@ def auto_simulate_scan_runs(
     if not scan_run_ids:
         return report
 
+    # Decisions commit independently; persist the scan and its evidence before
+    # processing candidates so a rejected fill cannot roll the scan back.
+    session.commit()
     cap = max_per_day(session)
     taken: dict[int, int] = {}  # book (account) id -> ACCEPTED today
 
@@ -168,6 +171,7 @@ def auto_simulate_scan_runs(
     report.considered = len(cands)
 
     for cand in cands:
+        candidate_id = cand.id
         try:
             if _already_decided(session, cand.id):
                 report.skipped.append((cand.id, "candidate already has a paper decision"))
@@ -238,8 +242,9 @@ def auto_simulate_scan_runs(
             )
         except Exception as exc:  # one bad candidate must not stop the rest
             session.rollback()
-            report.skipped.append((cand.id, f"error: {type(exc).__name__}: {exc}"))
-            _log.error("paper.auto_simulate_failed", candidate=cand.id, error=str(exc))
+            taken.clear()  # rolled-back account creation/counts may no longer exist
+            report.skipped.append((candidate_id, f"error: {type(exc).__name__}: {exc}"))
+            _log.error("paper.auto_simulate_failed", candidate=candidate_id, error=str(exc))
     return report
 
 

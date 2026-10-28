@@ -188,6 +188,30 @@ def test_inert_unless_setting_is_on(session: Session, scope_matches: None) -> No
     assert _counts(session) == (0, 0, 0)
 
 
+def test_risk_refusal_preserves_scan_and_continues_to_next_candidate(
+    session: Session, scope_matches: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from signalforge.paper import auto_simulate as module
+
+    run, candidates = _seed(session, symbols=("AAPL", "MSFT"))
+    run_id, first_id, second_id = run.id, candidates[0].id, candidates[1].id
+    set_setting(session, "auto_simulate_qualified_signals", True)
+    original = module.accept_candidate
+
+    def fail_first(db: Session, candidate_id: int, **kwargs: object):
+        if candidate_id == first_id:
+            raise ValueError("paper account risk/cash/concentration limits allow no whole share")
+        return original(db, candidate_id, **kwargs)
+
+    monkeypatch.setattr(module, "accept_candidate", fail_first)
+    report = auto_simulate_scan_runs(session, [run_id])
+    assert report.skipped[0][0] == first_id
+    assert session.get(ScanRun, run_id) is not None
+    assert session.get(Candidate, first_id) is not None
+    assert session.get(Candidate, second_id) is not None
+    assert len(report.accepted) == 1
+
+
 def test_accepts_once_with_full_evidence_and_audit(session: Session, scope_matches: None) -> None:
     run, (cand,) = _seed(session)
     set_setting(session, "auto_simulate_qualified_signals", True)
