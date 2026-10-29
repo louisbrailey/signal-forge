@@ -81,8 +81,11 @@ EQUITY_FUNCTION_HASHES = {
     "_account": "dda728d6c95648c5122e3124f15a2466",  # pragma: allowlist secret
 }
 
-#: sha256 of the WHOLE of ``paper/auto_simulate.py``. I-O6 does not edit it.
-AUTO_SIMULATE_MODULE_HASH = "66ded95d1e73ac67c28592cf0a088a38"  # pragma: allowlist secret
+#: SHA-256 of the whole module. Updated after c44f138: scan evidence is committed
+#: before per-candidate simulation, and rollback caches the candidate ID and
+#: clears stale per-book counts. Risk checks and options separation are unchanged;
+#: test_risk_refusal_preserves_scan_and_continues_to_next_candidate covers the fix.
+AUTO_SIMULATE_MODULE_HASH = "66031802d86b5b699c737cfb6c6523c2"  # pragma: allowlist secret
 
 
 def _source_hash(name: str) -> str:
@@ -111,7 +114,7 @@ def test_the_equity_ledger_never_imports_the_options_modules() -> None:
 def test_paper_auto_simulate_is_byte_identical() -> None:
     """The strongest guarantee available that the live equity auto-simulation —
     setting ON since 2026-09-10, cap 2/day — is unaffected: the module it runs
-    through was not edited at all. The options branch is a SIBLING module that
+    through matches its reviewed pin. The options branch is a SIBLING module that
     copies its five structural guarantees rather than sharing code with it."""
     from signalforge.paper import auto_simulate
 
