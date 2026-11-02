@@ -5,7 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{% block title %}Signal Forge{% endblock %}</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script>tailwind.config = { darkMode: 'media' };</script>
+  <script>
+    /* Apple-inspired theme: remaps the palette names the templates already use (see the Signal Forge design system). */
+    tailwind.config = { darkMode: 'media', theme: { extend: {
+      fontFamily: { sans: ['-apple-system','BlinkMacSystemFont','"SF Pro Text"','"Helvetica Neue"','system-ui','sans-serif'],
+                    mono: ['ui-monospace','"SF Mono"','Menlo','monospace'] },
+      colors: {
+        slate: {50:'#f5f5f7',100:'#f2f2f7',200:'#e5e5ea',300:'#d1d1d6',400:'#8e8e93',500:'#6e6e73',600:'#515154',700:'#3a3a3c',800:'#1d1d1f',900:'#1c1c1e',950:'#000000'},
+        indigo: {50:'#e8f2fd',100:'#cce4fc',400:'#409cff',500:'#0a84ff',600:'#0071e3',700:'#0062c4'},
+        sky: {50:'#e8f2fd',600:'#0071e3',700:'#0066cc'},
+        emerald: {50:'#e3f6e8',100:'#d4f2dc',500:'#34c759',600:'#248a3d',700:'#1b6e30',800:'#155724',900:'#0f2a17'},
+        red: {50:'#fde8ea',100:'#fbd5d8',300:'#f5a3a9',500:'#ff3b30',600:'#d70015',700:'#b0000f'},
+        amber: {50:'#fff4e0',100:'#ffecc7',300:'#ffd27a',800:'#8a4b00',900:'#6b3a00',950:'#2e2008'}
+      },
+      borderRadius: { DEFAULT:'6px', md:'10px', lg:'14px', xl:'18px' },
+      boxShadow: { sm:'0 1px 3px rgba(0,0,0,.06), 0 4px 14px rgba(0,0,0,.04)', lg:'0 12px 40px rgba(0,0,0,.12)' }
+    } } };
+  </script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/htmx/2.0.3/htmx.min.js"></script>
   {% if user %}
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js" defer></script>
@@ -13,25 +29,32 @@
   {% endif %}
   <style>
     [data-disclaimer]{position:sticky;top:0;z-index:50}
+    body{-webkit-font-smoothing:antialiased;letter-spacing:-.01em}
     /* readable defaults for the many existing table/card pages */
     main table{width:100%;border-collapse:collapse}
-    main th{font-weight:600;text-align:left}
-    main th,main td{padding:.35rem .5rem}
-    main tbody tr:nth-child(even){background:rgba(148,163,184,.08)}
-    main section,main .card{border-radius:.75rem}
+    main th{font-weight:500;text-align:left;color:#6e6e73;font-size:.8125rem}
+    main th,main td{padding:.5rem .75rem;border-bottom:1px solid #e5e5ea}
+    main tbody tr:last-child td{border-bottom:0}
+    main section,main .card{border-radius:18px}
+    main .bg-white{border-color:transparent!important;box-shadow:0 1px 3px rgba(0,0,0,.06),0 4px 14px rgba(0,0,0,.04)}
+    main button,header button{border-radius:9999px!important}
+    aside,header,[data-disclaimer]{backdrop-filter:blur(20px) saturate(180%)}
+    aside{background:rgba(255,255,255,.72)!important}
     @media (prefers-color-scheme: dark){
-      body{background:#0b1220;color:#e2e8f0}
-      main .bg-white,main section.bg-white{background:#111a2e!important;border-color:#1e293b!important}
-      main .text-slate-900,main .text-slate-800{color:#f1f5f9!important}
-      main .text-slate-600,main .text-slate-500{color:#94a3b8!important}
-      main .border-slate-200,main .border-slate-300{border-color:#1e293b!important}
-      main .bg-slate-50,main .bg-slate-100{background:#0f172a!important}
-      input,select,textarea{background:#0f172a!important;color:#e2e8f0!important;border-color:#334155!important}
-      label,.text-slate-700{color:#cbd5e1!important}
-      button.bg-slate-900{background:#4f46e5!important}
-      main .bg-amber-50{background:#2a1d05!important;color:#fde68a!important}
-      main .bg-red-50{background:#2a0b0b!important;color:#fecaca!important}
-      main .bg-emerald-50{background:#062a1c!important;color:#a7f3d0!important}
+      body{background:#000;color:#f5f5f7}
+      aside{background:rgba(29,29,31,.72)!important}
+      main th,main td{border-bottom-color:#38383a}
+      main .bg-white,main section.bg-white{background:#1c1c1e!important;border-color:transparent!important;box-shadow:none}
+      main .text-slate-900,main .text-slate-800{color:#f5f5f7!important}
+      main .text-slate-600,main .text-slate-500{color:#a1a1a6!important}
+      main .border-slate-200,main .border-slate-300{border-color:#38383a!important}
+      main .bg-slate-50,main .bg-slate-100{background:#2c2c2e!important}
+      input,select,textarea{background:#2c2c2e!important;color:#f5f5f7!important;border-color:#48484a!important}
+      label,.text-slate-700{color:#d1d1d6!important}
+      button.bg-slate-900{background:#0a84ff!important}
+      main .bg-amber-50{background:#2e2008!important;color:#ffd60a!important}
+      main .bg-red-50{background:#3a1210!important;color:#ff6961!important}
+      main .bg-emerald-50{background:#0f2a17!important;color:#30d158!important}
     }
   </style>
 </head>

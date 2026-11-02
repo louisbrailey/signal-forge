@@ -8,16 +8,16 @@
  */
 (function () {
   "use strict";
-  const PALETTE = ["#6366f1", "#10b981", "#f59e0b", "#ef4444", "#06b6d4", "#a855f7", "#84cc16", "#ec4899"];
+  const PALETTE = ["#007aff", "#34c759", "#ff9500", "#ff3b30", "#5ac8fa", "#af52de", "#ffcc00", "#ff2d55"];
   const dark = () => window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
 
   function theme() {
     const d = dark();
     return {
-      layout: { background: { type: "solid", color: "transparent" }, textColor: d ? "#cbd5e1" : "#334155", fontSize: 11 },
-      grid: { vertLines: { color: d ? "#1e293b" : "#eef2f7" }, horzLines: { color: d ? "#1e293b" : "#eef2f7" } },
-      rightPriceScale: { borderColor: d ? "#334155" : "#e2e8f0" },
-      timeScale: { borderColor: d ? "#334155" : "#e2e8f0" },
+      layout: { background: { type: "solid", color: "transparent" }, textColor: d ? "#a1a1a6" : "#6e6e73", fontSize: 11 },
+      grid: { vertLines: { color: d ? "#2c2c2e" : "#f2f2f7" }, horzLines: { color: d ? "#2c2c2e" : "#f2f2f7" } },
+      rightPriceScale: { borderColor: d ? "#38383a" : "#e5e5ea" },
+      timeScale: { borderColor: d ? "#38383a" : "#e5e5ea" },
       crosshair: { mode: 1 },
     };
   }
@@ -82,7 +82,7 @@
         if (s.type === "bars") {
           ser = chart.addHistogramSeries({ color: color, priceFormat: { type: "volume" } });
         } else if (s.type === "candles") {
-          ser = chart.addCandlestickSeries({ upColor: "#10b981", downColor: "#ef4444", wickUpColor: "#10b981", wickDownColor: "#ef4444", borderVisible: false });
+          ser = chart.addCandlestickSeries({ upColor: "#34c759", downColor: "#ff3b30", wickUpColor: "#34c759", wickDownColor: "#ff3b30", borderVisible: false });
         } else if (p.series.length === 1) {
           ser = chart.addAreaSeries({ lineColor: color, topColor: color + "55", bottomColor: color + "05", lineWidth: 2 });
         } else {
@@ -123,7 +123,7 @@
     if (!values || values.length < 2) return "";
     const w = 120, h = 28, lo = Math.min(...values), hi = Math.max(...values), span = hi - lo || 1;
     const pts = values.map((v, i) => (i * w / (values.length - 1)).toFixed(1) + "," + (h - (v - lo) / span * h).toFixed(1)).join(" ");
-    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + " " + h + '"><polyline fill="none" stroke="' + (up ? "#10b981" : "#ef4444") + '" stroke-width="1.5" points="' + pts + '"/></svg>';
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + " " + h + '"><polyline fill="none" stroke="' + (up ? "#34c759" : "#ff3b30") + '" stroke-width="1.5" points="' + pts + '"/></svg>';
   }
 
   function pct(v) {
