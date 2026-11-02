@@ -20,6 +20,8 @@ EXECUTION_MODULES = (
     "signalforge.execution.brokers",
     "signalforge.execution.brokers.paper_reference",
     "signalforge.execution.brokers.vendor_base",
+    "signalforge.execution.brokers.production",
+    "signalforge.execution.production",
     "signalforge.execution.brokers.webull_sandbox",
     "signalforge.execution.brokers.coinbase_sandbox",
     "signalforge.execution.arming",

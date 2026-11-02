@@ -1,10 +1,16 @@
 # ADR — Execution layer (pointer)
 
-- **Status:** accepted and IMPLEMENTED through increment W4c (2026-09-12). The execution
-  layer exists, is default-disabled, and its cycle can submit orders once a strategy is
-  armed — see "Increment W4c" at the foot of this file. **Nothing is armed. Nothing reaches
-  real money:** the only registered adapter is `paper_reference`, a local, deterministic,
-  network-free simulator, and `research.execution.enabled` ships False.
+**2026-11-01 amendment:** [ADR 0006](0006-broker-access-expansion.md) records
+operator authorization to implement separate human-confirmed production access.
+Canonical D6 carries the corresponding scope amendment. The strategy execution
+cycle and its registered adapters remain paper/sandbox-only. Nothing is activated
+by the amendment; implementation merges require gatekeeper ALLOW and passing gates.
+
+- **Status:** sandbox strategy execution implemented through W5, disabled by default.
+  Registered strategy adapters are `paper_reference`, `webull_sandbox` and
+  `coinbase_sandbox`. ADR 0006 additionally authorizes implementation of separate
+  operator-confirmed production commands, never selection by the strategy registry.
+  No runtime arming or particular transaction is authorized by this documentation.
 - **Deciders:** Louis Brailey (operator). Direction of 2026-09-11: Signal Forge is "no longer
   research use only"; end-to-end operational control granted.
 - **Full text:** `docs/research/options_designs/D6_execution_adr.md` — this file is a short
