@@ -2360,11 +2360,11 @@ def ingest_intraday_cmd(
         with session_scope(write=True) as session:
             report = ingest_intraday_universe(
                 session,
-                adapter,
+                adapter,  # type: ignore[arg-type]
                 syms,
                 start_dt,
                 end_dt,
-                bar_size=bar_size,  # type: ignore[arg-type]
+                bar_size=bar_size,
             )
         typer.secho(
             f"ingest-intraday[{adapter.provider_name}] {bar_size}: "

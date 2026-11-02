@@ -439,6 +439,13 @@ def _regime_census(trades: list[Any], regimes: Mapping[date, str]) -> _RegimeCen
     )
 
 
+def _fold_trades(trades: list[Any], lo: date, hi: date) -> list[Any]:
+    """Trades whose entry falls in ``[lo, hi)``. Intraday trades carry a
+    ``datetime`` entry stamp; comparing it to a fold's ``date`` bound raises
+    ``TypeError``, so the stamp is normalised the same way gate 6 does."""
+    return [t for t in trades if lo <= _as_date(t.entry_date) < hi]
+
+
 def _last_warmup_date(regimes: Mapping[date, str]) -> date | None:
     warm = [d for d, lbl in regimes.items() if lbl == "warmup"]
     return max(warm) if warm else None
@@ -1136,7 +1143,7 @@ def evaluate_promotion(
     for k in range(n_folds):
         lo = start + timedelta(days=span_days * k // n_folds)
         hi = start + timedelta(days=span_days * (k + 1) // n_folds)
-        ft = [t for t in full.trades if lo <= t.entry_date < hi]
+        ft = _fold_trades(full.trades, lo, hi)
         pm = compute_portfolio_metrics(ft, span_start=lo, span_end=hi)
         fold_rows.append(
             {

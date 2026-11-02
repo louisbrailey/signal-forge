@@ -279,3 +279,25 @@ def test_off_calendar_rows_are_reported_not_ignored(session: Session) -> None:
     )
     assert not report.complete
     assert "off-calendar" in report.detail()
+
+
+def test_gate1_fold_filter_accepts_intraday_datetime_entries() -> None:
+    """Gate 1 slices trades into calendar folds with ``date`` bounds. An
+    intraday trade's entry stamp is a ``datetime``; the slice used to raise
+    ``TypeError`` once gate 0 passed on real 15m bars (first seen 2026-11-02),
+    so no intraday strategy could ever reach gates 1-10."""
+    from datetime import date, datetime
+    from types import SimpleNamespace
+
+    from signalforge.research.promotion import _fold_trades
+
+    trades = [
+        SimpleNamespace(entry_date=datetime(2020, 1, 6, 14, 45)),
+        SimpleNamespace(entry_date=datetime(2020, 2, 3, 15, 0)),
+        SimpleNamespace(entry_date=date(2020, 1, 20)),
+    ]
+    inside = _fold_trades(trades, date(2020, 1, 1), date(2020, 2, 1))
+    assert [t.entry_date for t in inside] == [datetime(2020, 1, 6, 14, 45), date(2020, 1, 20)]
+    assert _fold_trades(trades, date(2020, 2, 1), date(2020, 3, 1))[0].entry_date == datetime(
+        2020, 2, 3, 15, 0
+    )
