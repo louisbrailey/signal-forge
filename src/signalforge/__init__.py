@@ -1,10 +1,10 @@
-"""Signal Forge — local-first, paper-trading-only market research platform.
+"""Signal Forge — local-first market research and paper simulation.
 
-This package produces research output first. Orders can exist only in the
-execution layer, which is OFF by default and places nothing unless the
-operator has explicitly enabled it and armed a strategy (nothing is armed by default);
-it never automates a trading venue. See ``DISCLAIMER.md``, ``ARCHITECTURE.md``
-(safety invariants S1-S10, S15a/S15b) and ``docs/decisions/0003-execution-layer.md``.
+Broker operations exist only in the isolated execution boundary and are OFF by
+default. Sandbox strategies require explicit arming. Production is a separate,
+human-confirmed CLI workflow with immutable reviews and durable account admission;
+it is never an automated strategy or LLM decision path. See DISCLAIMER.md,
+ARCHITECTURE.md and ADR 0006 for the supported scope and provider limitations.
 """
 
 from __future__ import annotations

@@ -35,14 +35,15 @@ fixed first and the build is measured against them.
 
 ### 1.2 Explicit non-goals (V1)
 
-- No brokerage connection of any kind **outside `signalforge.execution`**, and
-  that package reaches **paper/sandbox endpoints only** (amended 2026-09-12,
-  `docs/decisions/ADR-execution-layer.md`). No real-money endpoint is authorised
-  by that ADR; it would be a separate operator decision and a separate ADR.
-- No order execution, no trade routing, no OMS **outside `signalforge.execution`**,
-  which is disabled by default, armed only by an audited per-strategy-version
-  operator ceremony with a hard expiry, and armed by nothing at all by default.
-  As of this writing the package does not exist: zero lines of execution code.
+- Brokerage connections exist only inside `signalforge.execution`. Automated
+  strategy execution remains paper/sandbox-only. ADR 0006 authorizes separate,
+  default-disabled production access through explicit human-reviewed commands.
+- Production operations require distinct account/environment attestation, saved
+  exact transaction terms, expiry and one-time operator confirmation. They cannot
+  enter the automated strategy registry or be called by app, agents, LLM, research
+  or scheduler modules. Existing S15 import isolation stays binding.
+- Per-strategy arming remains required for the sandbox strategy cycle; production
+  confirmation is separate and grants authority only for its exact saved action.
 - No browser automation of any brokerage or trading venue — **no exception**. The
   ADR's adapter speaks REST over `httpx` and imports no vendor SDK and no browser
   driver, which is why nothing is removed from the S1 denylists.
@@ -69,7 +70,7 @@ These are enforced in code, not just documented. Each has an owning module and a
 
 | # | Invariant | Enforcement point | Test |
 |---|-----------|-------------------|------|
-| S1 | No module imports a brokerage SDK, opens a brokerage URL, or stores a field named like a broker credential — **outside `signalforge.execution`, which is the only place a broker surface may exist** (amended 2026-09-12, `docs/decisions/ADR-execution-layer.md`). That package is paper-endpoint-only, disabled by default, nothing armed by default, and it imports no vendor SDK and no browser driver, so nothing is removed from the denylists: `ib_insync`, `ibapi`, `alpaca_trade_api`, `selenium`, `ccxt` stay unimportable project-wide. | `import-linter` contract S1 + Ruff `banned-api` + source denylist scan (the four order-submission call strings are allowlisted for the path prefix `src/signalforge/execution/` and nowhere else) | `tests/safety/test_s1_no_broker_surface.py` |
+| S1 | No module imports a brokerage SDK, opens a brokerage URL, or stores a field named like a broker credential — **outside `signalforge.execution`, which is the only place a broker surface may exist** (amended 2026-09-12, `docs/decisions/ADR-execution-layer.md`). Its automated cycle is paper-endpoint-only; separate operator-confirmed production commands follow ADR 0006. Execution is disabled by default, nothing armed by default, and it imports no vendor SDK and no browser driver, so nothing is removed from the denylists: `ib_insync`, `ibapi`, `alpaca_trade_api`, `selenium`, `ccxt` stay unimportable project-wide. | `import-linter` contract S1 + Ruff `banned-api` + source denylist scan (the four order-submission call strings are allowlisted for the path prefix `src/signalforge/execution/` and nowhere else) | `tests/safety/test_s1_no_broker_surface.py` |
 | S2 | Account import is **manual CSV only**; importer never makes an outbound network call. | `portfolio.import` package has no network client in its dependency graph | `tests/safety/test_s2_import_offline.py` |
 | S3 | No LLM call is on the path that computes direction, entry, stop, target, size, or rank. | `research.*` and `risk.*` packages forbidden (import-linter) from importing `llm.*` | `tests/safety/test_s3_llm_not_in_decision_path.py` |
 | S4 | Signals, ranking, risk checks, backtests are deterministic given (inputs, code version, config hash). | Seeded RNG, no wall-clock in pure functions, config hashing | `tests/research/test_determinism.py` |

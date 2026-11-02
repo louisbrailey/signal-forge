@@ -1,5 +1,9 @@
 # Signal Forge
 
+Human-confirmed production broker commands are documented in
+[Operator broker access](docs/BROKER_ACCESS.md); supported capabilities and
+provider-granted permissions are reported separately.
+
 A **local-first, paper-trading-only** market-research and trade-recommendation
 platform for a single user. It ingests licensed market data, searches a
 conservative U.S. instrument universe for statistically tested trade candidates,
@@ -10,11 +14,14 @@ logged; the system continuously measures whether it has any **out-of-sample**
 predictive value.
 
 > **This is research, simulation, alerting, and education software. It is not
-> financial advice, and it places no order unless you explicitly enable the execution layer and arm a strategy; nothing is armed by default.** See [DISCLAIMER.md](DISCLAIMER.md).
+> financial advice, and execution is disabled by default. Sandbox strategy orders require arming; production operations require separate explicit per-action confirmation (ADR 0006).** See [DISCLAIMER.md](DISCLAIMER.md).
 
 ## What it will not do
 
-- No brokerage login, credential storage, order placement, or trade execution.
+- Broker access is confined to the execution boundary. Production operations
+  require separate account binding and explicit confirmation of exact saved terms;
+  the automated strategy cycle remains paper/sandbox-only. Credentials are supplied
+  by the operator out of band and are never stored by the execution layer.
 - No browser automation of any brokerage or trading venue; no scraping of sites
   that prohibit it; no unofficial/reverse-engineered brokerage APIs.
 - No LLM deciding entries, exits, or position size — those are deterministic,

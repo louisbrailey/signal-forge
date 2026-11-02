@@ -1,7 +1,8 @@
 # ADR 0006 — full broker access in TradePilot and Signal Forge
 
-Status: proposed implementation design, 2026-11-01. Operator direction recorded;
-production access is not implemented or enabled by this document.
+Status: implementation authorized by explicit operator direction, 2026-11-01.
+Runtime activation and particular transactions are not authorized by this document.
+Actual implementation merges require gatekeeper ALLOW and passing tests.
 
 ## Context
 
@@ -26,7 +27,7 @@ has been authorized.
 | Signal Forge / Coinbase | Static sandbox accounts, positions and order adapter | Public GET accounts/history/portfolios and parsers exercised. Wrong-account proof refused; positive proof deliberately pending at operator direction. |
 | Coinbase MCP | Separate Claude Code connection described in handoff | No Coinbase or Webull connector tool is available in this Codex session. Its OAuth grant is not an application credential. |
 
-## Proposed design
+## Decision
 
 1. Track **requested**, **provider-granted**, **implemented** and **verified**
    capabilities independently per provider, environment and account. Display all
@@ -66,7 +67,8 @@ has been authorized.
 2. Review this design together with D6 §§0, 12, 13, 16, 17, 18 and 22. Before a
    live implementation merges, amend the canonical D6 boundary, architecture,
    safety/import contracts and shipped promises together, with gatekeeper ALLOW.
-   This proposal alone supersedes none of those safeguards.
+   The production scope amendment is recorded at the top of canonical D6; all
+   other safeguards remain binding.
 3. Add a read-only permission/account audit for each actual API product using
    operator-provisioned keys. A wider key grant does not implement missing routes;
    successful authentication does not prove trade/transfer entitlement.
@@ -90,13 +92,78 @@ permissions; a working retail token does not establish those entitlements:
 Coinbase portfolio key scope can limit visibility; "full access" cannot be inferred
 from one successful accounts call:
 [Advanced Trade portfolios](https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/guides/portfolios).
+That guide documents internal portfolio transfers as instantaneous and free;
+this does not establish the same semantics for external withdrawals or bank funding.
 Its unauthenticated sandbox returns static mock data, not production-account proof:
 [sandbox reference](https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/sandbox).
+
+## Automated versus operator-controlled execution
+
+Production adapters are not registered in the automated strategy execution registry.
+Human-confirmed operations form a separate surface inside the execution boundary,
+reachable only through sanctioned operator commands. Import isolation continues to
+exclude research, agents, LLM, app and scheduler paths from order submission.
+The kill switch blocks new exposure and transfers; protective closing and cancellation
+remain available with exact account binding and explicit operator confirmation.
+Manually accepted paper trades never authorize production orders.
 
 ## Consequences
 
 The requested scope is recorded for both apps, while provider permissions,
-application support and runtime evidence remain separate. Current blockers are
-operator provisioning, missing production implementations and review of the
-explicit boundary amendment. This document enables no production route, changes
+application support and runtime evidence remain separate. Implementations must
+list their supported products explicitly; broad credentials cannot fill a missing
+application capability. Operator provisioning and read-only account verification
+remain necessary before runtime access can be established. This document changes
 no permission grant and authorizes no particular financial transaction.
+
+## Required admission and confirmation controls
+
+Both apps coordinate production writes through one local account admission ledger
+at `~/Library/Application Support/BrokerAccess/admission.sqlite3`, with a unique
+(provider, environment, account) key. An immediate SQLite transaction reserves the
+account for the immutable action ID and app owner. Concurrent writers refuse.
+SUBMITTING and UNKNOWN reservations survive process restart and never expire into
+permission to resend. A missing provider lookup is not proof that a send failed;
+only authoritative provider resolution can release uncertain admission. Credentials
+are never in this ledger. Multi-host write operation is unsupported without a shared
+coordinator; private credentials must remain bound to the single local coordinator.
+
+Immediately before sending, recheck account/environment, applicable permissions,
+review expiry, kill state, exact economics and available funds/reservations. Bind API
+product, instrument/asset, order type, TIF, quantity denomination, maximum debit and
+fee bounds. Transfer reviews also bind destination, network and any required memo/tag.
+Reject bounds the provider cannot enforce. A protective close must be proven to
+reduce current exposure; transfers never inherit a close exemption. Foreign orders
+and unresolved actions block admission rather than being automatically repaired.
+
+Confirmation is single-use authority bound to an immutable review digest through
+an authenticated operator channel. A CLI phrase by itself does not prove a human
+is present; unattended callers must not receive authority merely by setting a flag.
+No agent may exercise the confirmation path during implementation verification.
+Tests use injected fake approval and fake providers only.
+
+The operator's current instruction authorizes implementation and its matching
+boundary/tests/docs changes in an isolated branch together. This replaces D6's
+historical docs-before-code sequencing for this increment; no implementation merge
+is permitted until the combined diff receives gatekeeper ALLOW and passing gates.
+
+## Explicit estimated-fee admission amendment
+
+Orders may use explicitly selected, review-bound estimated-fee admission where
+provider-enforced fee caps are unavailable. Strict `require_provider_cap` remains
+the default and never falls back automatically. `accept_rechecked_estimate` requires
+per-review operator selection and immutable fee-estimate/debit-admission ceilings,
+headroom and currencies in the confirmed digest. Display that these are checks
+before submission: actual fees and total debit may exceed them. Quantity and limit
+price remain independently enforced by the order contract.
+
+Under shared account admission, immediately recheck a fresh preview matching the
+exact account, product and order. Missing, malformed, stale or incompletely covered
+fee estimates refuse. Buy admission includes limit notional, the approved fee
+allowance and headroom against available funds. Sell and third-asset fees require
+separate correct accounting. A changed estimate within the approved ceiling is
+recorded separately; exceeding a ceiling requires a new review. Never rewrite
+approved terms. Reconciliation records actual fees and highlights overruns without
+resubmitting or prematurely releasing uncertain reservations. This explicit mode
+qualifies the earlier hard-economic-bound requirement only for fee estimates;
+unsupported requested strict bounds still refuse.
