@@ -2359,7 +2359,12 @@ def ingest_intraday_cmd(
         start_dt = end_dt - timedelta(days=days)
         with session_scope(write=True) as session:
             report = ingest_intraday_universe(
-                session, adapter, syms, start_dt, end_dt, bar_size=bar_size  # type: ignore[arg-type]
+                session,
+                adapter,
+                syms,
+                start_dt,
+                end_dt,
+                bar_size=bar_size,  # type: ignore[arg-type]
             )
         typer.secho(
             f"ingest-intraday[{adapter.provider_name}] {bar_size}: "
@@ -3947,8 +3952,7 @@ def universe_sectors_cmd(
         fg=typer.colors.GREEN,
     )
     typer.echo(
-        "SIC-derived labels are approximate (not GICS). "
-        "Research signal only — no order was placed."
+        "SIC-derived labels are approximate (not GICS). Research signal only — no order was placed."
     )
 
 
@@ -5525,8 +5529,7 @@ def execution_arm(
         str,
         typer.Option(
             "--preregistration",
-            help="The pre-registration document id (a docs/ filename stem). No arming "
-            "without one.",
+            help="The pre-registration document id (a docs/ filename stem). No arming without one.",
         ),
     ] = "",
     adapter: Annotated[str, typer.Option("--adapter", help="Adapter name.")] = "",
