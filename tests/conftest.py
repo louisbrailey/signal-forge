@@ -42,6 +42,10 @@ def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
     monkeypatch.setenv("NOTIFICATION_PROVIDER", "")
     monkeypatch.setenv("DISCORD_WEBHOOK_URL", "")
     monkeypatch.setenv("LLM_PROVIDER", "")
+    # Opt-in research/paper lanes default OFF in tests regardless of the local .env.
+    monkeypatch.setenv("FOREX_INGEST_ENABLED", "false")
+    monkeypatch.setenv("CRYPTO_INGEST_ENABLED", "false")
+    monkeypatch.setenv("CRYPTO_PAPER_ENABLED", "false")
 
     import signalforge.killswitch as ks
     from signalforge.config.settings import get_settings
