@@ -11,8 +11,10 @@ from typing import TYPE_CHECKING, Annotated, Any
 import typer
 
 if TYPE_CHECKING:
+    from pydantic import SecretStr
     from sqlalchemy.orm import Session
 
+    from signalforge.config.research import ResearchConfig
     from signalforge.data.options_backfill import (
         BackfillRequestPlan,
         OptionsCoverageSummary,
@@ -4945,10 +4947,14 @@ def _execution_adapter(
         typer.secho(f"no adapter: {exc}", fg=typer.colors.YELLOW)
         return None
 
-    if name != "paper_reference":  # pragma: no cover - only one adapter exists
+    if name in ("webull_sandbox", "coinbase_sandbox"):
+        return _vendor_sandbox_adapter(
+            session, cfg, name, expected_account_id=expected_account_id, now=now
+        )
+    if name != "paper_reference":  # pragma: no cover - every registered name is handled above
         raise RuntimeError(
-            f"execution.adapter_name={name!r} is registered but this CLI knows how to "
-            "assemble the constructor arguments for 'paper_reference' only"
+            f"execution.adapter_name={name!r} is registered but this CLI does not know how to "
+            "assemble its constructor arguments"
         )
     try:
         account = SimulatedAccount(
@@ -4978,6 +4984,67 @@ def _execution_adapter(
         book=PaperReferenceOrderStore(session),
     )
     return adapter
+
+
+#: Keychain item names (service ``signalforge-execution``) for the Webull
+#: sandbox key pair, tried when the env-var NAMES in
+#: ``execution.credentials.ENV_VAR_NAMES`` are unset. Names only, never values.
+WEBULL_SANDBOX_KEYCHAIN_ITEMS = ("webull_sandbox.app_key", "webull_sandbox.app_secret")
+
+
+def _vendor_sandbox_adapter(
+    session: Session,
+    cfg: ResearchConfig,
+    name: str,
+    *,
+    expected_account_id: str,
+    now: datetime,
+) -> BrokerAdapter | None:
+    """Assemble a vendor SANDBOX adapter (Increment W5).
+
+    This is the one place the execution layer meets an HTTP client: the
+    transport is ``signalforge.sandbox_http.HttpxTransport``, constructed here
+    and injected, so nothing under ``signalforge.execution`` imports ``httpx``
+    and the posture tests that assert that keep holding. Credentials are
+    resolved by NAME (§16) — env var first, keychain second — and a missing
+    one is a refusal that builds no adapter, never a fallback.
+    """
+    from signalforge.execution import brokers as brokers_mod
+    from signalforge.execution.brokers.paper_reference import ExecutionEventAudit
+    from signalforge.execution.credentials import (
+        CredentialRef,
+        CredentialSource,
+        CredentialUnavailable,
+        resolve_credential,
+    )
+    from signalforge.sandbox_http import HttpxTransport
+
+    transport = HttpxTransport()
+    common = {
+        "audit": ExecutionEventAudit(session),
+        "expected_account_id": expected_account_id,
+        "transport": transport,
+        "now": _dt_now_utc,
+    }
+    if name == "coinbase_sandbox":
+        # Coinbase's sandbox is unauthenticated by design: no credential exists.
+        return brokers_mod.build_adapter(cfg, **common)
+
+    def _secret(env_name: str, keychain_item: str) -> SecretStr:
+        try:
+            return resolve_credential(CredentialRef(CredentialSource.ENV, env_name))
+        except CredentialUnavailable:
+            return resolve_credential(CredentialRef(CredentialSource.KEYCHAIN, keychain_item))
+
+    try:
+        app_key = _secret("SF_EXECUTION_WEBULL_SANDBOX_APP_KEY", WEBULL_SANDBOX_KEYCHAIN_ITEMS[0])
+        app_secret = _secret(
+            "SF_EXECUTION_WEBULL_SANDBOX_APP_SECRET", WEBULL_SANDBOX_KEYCHAIN_ITEMS[1]
+        )
+    except CredentialUnavailable as exc:
+        typer.secho(f"no adapter: {exc}", fg=typer.colors.YELLOW)
+        return None
+    return brokers_mod.build_adapter(cfg, app_key=app_key, app_secret=app_secret, **common)
 
 
 def _dt_now_utc() -> datetime:

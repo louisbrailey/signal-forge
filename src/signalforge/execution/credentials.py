@@ -55,6 +55,10 @@ KEYCHAIN_SERVICE = "signalforge-execution"
 ENV_VAR_NAMES: tuple[str, ...] = (
     "SF_EXECUTION_BROKER_KEY_ID",
     "SF_EXECUTION_BROKER_SECRET",
+    # Increment W5 — the Webull SANDBOX app key pair. Test-environment keys
+    # only; the adapter that reads them answers from one sandbox host.
+    "SF_EXECUTION_WEBULL_SANDBOX_APP_KEY",
+    "SF_EXECUTION_WEBULL_SANDBOX_APP_SECRET",
 )
 
 _SECURITY_BINARY = "/usr/bin/security"
