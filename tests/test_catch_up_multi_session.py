@@ -48,6 +48,21 @@ def _job_rows(name: str) -> list[JobRun]:
 # --------------------------------------------------------------------------- #
 # 1. ingest deadline
 # --------------------------------------------------------------------------- #
+def test_deadline_stop_retries_on_next_catchup_but_other_errors_back_off() -> None:
+    deadline = JobRun(
+        name="daily_eod_update",
+        status="failed",
+        detail="IngestDeadlineExceeded('deadline exceeded')",
+    )
+    unpublished = JobRun(
+        name="daily_eod_update", status="failed", detail="ProviderBarsNotPublished('pending')"
+    )
+    other = JobRun(name="daily_eod_update", status="failed", detail="RuntimeError('other failure')")
+    assert sched._retry_backoff(deadline) == timedelta(minutes=25)
+    assert sched._retry_backoff(unpublished) == timedelta(minutes=25)
+    assert sched._retry_backoff(other) == timedelta(hours=2)
+
+
 class _SteppingClock:
     """Deterministic monotonic clock: every reading is ``step`` seconds later."""
 
