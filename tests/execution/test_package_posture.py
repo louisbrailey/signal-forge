@@ -62,8 +62,8 @@ def test_importing_every_submodule_performs_no_network_call_and_reads_no_credent
 import importlib, os, sys
 
 os.environ["SF_EXECUTION_BROKER_KEY_ID"] = "would-be-read-if-anything-read-it"
-os.environ["SF_EXECUTION_WEBULL_SANDBOX_APP_KEY"] = "would-be-read-if-anything-read-it"
-os.environ["SF_EXECUTION_WEBULL_SANDBOX_APP_SECRET"] = "would-be-read-if-anything-read-it"
+os.environ["SF_EXECUTION_WEBULL_SANDBOX_APP_KEY"] = "would-be-read-if-anything-read-it"  # pragma: allowlist secret
+os.environ["SF_EXECUTION_WEBULL_SANDBOX_APP_SECRET"] = "would-be-read-if-anything-read-it"  # pragma: allowlist secret
 read = []
 real_get = os.environ.get
 
