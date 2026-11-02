@@ -353,7 +353,12 @@ socket.create_connection = _blocked
 subprocess.run = _blocked
 subprocess.check_output = _blocked
 
-WATCHED = ("SF_EXECUTION_BROKER_KEY_ID", "SF_EXECUTION_BROKER_SECRET")
+WATCHED = (
+    "SF_EXECUTION_BROKER_KEY_ID",
+    "SF_EXECUTION_BROKER_SECRET",
+    "SF_EXECUTION_WEBULL_SANDBOX_APP_KEY",
+    "SF_EXECUTION_WEBULL_SANDBOX_APP_SECRET",
+)
 read = []
 _real_getenv = os.getenv
 _real_get = os.environ.get
