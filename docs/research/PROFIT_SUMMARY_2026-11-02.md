@@ -71,7 +71,10 @@ book's $100.
 | crypto Donchian, 3 pairs ($100 R) | ≈ $140 |
 | **Total** | **≈ $300/month on ~$90k of paper capital** |
 
-With the two crypto candidates sealed-tested and passed, and relative strength trading, the
-same books would run at roughly **$1,000/month**; at the $150 equity R instead of the realised
-$55, roughly **$1,400/month**. These are averages over 10–12 years that include 2–3 losing
+Update 2026-11-02 evening: the 10-pair Donchian-55 rule passed its sealed year (+0.693R / 55)
+and is now a second crypto paper book at $100 R (full-history rate ≈ $350/month, sealed-year
+rate ≈ $320/month); the long-only momentum rule failed its sealed year (−0.062R / 130) and is
+rejected. With that book running and relative strength trading, the books would run at roughly
+**$700/month**; at the $150 equity R instead of the realised $55, roughly **$1,100/month**.
+These are averages over 10–12 years that include 2–3 losing
 years per rule; drawdowns of 40–70R per equity rule are part of the record.
