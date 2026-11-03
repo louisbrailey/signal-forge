@@ -1,5 +1,15 @@
 # Results — full-pipeline strategy review (2026-11-02)
 
+> **Audit correction (2026-11-02):** CRYPTO-2's stored `SEALED_PASS` is not reliable
+> promotion evidence: BNBUSD has only 244 of the 365 sealed-year daily bars and a
+> 1,735-day interior historical gap. The locked row is preserved; its paper book is
+> held against new entries through `crypto_paper_data_holds`. The provider recheck
+> for 2025-11-03..09 returned zero bars. Prior monthly dollar totals in this session
+> were unconstrained fixed-risk illustrations, not validated portfolio forecasts.
+> They should not be used to size capital or estimate income. See
+> `REPAIR_AUDIT_2026-11-02.md` and the coverage-audit JSON for the corrected evidence.
+
+
 Every registered strategy family, re-run through the repo's own gates on
 2026-11-02, with a verdict for each. Paper-only. No order was placed, no gate
 threshold or cost model was changed, and no new real sealed look was taken.

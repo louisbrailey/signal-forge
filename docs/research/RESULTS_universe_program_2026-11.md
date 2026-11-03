@@ -1,5 +1,15 @@
 # Results — cross-domain strategy program (pre-registered 2026-11-02)
 
+> **Audit correction (2026-11-02):** CRYPTO-2's stored `SEALED_PASS` is not reliable
+> promotion evidence: BNBUSD has only 244 of the 365 sealed-year daily bars and a
+> 1,735-day interior historical gap. The locked row is preserved; its paper book is
+> held against new entries through `crypto_paper_data_holds`. The provider recheck
+> for 2025-11-03..09 returned zero bars. Prior monthly dollar totals in this session
+> were unconstrained fixed-risk illustrations, not validated portfolio forecasts.
+> They should not be used to size capital or estimate income. See
+> `REPAIR_AUDIT_2026-11-02.md` and the coverage-audit JSON for the corrected evidence.
+
+
 Pre-registration: `docs/research/PREREGISTRATION_universe_program_2026-11-02.md` (commit
 `377c0c2`, written and committed before any of the runs below). All runs 2026-11-02/03 on
 scratch copies or read-only against the live database; the live database gained **data
@@ -199,12 +209,11 @@ clear the gate. **CRYPTO-H2 fails; the hourly family is closed at this parameter
 
 ## 4c. E — existing six strategies on the sector-SPDR universe (10 symbols, 2003-10-20 → 2025-09-07, `sfdata5`)
 
-Every strategy has positive OOS expectancy and every one fails gate 4 (bootstrap CI):
+Several strategies have positive OOS expectancy; none clears the entire ladder and each fails gate 4 (bootstrap CI):
 trend short +0.047R (CI −0.096), trend medium +0.098R (CI −0.053), mean reversion +0.050R
 (CI −0.049), relative strength +0.085R (CI −0.136), volatility breakout fails net
 expectancy, tsmom_etf.medium_swing +0.064R (CI −0.040), turn_of_month +0.037R (CI +0.003),
-tsmom_etf.position +0.198R (CI +0.006). Sector ETFs trend less cleanly than the large-cap
-names; nothing passes. The mega-cap universe (9 stocks, 2016+) is still running.
+tsmom_etf.position +0.198R (CI +0.006). This sector-universe test does not establish a tradable edge; nothing passes. The mega-cap universe (9 stocks, 2016+) is still running.
 
 ## 5. Not run, and why (from the pre-registration)
 

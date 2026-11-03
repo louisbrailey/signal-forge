@@ -1,0 +1,106 @@
+{
+  "ADAUSD": {
+    "first": "2018-02-26",
+    "last": "2026-11-02",
+    "bars": 3172,
+    "missing_internal_days": 0,
+    "sealed_2025_11_03_to_2026_11_02_days": 365,
+    "sealed_expected_days": 365
+  },
+  "AVAXUSD": {
+    "first": "2021-11-10",
+    "last": "2026-11-02",
+    "bars": 1819,
+    "missing_internal_days": 0,
+    "sealed_2025_11_03_to_2026_11_02_days": 365,
+    "sealed_expected_days": 365
+  },
+  "BCHUSD": {
+    "first": "2017-08-01",
+    "last": "2026-11-02",
+    "bars": 3381,
+    "missing_internal_days": 0,
+    "sealed_2025_11_03_to_2026_11_02_days": 365,
+    "sealed_expected_days": 365
+  },
+  "BNBUSD": {
+    "first": "2018-08-20",
+    "last": "2026-11-02",
+    "bars": 1255,
+    "missing_internal_days": 1742,
+    "sealed_2025_11_03_to_2026_11_02_days": 244,
+    "sealed_expected_days": 365
+  },
+  "BTCUSD": {
+    "first": "2015-01-01",
+    "last": "2026-11-02",
+    "bars": 4323,
+    "missing_internal_days": 1,
+    "sealed_2025_11_03_to_2026_11_02_days": 365,
+    "sealed_expected_days": 365
+  },
+  "DOGEUSD": {
+    "first": "2017-06-01",
+    "last": "2026-11-02",
+    "bars": 3442,
+    "missing_internal_days": 0,
+    "sealed_2025_11_03_to_2026_11_02_days": 365,
+    "sealed_expected_days": 365
+  },
+  "DOTUSD": {
+    "first": "2020-08-18",
+    "last": "2026-11-02",
+    "bars": 2268,
+    "missing_internal_days": 0,
+    "sealed_2025_11_03_to_2026_11_02_days": 365,
+    "sealed_expected_days": 365
+  },
+  "ETHUSD": {
+    "first": "2015-08-07",
+    "last": "2026-11-02",
+    "bars": 4100,
+    "missing_internal_days": 6,
+    "sealed_2025_11_03_to_2026_11_02_days": 365,
+    "sealed_expected_days": 365
+  },
+  "LINKUSD": {
+    "first": "2019-06-27",
+    "last": "2026-11-02",
+    "bars": 2685,
+    "missing_internal_days": 1,
+    "sealed_2025_11_03_to_2026_11_02_days": 365,
+    "sealed_expected_days": 365
+  },
+  "LTCUSD": {
+    "first": "2016-11-04",
+    "last": "2026-11-02",
+    "bars": 3650,
+    "missing_internal_days": 1,
+    "sealed_2025_11_03_to_2026_11_02_days": 365,
+    "sealed_expected_days": 365
+  },
+  "SOLUSD": {
+    "first": "2021-02-25",
+    "last": "2026-11-02",
+    "bars": 2076,
+    "missing_internal_days": 1,
+    "sealed_2025_11_03_to_2026_11_02_days": 365,
+    "sealed_expected_days": 365
+  },
+  "XLMUSD": {
+    "first": "2017-01-17",
+    "last": "2026-11-02",
+    "bars": 3395,
+    "missing_internal_days": 182,
+    "sealed_2025_11_03_to_2026_11_02_days": 365,
+    "sealed_expected_days": 365
+  },
+  "XRPUSD": {
+    "first": "2017-01-03",
+    "last": "2026-11-02",
+    "bars": 3578,
+    "missing_internal_days": 13,
+    "sealed_2025_11_03_to_2026_11_02_days": 365,
+    "sealed_expected_days": 365
+  }
+}
