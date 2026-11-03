@@ -1329,7 +1329,9 @@ def agents_context(session: Session) -> dict[str, Any]:
 
 
 def settings_context(session: Session) -> dict[str, Any]:
+    from signalforge.alerts.channels.discord import DiscordChannel
     from signalforge.config import get_settings
+    from signalforge.config.settings import LOCAL_LLM_PROVIDERS
 
     s = get_settings()
     cfg = effective_research_config(session)
@@ -1337,16 +1339,32 @@ def settings_context(session: Session) -> dict[str, Any]:
     def _isset(name: str) -> bool:
         return bool(getattr(s, name).get_secret_value())
 
+    keys = {
+        "MARKET_DATA_API_KEY": _isset("market_data_api_key"),
+        "NEWS_API_KEY": _isset("news_api_key"),
+        "LLM_API_KEY": _isset("llm_api_key"),
+        "NOTIFICATION_API_KEY": _isset("notification_api_key"),
+        "DISCORD_WEBHOOK_URL": _isset("discord_webhook_url"),
+        "APP_ENCRYPTION_KEY": _isset("app_encryption_key"),
+    }
+    key_status = {name: "set" if present else "not set" for name, present in keys.items()}
+    if not keys["NEWS_API_KEY"] and keys["MARKET_DATA_API_KEY"]:
+        key_status["NEWS_API_KEY"] = "uses MARKET_DATA_API_KEY for Massive news"
+    if not keys["LLM_API_KEY"] and s.llm_provider.strip().lower() in LOCAL_LLM_PROVIDERS:
+        key_status["LLM_API_KEY"] = "not required by configured OpenAI-compatible provider"
+    if not keys["NOTIFICATION_API_KEY"]:
+        # These adapters use their own credentials; no generic notification
+        # API key is consumed. Constructing a channel performs no network I/O.
+        if DiscordChannel.from_settings() is not None:
+            key_status["NOTIFICATION_API_KEY"] = "not required — Discord webhook configured"
+        else:
+            key_status["NOTIFICATION_API_KEY"] = "not used — local log always available"
+
     return {
         "research": cfg.model_dump(mode="json"),
         "config_hash": cfg.config_hash,
-        "keys": {
-            "MARKET_DATA_API_KEY": _isset("market_data_api_key"),
-            "NEWS_API_KEY": _isset("news_api_key"),
-            "LLM_API_KEY": _isset("llm_api_key"),
-            "NOTIFICATION_API_KEY": _isset("notification_api_key"),
-            "APP_ENCRYPTION_KEY": _isset("app_encryption_key"),
-        },
+        "keys": keys,
+        "key_status": key_status,
         "market_data_provider": s.market_data_provider,
         "llm_enabled": s.llm_enabled,
         "auto_simulate": bool(get_setting(session, "auto_simulate_qualified_signals", False)),
