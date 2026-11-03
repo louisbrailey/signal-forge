@@ -1,6 +1,6 @@
 # Full-history funded portfolio replay — implementation contract
 
-Status: planned; no funded historical performance is established by the existing sequential trade-R reporter.
+Status: an offline daily long-only core and read-only baseline runner are implemented. This is a descriptive research engine, not strategy promotion or production execution.
 
 ## Boundaries
 
@@ -31,3 +31,20 @@ The missing component is one chronological portfolio event loop across all selec
 - A zero-trade portfolio matches cash, while the matched benchmark uses the same dates and capital constraints.
 
 The dollar target is a reporting threshold. It must never select parameters, increase risk, force trades or suppress failed runs. Acceptance of the engine requires accounting and causal invariants, not a desired return.
+
+## Implemented core and first data run
+
+`backtest.funded.run_funded_replay` maintains shared cash and concurrent positions, calls the existing sizing engine, caps each initial position at 5% and sector exposure at 20% (or stricter caller limits), and caps allocation by 1% of the previous session’s volume. Stop risk includes entry/exit commissions and modeled exit costs. A crossed stop is rejected at the opening price. Only opening gap stops release cash before new entries; intrabar exits cannot retroactively finance that morning. Stops take priority over targets. Signals see only the prefix through their decision close. Terminal positions are liquidated with costs. Admission order is alphabetical and fixed in advance.
+
+```sh
+PYTHONPATH=src uv run python scripts/funded_replay_report.py /absolute/path/signalforge.sqlite \
+  --symbols SPY QQQ --since 2016-10-17 --until 2026-11-02
+```
+
+The runner opens the operating database read-only, rejects comparison databases, requires complete equal XNYS calendars and clean adjusted non-simulated Massive bars, and records input hashes. Missing data halts rather than silently shortening the period.
+
+A November 3 engineering smoke run used the unchanged short-swing trend baseline on SPY/QQQ: 2,525 sessions, 77 closed round trips, $10,000 initial cash, $10,038.53 final cash, and $33.36 modeled fill/commission costs. This final figure uses adverse cent rounding on both sides; the earlier nearest-cent development run returned $10,039.84 and is superseded. Default commission is zero, slippage 3bps and assumed full spread 5bps; these assumptions are not observed execution costs. This is an already-observed descriptive sample, not a sealed or full-universe validation.
+
+## Remaining before full-history validation
+
+Corporate-action cash/dividend accounting, point-in-time event/liquidity eligibility and sector data, a funded benchmark, calendar-day evidence export, delisting and changing-universe lifecycle handling, and drawdown-triggered entry suspension need implementation and tests. Existing risk controls cover per-trade, total open risk, notional, sector, cash and volume; no new drawdown guard is claimed. No cash-flow API is exposed by this first core. No all-asset or all-history profitability claim follows from the smoke run.
