@@ -716,9 +716,11 @@ def _require_session_published(adapter: MarketDataAdapter, now: datetime | None 
 
 
 def _retry_backoff(failed: JobRun) -> timedelta:
-    """How long catch-up waits after ``failed``: short when the provider simply
-    had not published yet (a one-request probe), long for a real failure."""
-    if str(failed.detail or "").startswith(ProviderBarsNotPublished.__name__):
+    """Retry a resumable deadline stop on the next catch-up, without relaxing
+    the longer backoff for other failures. Completed symbols remain checkpointed.
+    """
+    detail = str(failed.detail or "")
+    if detail.startswith((ProviderBarsNotPublished.__name__, IngestDeadlineExceeded.__name__)):
         return NOT_PUBLISHED_RETRY_BACKOFF
     return CATCH_UP_RETRY_BACKOFF
 

@@ -209,8 +209,8 @@ def test_mom21_is_causal_and_sign_of_one_month_return() -> None:
 # ---- refinement round 1 (§7) ----------------------------------------------- #
 def test_tsmom_position_is_the_same_signal_held_for_a_quarter() -> None:
     from signalforge.research.fx.harness import CRYPTO3_MARKET
-    from signalforge.research.fx.strategies import CRYPTO3_STRATEGIES
     from signalforge.research.fx.hourly import CRYPTO_H2_VERSION, HOURLY_VERSIONS
+    from signalforge.research.fx.strategies import CRYPTO3_STRATEGIES
 
     swing, position = TsmomEtf(), TsmomEtf(Horizon.POSITION)
     assert position.key == "tsmom_etf.position" and swing.key == "tsmom_etf.medium_swing"
