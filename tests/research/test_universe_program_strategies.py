@@ -204,3 +204,58 @@ def test_mom21_is_causal_and_sign_of_one_month_return() -> None:
             head.symbol, head.dates, head.open, head.high, head.low, shocked_close, head.volume
         )
         assert strat.signal(shocked, t) == sig
+
+
+# ---- refinement round 1 (§7) ----------------------------------------------- #
+def test_tsmom_position_is_the_same_signal_held_for_a_quarter() -> None:
+    from signalforge.research.fx.harness import CRYPTO3_MARKET
+    from signalforge.research.fx.strategies import CRYPTO3_STRATEGIES
+    from signalforge.research.fx.hourly import CRYPTO_H2_VERSION, HOURLY_VERSIONS
+
+    swing, position = TsmomEtf(), TsmomEtf(Horizon.POSITION)
+    assert position.key == "tsmom_etf.position" and swing.key == "tsmom_etf.medium_swing"
+    assert position.params == TsmomParams(time_stop_bars=63)
+    assert position.params.lookback == swing.params.lookback
+    series = _session_series([100.0 * (1.0008**i) for i in range(400)])
+    t = next(i for i in range(260, len(series)) if is_last_session_of_month(series.dates[i]))
+    a = swing.evaluate(series, t, StrategyContext(regime=NEUTRAL))
+    b = position.evaluate(series, t, StrategyContext(regime=NEUTRAL))
+    assert a is not None and b is not None
+    assert (a.direction, a.stop_price) == (b.direction, b.stop_price)
+    assert (a.time_stop_bars, b.time_stop_bars) == (21, 63)
+    assert "tsmom_etf.position" in {s.key for s in default_strategies()}
+    factory, grid = _sensitivity_plan(position)  # type: ignore[misc]
+    assert factory({k: v[0] for k, v in grid.items()}).key == "tsmom_etf.position"
+    # CRYPTO-3: long-only twin of crypto_mom_21.
+    assert CRYPTO3_MARKET.version == "CRYPTO-3"
+    (long_only,) = CRYPTO3_STRATEGIES
+    assert long_only.key == "crypto_mom_21_long_u10"
+    assert sealed._lookup("crypto", long_only.key)[0].version == "CRYPTO-3"
+    # CRYPTO-H2 is a label for the same hourly rules on a wider universe.
+    assert CRYPTO_H2_VERSION == "CRYPTO-H2" and CRYPTO_H2_VERSION in HOURLY_VERSIONS
+
+
+def test_crypto3_never_shorts_and_matches_the_parent_on_longs() -> None:
+    from signalforge.research.fx.strategies import CRYPTO2_STRATEGIES, CRYPTO3_STRATEGIES
+
+    parent = next(s for s in CRYPTO2_STRATEGIES if s.key == "crypto_mom_21_u10")
+    (child,) = CRYPTO3_STRATEGIES
+    rng = np.random.default_rng(11)
+    closes = 30.0 * np.exp(np.cumsum(rng.normal(0, 0.03, 500)))
+    days = [date(2019, 1, 1) + timedelta(days=i) for i in range(500)]
+    series = PriceSeries.from_bars(
+        "XRPUSD", [(d, c, c * 1.01, c * 0.99, c, 0.0) for d, c in zip(days, closes, strict=True)]
+    )
+    saw_long = saw_short = False
+    for t in range(parent.warmup, 495, 3):
+        head = series.head(t)
+        p, c = parent.signal(head, t), child.signal(head, t)
+        if p is None:
+            assert c is None
+        elif p.direction is Direction.LONG:
+            saw_long = True
+            assert c == p
+        else:
+            saw_short = True
+            assert c is None
+    assert saw_long and saw_short

@@ -418,7 +418,7 @@ def crypto_research(
         typer.Option(help="Write the markdown report here (default: <data dir>/research/crypto/)."),
     ] = None,
     version: Annotated[
-        str, typer.Option(help="Pre-registered strategy set: CRYPTO-1 or CRYPTO-2.")
+        str, typer.Option(help="Pre-registered strategy set: CRYPTO-1, CRYPTO-2 or CRYPTO-3.")
     ] = "CRYPTO-1",
 ) -> None:
     """Evaluate the pre-registered crypto strategies on the development window.
@@ -432,12 +432,17 @@ def crypto_research(
     from signalforge.research.fx.harness import (
         render_markdown,
         run_crypto2_research,
+        run_crypto3_research,
         run_crypto_research,
     )
 
-    runners = {"CRYPTO-1": run_crypto_research, "CRYPTO-2": run_crypto2_research}
+    runners = {
+        "CRYPTO-1": run_crypto_research,
+        "CRYPTO-2": run_crypto2_research,
+        "CRYPTO-3": run_crypto3_research,
+    }
     if version not in runners:
-        typer.echo("--version must be CRYPTO-1 or CRYPTO-2")
+        typer.echo("--version must be CRYPTO-1, CRYPTO-2 or CRYPTO-3")
         raise typer.Exit(2)
     chosen = parse_pairs(pairs if pairs is not None else get_settings().crypto_pairs, CRYPTO)
     with session_scope() as session:
@@ -691,9 +696,12 @@ def crypto_research_hourly(
         Path | None,
         typer.Option(help="Report path (default: <data dir>/research/crypto/)."),
     ] = None,
+    version: Annotated[
+        str, typer.Option(help="Pre-registered hourly universe label: CRYPTO-H1 or CRYPTO-H2.")
+    ] = "CRYPTO-H1",
 ) -> None:
-    """Evaluate the pre-registered CRYPTO-H1 hourly rules on the development
-    window. The sealed final year is never evaluated here. Research only."""
+    """Evaluate the pre-registered hourly rules on the development window.
+    The sealed final year is never evaluated here. Research only."""
     import json as _json
 
     from signalforge.config import get_settings
@@ -705,7 +713,7 @@ def crypto_research_hourly(
 
     chosen = parse_pairs(pairs if pairs is not None else get_settings().crypto_pairs, CRYPTO)
     with session_scope() as session:
-        report = run_crypto_hourly_research(session, chosen)
+        report = run_crypto_hourly_research(session, chosen, version=version)
     target = out or (
         data_dir() / "research" / "crypto" / f"crypto_hourly_{report['version']}_{date.today()}.md"
     )

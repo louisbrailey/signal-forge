@@ -344,8 +344,10 @@ def _sensitivity_plan(
 
         base = strategy.params  # type: ignore[attr-defined]
 
+        horizon = strategy.horizon  # type: ignore[attr-defined]
+
         def factory(p: Mapping[str, Any]) -> BaselineStrategy:
-            return TsmomEtf(_replace(base, **p))
+            return TsmomEtf(horizon, _replace(base, **p))
 
         return factory, _merge_declared_axes(
             strategy, {"lookback": [189, 252, 315], "sma_window": [168, 210, 252]}

@@ -55,6 +55,8 @@ def default_strategies() -> list[BaselineStrategy]:
         # Pre-registered 2026-11-02 (PREREGISTRATION_universe_program_2026-11-02.md).
         TsmomEtf(),
         TurnOfMonth(),
+        # Refinement round 1, pre-registered 2026-11-02 (same document §7.1).
+        TsmomEtf(Horizon.POSITION),
     ]
 
 

@@ -42,11 +42,21 @@ class TsmomParams:
 
 
 class TsmomEtf:
-    horizon = Horizon.MEDIUM_SWING
+    """``MEDIUM_SWING`` holds one month (v0.1.0 rule, §2A); ``POSITION`` is the
+    pre-registered refinement A2 (§7.1): the SAME signal held for a quarter
+    (63 sessions) so a trend that persists 1–12 months (MOP 2012) is not cut
+    and re-bought — with its round-trip cost — every month."""
 
-    def __init__(self, params: TsmomParams | None = None) -> None:
-        self.params = params or TsmomParams()
-        self.key = "tsmom_etf.medium_swing"
+    def __init__(
+        self, horizon: Horizon = Horizon.MEDIUM_SWING, params: TsmomParams | None = None
+    ) -> None:
+        if horizon not in (Horizon.MEDIUM_SWING, Horizon.POSITION):
+            raise ValueError("TsmomEtf supports MEDIUM_SWING or POSITION")
+        self.horizon = horizon
+        self.params = params or (
+            TsmomParams(time_stop_bars=63) if horizon is Horizon.POSITION else TsmomParams()
+        )
+        self.key = f"tsmom_etf.{horizon.value.lower()}"
 
     def spec(self) -> StrategySpec:
         p = self.params
@@ -90,7 +100,10 @@ class TsmomEtf:
             out_of_sample_period="last 40% of the available history",
             walkforward_result_ref=f"reports/{self.key}-{VERSION}.md",
             status=StrategyStatus.EXPERIMENTAL,
-            notes="Pre-registered 2026-11-02: PREREGISTRATION_universe_program_2026-11-02.md §2A",
+            notes=(
+                "Pre-registered 2026-11-02: PREREGISTRATION_universe_program_2026-11-02.md "
+                + ("§7.1 (A2, quarterly hold)" if self.horizon is Horizon.POSITION else "§2A")
+            ),
         )
 
     def evaluate(self, series: PriceSeries, t: int, ctx: StrategyContext) -> EntrySignal | None:

@@ -192,3 +192,51 @@ Massive crypto pair availability (XRP, ADA, DOGE, LTC, LINK, AVAX, DOT, BCH, XLM
 verified by fetching 13 days of bars for each on 2026-11-02 into a scratch copy, not by
 documentation. Massive Stocks history depth (2003-09-03) was discovered by the ingest's own
 binary-search probe on 2026-11-02 and is recorded on the `ingestion_run`.
+
+## 7. Refinement round 1 — pre-registered 2026-11-02 evening, BEFORE these variants are run
+
+**Disclosure of looks.** Each parent rule below has been evaluated ONCE on its development
+window (results in `RESULTS_universe_program_2026-11.md`). The refinements are not parameter
+sweeps on those results: each is a single, literature-motivated change, fixed here before it
+is run, and each parent's result stands as reported. Operator request: "keep refining all
+strategies and trading modalities."
+
+### 7.1 A2 — `tsmom_etf.position` v0.1.0 (quarterly hold)
+
+- **Parent:** `tsmom_etf.medium_swing` (§2A): dev OOS +0.130R / 93 trades on 10 ETFs 2016+,
+  +0.077R / 224 on 9 ETFs 2006+; CI gate and benchmark gate failed; 100% of the grid positive.
+- **Hypothesis:** MOP (2012) and HOP (2017) report trend persistence of 1–12 months; a rule
+  that exits every 21 sessions and re-enters pays an 11 bps round trip every month and
+  truncates the holding period the evidence is about. Holding for a quarter (63 sessions)
+  should raise expectancy per trade and lower turnover at the same signal.
+- **The single change:** `time_stop_bars` 21 → **63**. Signal, filter, stop, universes,
+  grid (`lookback` × `sma_window`), windows: unchanged. Registered as its own key so the
+  parent stays reproducible.
+
+### 7.2 CRYPTO-3 — `crypto_mom_21_long_u10` (long only)
+
+- **Parent:** `crypto_mom_21_u10` (CRYPTO-2): +0.115R / 620, CI low −0.052R, 7/10 pairs
+  positive, 2/4 folds.
+- **Hypothesis:** Liu–Tsyvinski–Wu's cryptocurrency momentum premium is documented in the
+  long leg of large coins; a spot paper book cannot short; the short leg in a market with a
+  strong positive drift over the sample is the likely source of the negative folds.
+- **The single change:** drop SHORT signals. Everything else (21-day lookback, 2×ATR(20)
+  stop, 21-bar hold, costs, 10-pair universe, gates) unchanged.
+
+### 7.3 CRYPTO-H2 — the three CRYPTO-H1 hourly rules on 6 pairs
+
+- **Parent:** CRYPTO-H1 `crypto_h_donchian168_trail72`: +0.390R / 425 on BTC/ETH/SOL, CI low
+  +0.010R (gate needs +0.02R); the other two H1 rules fail outright.
+- **Hypothesis:** the near miss is a power problem (425 trades, CI half-width ≈ 0.38R); the
+  same rule on six liquid pairs roughly doubles the trade count. No parameter changes.
+- **Universe (frozen):** BTC, ETH, SOL, XRP, BNB, DOGE vs USD, hourly bars backfilled from
+  2017-01-01 (or each pair's start). Costs as CRYPTO-2 (50 bps/side default for the new
+  pairs). Gates: CRYPTO-1 gates.
+
+### 7.4 Explicitly NOT refined
+
+- `turn_of_month.short_swing`: 0% of the gate-5 grid is positive on 2016+ data — no
+  neighbourhood to refine towards; the published effect does not survive costs here.
+- `fx_mom_21`: 0/4 folds positive, 38% of pairs positive — rejected, not refined.
+- The three live-approved equity strategies: any change would be fitted to results already
+  seen on the development data; they stay as approved and are judged by paper forward results.

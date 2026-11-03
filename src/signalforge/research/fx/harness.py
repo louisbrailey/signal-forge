@@ -41,6 +41,8 @@ from signalforge.db.models import CryptoBarDaily, FxBarDaily
 from signalforge.research.fx.strategies import (
     CRYPTO2_STRATEGIES,
     CRYPTO2_STRATEGY_VERSION,
+    CRYPTO3_STRATEGIES,
+    CRYPTO3_STRATEGY_VERSION,
     CRYPTO_STRATEGIES,
     CRYPTO_STRATEGY_VERSION,
     FX2_STRATEGIES,
@@ -135,6 +137,19 @@ FX3_MARKET = ResearchMarket(
     default_spread_bps=DEFAULT_SPREAD_BPS,
     ingest_hint="run forex-ingest",
     caveat="Swap approximated by a 1 bp/day holding-cost stress gate, not modelled exactly.",
+)
+CRYPTO3_MARKET = ResearchMarket(
+    name="Crypto",
+    version=CRYPTO3_STRATEGY_VERSION,
+    model=CryptoBarDaily,
+    source=CRYPTO_SOURCE,
+    spreads=CRYPTO_SPREAD_BPS,
+    default_spread_bps=CRYPTO_DEFAULT_SPREAD_BPS,
+    ingest_hint="run crypto-ingest",
+    caveat=(
+        "Perpetual funding and exchange counterparty risk not modelled; spot-style costs only; "
+        "pairs without a listed spread use the 50 bps/side default."
+    ),
 )
 CRYPTO2_MARKET = ResearchMarket(
     name="Crypto",
@@ -399,6 +414,16 @@ def run_fx3_research(
     return run_research(
         session, pairs, market=FX3_MARKET, gates=gates or FX3_GATES, strategies=strategies
     )
+
+
+def run_crypto3_research(
+    session: Session,
+    pairs: Sequence[str],
+    *,
+    gates: FxGates | None = None,
+    strategies: Sequence[FxStrategy] = CRYPTO3_STRATEGIES,
+) -> dict[str, Any]:
+    return run_research(session, pairs, market=CRYPTO3_MARKET, gates=gates, strategies=strategies)
 
 
 def run_crypto2_research(

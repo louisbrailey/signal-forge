@@ -289,3 +289,29 @@ CRYPTO2_STRATEGIES: tuple[FxStrategy, ...] = (
         "crypto_mom_21_u10", _M21_DESC, dict(_M21_PARAMS), warmup=_M21_LOOKBACK + 2, signal=_mom21
     ),
 )
+
+
+# --------------------------------------------------------------------------- #
+# CRYPTO-3 (refinement round 1, pre-registered 2026-11-02, same document §7.2,
+# after ONE development look at CRYPTO-2): the one-month momentum rule LONG
+# ONLY. Spot books cannot short, and Liu–Tsyvinski–Wu's momentum premium is
+# documented in the long leg of large coins. Nothing else changes.
+# --------------------------------------------------------------------------- #
+CRYPTO3_STRATEGY_VERSION = "CRYPTO-3"
+
+
+def _mom21_long(series: PriceSeries, t: int) -> EntrySignal | None:
+    sig = _mom21(series, t)
+    return sig if sig is not None and sig.direction is Direction.LONG else None
+
+
+CRYPTO3_STRATEGIES: tuple[FxStrategy, ...] = (
+    FxStrategy(
+        "crypto_mom_21_long_u10",
+        "LONG when the 21-day return is positive (one-month momentum, long only); "
+        "2xATR(20) stop; 21-bar time stop.",
+        {**_M21_PARAMS, "long_only": 1},
+        warmup=_M21_LOOKBACK + 2,
+        signal=_mom21_long,
+    ),
+)

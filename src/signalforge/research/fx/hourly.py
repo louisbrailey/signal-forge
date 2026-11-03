@@ -31,6 +31,11 @@ from signalforge.research.fx.harness import (
 from signalforge.research.fx.strategies import FxStrategy, atr
 
 CRYPTO_H1_VERSION = "CRYPTO-H1"
+# Refinement round 1 (pre-registered 2026-11-02, PREREGISTRATION_universe_program §7.3):
+# the SAME three hourly rules on a 6-pair universe. A different universe is a
+# different version, so its report and any future sealed look carry their own label.
+CRYPTO_H2_VERSION = "CRYPTO-H2"
+HOURLY_VERSIONS = (CRYPTO_H1_VERSION, CRYPTO_H2_VERSION)
 SOURCE = "massive_crypto"
 BAR_SIZE = "1h"
 
@@ -171,7 +176,10 @@ def run_crypto_hourly_research(
     *,
     gates: FxGates | None = None,
     strategies: Sequence[FxStrategy] = CRYPTO_H1_STRATEGIES,
+    version: str = CRYPTO_H1_VERSION,
 ) -> dict[str, Any]:
+    if version not in HOURLY_VERSIONS:
+        raise ValueError(f"unknown hourly version {version!r}; expected one of {HOURLY_VERSIONS}")
     gates = gates or FxGates()
     series_by_pair = {p: load_hourly_series(session, p) for p in pairs}
     series_by_pair = {p: s for p, s in series_by_pair.items() if len(s)}
@@ -186,7 +194,7 @@ def run_crypto_hourly_research(
     ]
     return {
         "market": "Crypto (hourly)",
-        "version": CRYPTO_H1_VERSION,
+        "version": version,
         "gates": asdict(gates),
         "spread_bps": {p: CRYPTO_MARKET.spread(p) for p in series_by_pair},
         "history": {
