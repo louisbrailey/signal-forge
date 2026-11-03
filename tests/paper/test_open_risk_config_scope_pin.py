@@ -1,11 +1,14 @@
-"""Operator decision 2026-10-04: configured open risk STAYS 1.5%.
+"""The SHIPPED default for configured open risk stays 1.5%.
 
-The paper ledger's open-risk ceiling is 3.0%, but the effective limit is
-``min(configured, ceiling)`` and the shipped ``max_daily_portfolio_risk_pct`` is
-1.5, so the ceiling has no effect. The ``risk`` section is inside the approval
-scope hash: raising the configured value would change ``config_hash`` and take
-the approved strategy versions out of scope. This PR changes no configuration,
-so the default config's scope hash is the value pinned before it.
+The paper ledger's open-risk ceiling is 12.33% (operator decision 2026-11-02;
+3.0% before that), but the effective limit is ``min(configured, ceiling)`` and
+the shipped default ``max_daily_portfolio_risk_pct`` is 1.5, so on a default
+config the ceiling has no effect. Raising the live value is done through the
+``research_overrides`` setting, never by editing this default. The ``risk``
+section is inside the approval scope hash: raising the configured value changes
+``config_hash`` and takes the approved strategy versions out of scope until they
+are re-evaluated. No default configuration changes here, so the default config's
+scope hash is the value pinned before it.
 """
 
 from __future__ import annotations
@@ -28,8 +31,8 @@ def test_default_scope_hash_is_unchanged_by_the_paper_limit_changes() -> None:
 def test_configured_open_risk_is_still_one_and_a_half_percent_and_binds() -> None:
     risk = ResearchConfig().risk
     assert risk.max_daily_portfolio_risk_pct == 1.5
-    assert HARD_MAX_OPEN_RISK_PCT == 3.0
-    # Effective = min(configured, ceiling): the 3.0% ceiling has NO effect.
+    assert HARD_MAX_OPEN_RISK_PCT == 12.33
+    # Effective = min(configured, ceiling): the 12.33% ceiling has NO effect by default.
     assert min(HARD_MAX_OPEN_RISK_PCT, risk.max_daily_portfolio_risk_pct) == 1.5
     # Per symbol the configured 10% and the 10% ceiling agree: 10% is effective.
     assert min(HARD_MAX_SYMBOL_PCT, risk.max_position_concentration_pct) == 10.0

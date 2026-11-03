@@ -73,8 +73,15 @@ _CENTS = Decimal("0.01")
 # Operator decision 2026-10-03, paper only: the per-symbol ceiling was raised
 # from 5% to 10% of book equity and the aggregate open-risk ceiling from 1.5%
 # to 3.0%. Per-trade risk (0.5%) and the per-sector ceiling (20%) are unchanged.
+#
+# Operator decision 2026-11-02, paper only: the aggregate open-risk ceiling was
+# raised from 3.0% to 12.33% so a book can hold up to ~24 concurrent 0.5%-risk
+# positions. The CONFIGURED ``risk.max_daily_portfolio_risk_pct`` still binds
+# (effective = min(configured, ceiling)); raising the configured value moves the
+# approval-scope ``config_hash`` and requires re-evaluating every approved
+# version on its approved dataset (docs/PAPER_OPERATIONS.md).
 HARD_MAX_PER_TRADE_RISK_PCT = 0.5
-HARD_MAX_OPEN_RISK_PCT = 3.0  # operator decision 2026-10-03, paper only (was 1.5)
+HARD_MAX_OPEN_RISK_PCT = 12.33  # operator decision 2026-11-02, paper only (was 3.0, 1.5)
 HARD_MAX_SYMBOL_PCT = 10.0  # operator decision 2026-10-03, paper only (was 5.0)
 HARD_MAX_SECTOR_PCT = 20.0
 HARD_MAX_GROSS_PCT = 100.0
