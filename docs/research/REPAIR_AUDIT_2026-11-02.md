@@ -60,7 +60,30 @@ CRYPTO-2 promotion claim. Raw locked evidence remains intact.
 
 ## Research calculations still distinct from verification
 
-The intraday ORB grid and remaining mega-cap daily strategies are numerical research jobs.
+The intraday ORB grid and mega-cap daily strategies are numerical research jobs.
 Their slow runtime did not mean tests were failing or the production worker was hung.
 Replacement jobs run only on scratch copies and preserve locked live evidence. Results are
 recorded here on completion, including failures; none is used to adjust a gate threshold.
+
+## Mega-cap daily program completed (scratch snapshot 32, evaluation ids 92–99)
+
+Universe: AAPL, AMZN, GOOGL, HD, JPM, MSFT, NVDA, UNH, XOM.
+Command: `evaluate-promotion --strategy <key> --symbols <frozen nine symbols>
+--snapshot-key research_megacap9_2016_2025 --since 2016-10-17 --until 2025-09-07`.
+Each key was run separately so the independently running intraday grid could not hold
+up the daily results. Gate 9 remains a diagnostic development window, not fresh OOS.
+
+| Scratch eval | Rule | Development OOS trades | Expectancy | CI low | Failed gates |
+|---|---|---:|---:|---:|---|
+| 92 | trend_continuation.short_swing | 122 | +0.2440R | -0.0193R | 4, 7 |
+| 93 | trend_continuation.medium_swing | 116 | +0.2784R | -0.0293R | 4 |
+| 94 | mean_reversion.short_swing | 75 | -0.0121R | -0.1813R | 3, 4, 5, 6, 7, 9 |
+| 95 | relative_strength.medium_swing | 116 | +0.4951R | +0.2360R | 6 |
+| 96 | volatility_breakout.short_swing | 9 | +0.6731R | +0.1129R | 2, 6, 9 |
+| 97 | tsmom_etf.medium_swing | 136 | +0.0136R | -0.1875R | 4, 7 |
+| 98 | turn_of_month.short_swing | 342 | -0.0030R | -0.0614R | 3, 4 |
+| 99 | tsmom_etf.position | 85 | +0.3513R | -0.1080R | 4 |
+
+None passes. Relative strength is the strongest development signal (+0.495R /116)
+but lacks sufficient bear-regime coverage (7 trades, threshold10). Keeping that gate
+unchanged is essential; it is not evidence to force another universe selection.

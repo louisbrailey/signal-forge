@@ -213,7 +213,7 @@ Several strategies have positive OOS expectancy; none clears the entire ladder a
 trend short +0.047R (CI −0.096), trend medium +0.098R (CI −0.053), mean reversion +0.050R
 (CI −0.049), relative strength +0.085R (CI −0.136), volatility breakout fails net
 expectancy, tsmom_etf.medium_swing +0.064R (CI −0.040), turn_of_month +0.037R (CI +0.003),
-tsmom_etf.position +0.198R (CI +0.006). This sector-universe test does not establish a tradable edge; nothing passes. The mega-cap universe (9 stocks, 2016+) is still running.
+tsmom_etf.position +0.198R (CI +0.006). This sector-universe test does not establish a tradable edge; nothing passes. The mega-cap daily universe completed; the final table below gives the results.
 
 ## 5. Not run, and why (from the pre-registration)
 
@@ -228,3 +228,26 @@ Overnight premium (engine fills at next open; cost-dominated), volatility-manage
   security (ticker reuse) — excluded.
 - `crypto_bar_daily`: XRP, ADA, DOGE, LTC, LINK, AVAX, DOT, BCH, XLM, BNB vs USD from each
   pair's Massive history start (XRP 2017-01; BNB 2018-08; LINK 2019-06; AVAX 2021-11).
+
+## Mega-cap daily program completed (scratch snapshot 32, evaluation ids 92–99)
+
+Universe: AAPL, AMZN, GOOGL, HD, JPM, MSFT, NVDA, UNH, XOM.
+Command: `evaluate-promotion --strategy <key> --symbols <frozen nine symbols>
+--snapshot-key research_megacap9_2016_2025 --since 2016-10-17 --until 2025-09-07`.
+Each key was run separately so the independently running intraday grid could not hold
+up the daily results. Gate 9 remains a diagnostic development window, not fresh OOS.
+
+| Scratch eval | Rule | Development OOS trades | Expectancy | CI low | Failed gates |
+|---|---|---:|---:|---:|---|
+| 92 | trend_continuation.short_swing | 122 | +0.2440R | -0.0193R | 4, 7 |
+| 93 | trend_continuation.medium_swing | 116 | +0.2784R | -0.0293R | 4 |
+| 94 | mean_reversion.short_swing | 75 | -0.0121R | -0.1813R | 3, 4, 5, 6, 7, 9 |
+| 95 | relative_strength.medium_swing | 116 | +0.4951R | +0.2360R | 6 |
+| 96 | volatility_breakout.short_swing | 9 | +0.6731R | +0.1129R | 2, 6, 9 |
+| 97 | tsmom_etf.medium_swing | 136 | +0.0136R | -0.1875R | 4, 7 |
+| 98 | turn_of_month.short_swing | 342 | -0.0030R | -0.0614R | 3, 4 |
+| 99 | tsmom_etf.position | 85 | +0.3513R | -0.1080R | 4 |
+
+None passes. Relative strength is the strongest development signal (+0.495R /116)
+but lacks sufficient bear-regime coverage (7 trades, threshold10). Keeping that gate
+unchanged is essential; it is not evidence to force another universe selection.
