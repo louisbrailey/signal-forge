@@ -173,3 +173,25 @@ def test_sale_on_ex_date_still_owns_receivable():
     assert r.fills[-1]["reason"] == "gap_stop"
     assert r.corporate_events[-1]["kind"] == "dividend_payment"
     assert r.marks[-1]["cash_usd"] == "9941.00"
+
+
+def test_held_lot_keeps_basis_across_verified_ticker_change():
+    r = run(
+        bars([100] * 7),
+        ticker_changes=(TickerChange("OLD", "A", DATES[3], "test", "verified-identity"),),
+    )
+    assert r.fills[0]["ticker"] == "OLD"
+    assert r.fills[-1]["ticker"] == "A"
+    assert r.fills[-1]["realized_pnl_usd"] == "0.00"
+    assert r.corporate_events[0]["kind"] == "ticker_change"
+
+
+def test_same_day_split_and_dividend_use_post_split_entitlement():
+    r = run(
+        bars([100, 100, 49, 49, 49, 49, 49]),
+        splits=(Split("A", DATES[2], Decimal(2), "test"),),
+        dividends=(Dividend("A", DATES[2], DATES[4], Decimal(1), "test"),),
+    )
+    assert r.marks[2]["dividend_receivable_usd"] == "2.00"
+    assert r.marks[4]["cash_usd"] == "9902.00"
+    assert r.marks[-1]["net_liquidation_usd"] == "10000.00"
