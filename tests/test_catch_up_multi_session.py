@@ -598,10 +598,10 @@ def test_deadline_clock_is_the_larger_of_monotonic_and_wall_elapsed(
 ) -> None:
     monkeypatch.setattr(sched, "_mono_source", lambda: sched._MONO_BASE + 10.0)
     monkeypatch.setattr(sched, "_wall_source", lambda: sched._WALL_BASE + 3600.0)
-    assert sched._deadline_clock() == 3600.0  # a sleep counts in full
+    assert sched._deadline_clock() == pytest.approx(3600.0, abs=1e-9, rel=0)
     # a wall clock stepped backwards (NTP) cannot shrink the budget
     monkeypatch.setattr(sched, "_wall_source", lambda: sched._WALL_BASE - 3600.0)
-    assert sched._deadline_clock() == 10.0
+    assert sched._deadline_clock() == pytest.approx(10.0, abs=1e-9, rel=0)
 
 
 def test_guarded_writes_a_running_row_first_and_finishes_the_same_row(db_url: str) -> None:
