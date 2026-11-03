@@ -177,6 +177,35 @@ look consumes CRYPTO-2's one sealed year for this rule and needs the operator's 
 authorisation; it is **not** taken by this program. If authorised and passed, the existing
 crypto paper book mechanism (currently CRYPTO-1 on 3 pairs, $100 R) is the paper venue.
 
+## 4b. CRYPTO-H2 — the three CRYPTO-H1 hourly rules on 6 pairs (refinement §7.3; live DB read-only, report `data/research/crypto/crypto_hourly_CRYPTO-H2_2026-11-02.md`)
+
+Hourly bars backfilled 2026-11-02 for XRP (2017-01), BNB (2018-08, only 23k bars — Massive's
+hourly BNB history is sparse) and DOGE (2017-06). Sealed from 2025-11-04 (not evaluated).
+
+| Strategy | Verdict | OOS trades | Expectancy (R) | CI low (R) | 2x-spread (R) | Folds (R) |
+|---|---|---|---|---|---|---|
+| crypto_h_donchian168_trail72 | DEV_FAIL | 827 | +0.465 | −0.010 | +0.264 | +0.15, −0.24, +1.82, +0.12 |
+| crypto_h_tsmom72_sma168 | DEV_FAIL | 1344 | −0.061 | −0.139 | −0.174 | |
+| crypto_h_zfade48 | DEV_FAIL | 3766 | −0.349 | −0.382 | −0.513 | |
+
+Donchian per pair: BNB +2.455R (51), BTC +0.330 (173), DOGE +0.149 (165), ETH +0.598 (162),
+SOL +0.127 (90), XRPUSD / 2022-05-04T17:00:00+00:00 / 186 / +0.373 / +0.135.
+
+Reading: the hypothesis was that doubling the trade count would tighten the CI past +0.02R.
+It did not — the CI lower bound moved from +0.010R (3 pairs) to −0.010R (6 pairs) because
+the added pairs are more dispersed (BNB +2.46R on 51 trades, one fold at +1.82R, one fold
+negative). The hourly Donchian is positive at double costs but its edge is too lumpy to
+clear the gate. **CRYPTO-H2 fails; the hourly family is closed at this parameterisation.**
+
+## 4c. E — existing six strategies on the sector-SPDR universe (10 symbols, 2003-10-20 → 2025-09-07, `sfdata5`)
+
+Every strategy has positive OOS expectancy and every one fails gate 4 (bootstrap CI):
+trend short +0.047R (CI −0.096), trend medium +0.098R (CI −0.053), mean reversion +0.050R
+(CI −0.049), relative strength +0.085R (CI −0.136), volatility breakout fails net
+expectancy, tsmom_etf.medium_swing +0.064R (CI −0.040), turn_of_month +0.037R (CI +0.003),
+tsmom_etf.position +0.198R (CI +0.006). Sector ETFs trend less cleanly than the large-cap
+names; nothing passes. The mega-cap universe (9 stocks, 2016+) is still running.
+
 ## 5. Not run, and why (from the pre-registration)
 
 Overnight premium (engine fills at next open; cost-dominated), volatility-managed overlay
