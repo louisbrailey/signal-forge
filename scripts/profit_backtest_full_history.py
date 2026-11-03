@@ -1,10 +1,11 @@
-"""Full-history profit backtest for every strategy (scratch copy, read-only).
+"""Descriptive fixed-risk profit arithmetic on explicitly listed historical windows.
 
-Rules observed: a strategy whose sealed year is NOT yet consumed is cut at its
-sealed-window start (development data only), so this report never spends a
-sealed look. Strategies whose sealed test is already locked run through the
-last available bar. Every signal is taken (no book capacity limit, long only
-as in the ladder); dollars are expectancy x trades x R.
+This is not a promotion run or a capital-constrained portfolio forecast. Window
+choices are fixed below; currency research candidates remain development-only.
+An old blanket claim that every full-history equity run reused a sealed test
+was incorrect: sealed status is keyed by both version and dataset snapshot.
+The output must never be used to create or widen approval. Data gaps and
+portfolio feasibility require separate validation (see REPAIR_AUDIT_2026-11-02).
 """
 
 from __future__ import annotations
