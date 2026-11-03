@@ -44,6 +44,7 @@ from signalforge.killswitch import get_kill_switch
 from signalforge.research.fx.harness import FxGates, ResearchMarket, backtest, load_series
 from signalforge.research.fx.sealed import _lookup as _lookup_registered
 from signalforge.research.fx.strategies import FxStrategy
+from signalforge.settings_store import get_setting
 
 PAPER_VERSION = "CRYPTO-PAPER-1"
 OBSERVATION_DAYS = 180
@@ -53,6 +54,14 @@ _PRICE_TOL = 1e-6
 
 class PaperBookRefused(RuntimeError):
     """A book may not be created or cycled."""
+
+
+def _open_block_reason(session: Session, key: str) -> str:
+    """Audited operational data holds block new entries, never position exits."""
+    holds = get_setting(session, "crypto_paper_data_holds", {}) or {}
+    if not isinstance(holds, dict):
+        return "invalid crypto paper data-hold configuration"
+    return str(holds.get(key, ""))
 
 
 def _resolve(key: str) -> tuple[ResearchMarket, FxStrategy]:
@@ -109,6 +118,8 @@ def start_book(
     completed from today onward can produce a trade."""
     market, _ = _resolve(key)
     sealed = _sealed_pass(session, key)
+    if reason := _open_block_reason(session, key):
+        raise PaperBookRefused(f"{key}: data hold: {reason}")
     if get_book(session, key) is not None:
         raise PaperBookRefused(f"a paper book for {key} {market.version} already exists")
     today = (now or datetime.now(UTC)).astimezone(UTC).date()
@@ -134,6 +145,8 @@ class CycleReport:
     closed: list[str] = field(default_factory=list)
     marked: list[str] = field(default_factory=list)
     skipped_open_kill_switch: list[str] = field(default_factory=list)
+    skipped_open_data_hold: list[str] = field(default_factory=list)
+    data_hold: str = ""
     divergences: list[str] = field(default_factory=list)
 
 
@@ -168,7 +181,7 @@ def run_cycle(session: Session, key: str, *, now: datetime | None = None) -> Cyc
     _sealed_pass(session, key)  # re-checked every cycle
     strat = _strategy(key)
     engaged = get_kill_switch().state().active
-    rep = CycleReport(strategy_key=key)
+    rep = CycleReport(strategy_key=key, data_hold=_open_block_reason(session, key))
     last_bars: list[date] = []
     for pair in book.pairs:
         trades, series = _replay(session, book, strat, pair)
@@ -193,7 +206,7 @@ def run_cycle(session: Session, key: str, *, now: datetime | None = None) -> Cyc
             if row is not None and row.status == "SKIPPED":
                 continue  # declined while the kill switch was engaged — never opened later
             if row is None:
-                if engaged:
+                if engaged or rep.data_hold:
                     # Record the refusal durably: a later cycle (switch released)
                     # replays the same history and must not open this trade late.
                     session.add(
@@ -205,13 +218,16 @@ def run_cycle(session: Session, key: str, *, now: datetime | None = None) -> Cyc
                             entry_price=t.entry_price,
                             stop_price=_signal_stop(strat, series, index[t.entry_date]),
                             status="SKIPPED",
-                            exit_reason="kill_switch",
+                            exit_reason="kill_switch" if engaged else "data_hold",
                             costs_bps=t.costs_bps,
                             reason=t.reason[:64],
                             divergence="",
                         )
                     )
-                    rep.skipped_open_kill_switch.append(tag)
+                    if engaged:
+                        rep.skipped_open_kill_switch.append(tag)
+                    else:
+                        rep.skipped_open_data_hold.append(tag)
                     continue
                 row = CryptoPaperTrade(
                     book_id=book.id,
@@ -295,6 +311,7 @@ def status(session: Session, key: str) -> dict[str, Any]:
     return {
         "strategy_key": key,
         "version": book.version,
+        "data_hold": _open_block_reason(session, key),
         "paper_version": PAPER_VERSION,
         "start_date": book.start_date.isoformat(),
         "observation_end": book.observation_end.isoformat(),
@@ -312,7 +329,12 @@ def status(session: Session, key: str) -> dict[str, Any]:
             if r.status == "OPEN"
         ],
         "closed_trades": len(closed),
-        "skipped_kill_switch": sum(1 for r in rows if r.status == "SKIPPED"),
+        "skipped_kill_switch": sum(
+            1 for r in rows if r.status == "SKIPPED" and r.exit_reason == "kill_switch"
+        ),
+        "skipped_data_hold": sum(
+            1 for r in rows if r.status == "SKIPPED" and r.exit_reason == "data_hold"
+        ),
         "expectancy_r": (sum(pnl) / len(pnl)) if pnl else None,
         "total_r": sum(pnl),
         "illustrative_usd": sum(pnl) * book.risk_usd_per_trade,

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -38,6 +38,7 @@ from signalforge.backtest.montecarlo import bootstrap_ci
 from signalforge.backtest.walkforward import run_walkforward
 from signalforge.data.series import PriceSeries
 from signalforge.db.models import CryptoBarDaily, FxBarDaily
+from signalforge.research.fx.continuity import missing_intervals
 from signalforge.research.fx.strategies import (
     CRYPTO2_STRATEGIES,
     CRYPTO2_STRATEGY_VERSION,
@@ -334,6 +335,13 @@ def evaluate_strategy(
         res.holding_stress_expectancy_r = sum(charged) / len(charged)
 
     reasons = []
+    if mk.name == "Crypto":
+        for pair, full in sorted(series_by_pair.items()):
+            dev = _cut(full, seal_from)
+            step = timedelta(hours=1) if isinstance(seal_from, datetime) else timedelta(days=1)
+            missing = missing_intervals(dev.dates, step)
+            if missing:
+                reasons.append(f"data continuity: {pair} missing {missing} development bars")
     if pooled.n_trades < gates.min_oos_trades:
         reasons.append(f"OOS trades {pooled.n_trades} < {gates.min_oos_trades}")
     if pooled.expectancy_r < gates.min_oos_expectancy_r:
@@ -454,6 +462,11 @@ def run_research(
         evaluate_strategy(s, series_by_pair, seal_from=seal_from, gates=gates, market=market)
         for s in strategies
     ]
+    absent = sorted(set(pairs) - set(series_by_pair))
+    if absent:
+        for result in results:
+            result.reasons.append(f"data availability: no history for requested pairs {absent}")
+            result.verdict = "DEV_FAIL"
     return {
         "market": market.name,
         "version": market.version,

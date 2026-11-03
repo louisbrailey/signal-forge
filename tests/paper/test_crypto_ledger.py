@@ -308,3 +308,34 @@ def test_a_crypto2_key_books_under_its_own_version_and_replays_the_sealed_rule(
     assert cl.get_book(session, STRATEGY) is None  # CRYPTO-1 book not created by this
     with pytest.raises(cl.PaperBookRefused):
         cl.start_book(session, "crypto_mom_21_long_u10", now=NOW)  # CRYPTO-3: no pass
+
+
+def test_data_hold_blocks_new_entries_but_preserves_closes(session: Session) -> None:
+    from signalforge.settings_store import set_setting
+
+    closes = _closes()
+    _sealed(session)
+    cl.start_book(session, STRATEGY, now=datetime(2020, 6, 1, tzinfo=UTC))
+    _add_bars(session, closes, 0, 500)
+    cl.run_cycle(session, STRATEGY, now=NOW)
+    before = {r.entry_date: r.status for r in session.scalars(select(CryptoPaperTrade))}
+    set_setting(session, "crypto_paper_data_holds", {STRATEGY: "incomplete sealed history"})
+    _add_bars(session, closes, 500, len(closes))
+    rep = cl.run_cycle(session, STRATEGY, now=NOW)
+    assert rep.data_hold and rep.skipped_open_data_hold and not rep.opened
+    assert not rep.skipped_open_kill_switch
+    rows = list(session.scalars(select(CryptoPaperTrade)))
+    assert all(
+        r.status == "SKIPPED" and r.exit_reason == "data_hold"
+        for r in rows
+        if r.entry_date not in before
+    )
+    assert all(
+        r.status == "CLOSED" or r.marked_at is not None
+        for r in rows
+        if before.get(r.entry_date) == "OPEN"
+    )
+    assert cl.status(session, STRATEGY)["data_hold"] == "incomplete sealed history"
+    set_setting(session, "crypto_paper_data_holds", {})
+    # Clearing the hold never causes missed historical entries to open late.
+    assert cl.run_cycle(session, STRATEGY, now=NOW).opened == []

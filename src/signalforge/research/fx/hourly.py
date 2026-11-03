@@ -192,6 +192,11 @@ def run_crypto_hourly_research(
         evaluate_strategy(s, series_by_pair, seal_from=seal_from, gates=gates, market=CRYPTO_MARKET)
         for s in strategies
     ]
+    absent = sorted(set(pairs) - set(series_by_pair))
+    if absent:
+        for result in results:
+            result.reasons.append(f"data availability: no history for requested pairs {absent}")
+            result.verdict = "DEV_FAIL"
     return {
         "market": "Crypto (hourly)",
         "version": version,

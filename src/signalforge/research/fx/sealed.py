@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -32,6 +32,7 @@ from signalforge.backtest.costs import CostModel
 from signalforge.backtest.engine import SimTrade
 from signalforge.backtest.metrics import compute_metrics
 from signalforge.db.models import CurrencySealedTest
+from signalforge.research.fx.continuity import missing_intervals
 from signalforge.research.fx.harness import (
     CRYPTO2_MARKET,
     CRYPTO3_MARKET,
@@ -134,6 +135,9 @@ def run_sealed_test(
     series_by_pair = {p: s for p, s in series_by_pair.items() if len(s)}
     if not series_by_pair:
         raise SealedTestRefused(f"no {mk.name} history for the requested pairs")
+    absent = sorted(set(pairs) - set(series_by_pair))
+    if absent:
+        raise SealedTestRefused(f"no history for requested pairs {absent}; universe incomplete")
     seal_from = sealed_start(series_by_pair, gates.sealed_days)
     seal_to = max(s.dates[-1] for s in series_by_pair.values())
 
@@ -204,6 +208,13 @@ def run_sealed_test(
             t.pnl_r - holding_cost_r(t, gates.holding_cost_bps_per_day, fallback) for t in base
         ) / len(base)
     reasons = []
+    if mk.name == "Crypto":
+        for pair, series in sorted(series_by_pair.items()):
+            missing = missing_intervals(
+                series.dates, timedelta(days=1), start=seal_from, end=seal_to
+            )
+            if missing:
+                reasons.append(f"sealed data continuity: {pair} missing {missing} daily bars")
     if m.n_trades < SEALED_MIN_TRADES:
         reasons.append(f"sealed trades {m.n_trades} < {SEALED_MIN_TRADES}")
     if m.expectancy_r < SEALED_MIN_EXPECTANCY_R:

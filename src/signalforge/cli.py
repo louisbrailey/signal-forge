@@ -634,6 +634,8 @@ def crypto_paper_status(
         f"from {st['start_date']} to {st['observation_end']}, bars through {st['last_bar_date']}"
     )
     exp = st["expectancy_r"]
+    if st.get("data_hold"):
+        typer.echo(f"  NEW ENTRIES HELD: {st['data_hold']}")
     typer.echo(
         f"  closed {st['closed_trades']}, expectancy "
         f"{'n/a' if exp is None else f'{exp:+.3f}R'} (sealed {st['sealed_expectancy_r']:+.3f}R), "

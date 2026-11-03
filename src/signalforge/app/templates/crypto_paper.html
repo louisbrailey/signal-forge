@@ -6,6 +6,9 @@
 {{ page_intro("A SIMULATED forward test: the crypto strategy that passed its one-time sealed test is followed day by day on prices it has never seen. Results are in R — one R is the amount risked on a trade. No broker is connected and no order is ever placed.") }}
 
 {% for b in books %}
+{% if b.data_hold %}
+<p role="alert" class="text-red-600">New entries held: {{ b.data_hold }}. Existing positions continue to be marked and closed.</p>
+{% endif %}
 <section class="mb-6 space-y-4">
   <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
     {% set cards = [
