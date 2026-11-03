@@ -11,11 +11,11 @@ evidence after the shipped cost models.
 
 | Family | Universe | Verdict | Key figure |
 |---|---|---|---|
-| D `crypto_donchian_55_u10` (CRYPTO-2) | 10 crypto pairs vs USD | **DEV_PASS** — passes every development gate on the 10-pair universe | OOS +0.574R on 176 trades, CI low +0.134R, 2× costs +0.520R, 7/10 pairs positive |
+| D `crypto_donchian_55_u10` (CRYPTO-2) | 10 crypto pairs vs USD | **DEV_PASS and SEALED_PASS** (+0.693R / 55 on the never-seen year) | OOS +0.574R on 176 trades, CI low +0.134R, 2× costs +0.520R, 7/10 pairs positive; sealed 9/10 pairs positive |
 | D `crypto_mom_21_u10` | same | DEV_FAIL (near miss) | +0.115R / 620, CI low −0.052R; 7/10 pairs positive, 2/4 folds |
 | D `crypto_tsmom_126_ma50_u10`, `crypto_zfade_20_u10` | same | DEV_FAIL | +0.015R and −0.122R |
 | C `fx_mom_21` (FX-3) | 7 majors + gold | DEV_FAIL, as the pre-registration expected | −0.086R / 784, CI low −0.175R, 0/4 folds; only GBP, JPY and gold positive |
-| D′ `crypto_mom_21_long_u10` (CRYPTO-3, refinement §7.2) | 10 crypto pairs | **DEV_PASS** (one refinement look disclosed) | +0.279R / 433, CI low +0.040R, 2× costs +0.233R, 8/10 pairs positive, 4/4 folds positive |
+| D′ `crypto_mom_21_long_u10` (CRYPTO-3, refinement §7.2) | 10 crypto pairs | DEV_PASS, then **SEALED_FAIL** (−0.062R / 130) — rejected | dev +0.279R / 433, CI low +0.040R; sealed year negative on 7/10 pairs |
 | A `tsmom_etf.medium_swing` | 10 ETFs 2016+ / 9 ETFs 2006+ | fails gate 4 (CI) and gate 7 (Sharpe vs SPY); positive expectancy, 100% grid positive | +0.130R / 93 and +0.077R / 224; diagnostic sealed +0.109R / 45 and +0.051R / 40 |
 | A2 `tsmom_etf.position` (quarterly hold, §7.1) | same | **fails** gates 4, 7 and the diagnostic sealed window; refinement did not help — family A closed | +0.142R / 61 and +0.213R / 145 (higher per trade, fewer trades); diag. sealed −0.084R / 31 and −0.126R / 29 |
 | B `turn_of_month.short_swing` | 6 index ETFs 2016+ / 5 ETFs 2003+ | **reject**: −0.037R on 2016+ (0% grid positive); +0.040R on 2003+ but CI low −0.012R and Sharpe 0.25 vs 0.43 | effect is small and fading; diagnostic sealed +0.052R / 72 and +0.074R / 60 |
@@ -156,7 +156,23 @@ positive, all four folds positive, +0.233R at double costs. Honest caveats: this
 look at the same development data (disclosed in the pre-registration §7); BNB again
 contributes an outsized +1.57R on 21 trades; and the sample is a crypto bull market.
 
-**Disposition: `crypto_donchian_55_u10` (CRYPTO-2) and `crypto_mom_21_long_u10` (CRYPTO-3) are sealed-test candidates.** Taking that
+### Sealed tests — operator-authorised 2026-11-02 ("Yes, run both"), one look each, live database
+
+| Version / strategy | Sealed window | Trades | Expectancy | 2× costs | Win | Profit factor | Max DD | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| CRYPTO-2 `crypto_donchian_55_u10` (10 pairs) | 2025-11-03 → 2026-11-02 | 55 | **+0.693R** | +0.627R | 55% | 2.66 | 4.1R | **SEALED_PASS** (`currency_sealed_test` id 2) |
+| CRYPTO-3 `crypto_mom_21_long_u10` (10 pairs) | 2025-11-03 → 2026-11-02 | 130 | **−0.062R** | −0.109R | 35% | 0.89 | 13.7R | **SEALED_FAIL** (id 3) — rejected, look spent |
+
+Per pair, sealed year — Donchian: ADA +0.01 (7), AVAX +1.83 (4), BNB +0.78 (3), BTC +0.95 (6),
+DOGE +0.33 (5), ETH +0.89 (6), LINK +1.12 (6), LTC −0.19 (6), SOL +0.85 (7), XRP +0.85 (5):
+nine of ten pairs positive on data no one had looked at. Momentum: ADA −0.45, AVAX −0.16,
+BNB +0.69, BTC +0.07, DOGE −0.18, ETH +0.26, LINK −0.16, LTC −0.06, SOL +0.07, XRP −0.37 —
+the development pass (+0.279R on 433 trades, after one refinement look) did not survive the
+year it had never seen. That is exactly what the sealed year is for; CRYPTO-3 is closed.
+
+**Disposition:** `crypto_donchian_55_u10` (CRYPTO-2) is the program's one new validated edge
+— development +0.574R / 176, sealed +0.693R / 55, both with 2× costs positive — and goes to
+the crypto paper book. `crypto_mom_21_long_u10` is rejected. Taking that
 look consumes CRYPTO-2's one sealed year for this rule and needs the operator's explicit
 authorisation; it is **not** taken by this program. If authorised and passed, the existing
 crypto paper book mechanism (currently CRYPTO-1 on 3 pairs, $100 R) is the paper venue.

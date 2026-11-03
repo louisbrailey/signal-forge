@@ -33,8 +33,8 @@ book's $100.
 | Crypto / FX | Pairs | Window | Trades | Exp. (R) | Win | R / year | Max DD (R) | Losing years | $/month @ $100 R | Status |
 |---|---|---|---|---|---|---|---|---|---|---|
 | CRYPTO-1 crypto_donchian_55 | 3 | 2015 → 2026-11 (through sealed yr) | 172 | **+1.135** | 41% | 16.9 | 9 | 1 of 12 | **$141** | sealed pass, in paper |
-| CRYPTO-2 crypto_donchian_55_u10 | 10 | 2015 → 2025-11 (dev only) | 421 | +1.044 | 35% | 41.6 | 30 | 1 of 11 | $347 | candidate, no sealed look yet |
-| CRYPTO-3 crypto_mom_21_long_u10 | 10 | 2015 → 2025-11 (dev only) | 1,049 | +0.436 | 43% | 42.5 | 63 | 3 of 11 | $354 | candidate, no sealed look yet |
+| CRYPTO-2 crypto_donchian_55_u10 | 10 | 2015 → 2025-11 (dev); sealed yr 2025-11→2026-11 **+0.693R / 55 PASS** | 421 | +1.044 | 35% | 41.6 | 30 | 1 of 11 | $347 (sealed-year rate ≈ $320) | **sealed pass 2026-11-02** |
+| CRYPTO-3 crypto_mom_21_long_u10 | 10 | 2015 → 2025-11 (dev); sealed yr **−0.062R / 130 FAIL** | 1,049 | +0.436 | 43% | 42.5 | 63 | 3 of 11 | $354 on dev, −$68 in the sealed year | **rejected 2026-11-02** |
 | CRYPTO-1 tsmom_126 / zfade_20 | 3 | dev only | 141 / 569 | +0.135 / −0.210 | | 1.8 / −11.3 | | | $15 / −$94 | rejected |
 | FX-1 (3 rules), FX-2 (1 rule) | 8 | 2010 → 2025-11 (dev only) | 543–1,627 | −0.02 to −0.11 | 28–48% | −0.9 to −4.4 | 28–95 | 9–12 of 16 | −$4 to −$20 at $55 R | rejected |
 
