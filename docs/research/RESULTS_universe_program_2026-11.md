@@ -21,7 +21,7 @@ evidence after the shipped cost models.
 
 | Family | Universe | Verdict | Key figure |
 |---|---|---|---|
-| D `crypto_donchian_55_u10` (CRYPTO-2) | 10 crypto pairs vs USD | **DEV_PASS and SEALED_PASS** (+0.693R / 55 on the never-seen year) | OOS +0.574R on 176 trades, CI low +0.134R, 2× costs +0.520R, 7/10 pairs positive; sealed 9/10 pairs positive |
+| D `crypto_donchian_55_u10` (CRYPTO-2) | 10 crypto pairs vs USD | DEV_PASS and SEALED_PASS (+0.693R / 55) **but invalidated by the BNB coverage audit** (see banner): BNB's daily series has a 1,735-day hole and only 244/365 sealed-year bars; the pooled pass is not promotion evidence and the book is held | OOS +0.574R on 176 trades, CI low +0.134R, 2× costs +0.520R, 7/10 pairs positive; sealed 9/10 pairs positive |
 | D `crypto_mom_21_u10` | same | DEV_FAIL (near miss) | +0.115R / 620, CI low −0.052R; 7/10 pairs positive, 2/4 folds |
 | D `crypto_tsmom_126_ma50_u10`, `crypto_zfade_20_u10` | same | DEV_FAIL | +0.015R and −0.122R |
 | C `fx_mom_21` (FX-3) | 7 majors + gold | DEV_FAIL, as the pre-registration expected | −0.086R / 784, CI low −0.175R, 0/4 folds; only GBP, JPY and gold positive |
@@ -180,9 +180,19 @@ BNB +0.69, BTC +0.07, DOGE −0.18, ETH +0.26, LINK −0.16, LTC −0.06, SOL +0
 the development pass (+0.279R on 433 trades, after one refinement look) did not survive the
 year it had never seen. That is exactly what the sealed year is for; CRYPTO-3 is closed.
 
-**Disposition:** `crypto_donchian_55_u10` (CRYPTO-2) is the program's one new validated edge
-— development +0.574R / 176, sealed +0.693R / 55, both with 2× costs positive — and goes to
-the crypto paper book. `crypto_mom_21_long_u10` is rejected. Taking that
+**Disposition (corrected after the coverage audit, same evening).** The CRYPTO-2 pass is
+**not** a validated edge. The pre-registration checked each pair's first bar but not its
+continuity; BNBUSD's Massive daily series stops in 2021-06 and resumes in 2026-03 (1,255 bars
+over 2,997 days), so both the development result (BNB +3.14R on 8 trades) and the sealed
+result (BNB +0.78R on 3 trades, 244/365 sealed-year bars) treated non-adjacent bars as
+adjacent. The other nine pairs are continuous (XRP misses 13 days, ETH 6). The locked rows
+stay as they are; the paper book exists but is held against new entries
+(`crypto_paper_data_holds`), with zero positions. The 2025-11 → 2026-11 year has now been
+seen for all ten pairs, so a BNB-free CRYPTO-2b cannot get a clean sealed look on that
+window; the only honest route to evidence for the nine clean pairs is **prospective paper
+forward results**, which the operator may choose to collect by lifting the hold for a book
+explicitly labelled experimental. `crypto_mom_21_long_u10` is rejected on its sealed year
+regardless (it was negative on 7/10 pairs, BNB being one of its three positives). Taking that
 look consumes CRYPTO-2's one sealed year for this rule and needs the operator's explicit
 authorisation; it is **not** taken by this program. If authorised and passed, the existing
 crypto paper book mechanism (currently CRYPTO-1 on 3 pairs, $100 R) is the paper venue.
