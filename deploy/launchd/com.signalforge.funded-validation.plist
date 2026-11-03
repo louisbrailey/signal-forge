@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.signalforge.funded-validation</string>
+  <key>ProgramArguments</key><array>
+    <string>__CHECKOUT__/.venv/bin/python</string>
+    <string>__CHECKOUT__/scripts/funded_forward.py</string>
+    <string>collect</string><string>__STUDY_ROOT__</string>
+    <string>--env-file</string><string>__ENV_FILE__</string>
+  </array>
+  <key>WorkingDirectory</key><string>__CHECKOUT__</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PYTHONPATH</key><string>__CHECKOUT__/src</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>1800</integer>
+  <key>Nice</key><integer>10</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>__STUDY_ROOT__/collector.out.log</string>
+  <key>StandardErrorPath</key><string>__STUDY_ROOT__/collector.err.log</string>
+</dict></plist>
