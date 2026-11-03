@@ -19,7 +19,7 @@ established. No real brokerage balance was read.
 The existing repair audit reports a BNB data gap invalidating expanded-crypto
 promotion evidence, withdrawal of unsupported monthly income estimates, failed
 daily-strategy gates and a rejected intraday development evaluation. Read
-[the repair audit](research/REPAIR_AUDIT_2026-11-02.md) for the dated evidence and
+the operating checkout’s `docs/research/REPAIR_AUDIT_2026-11-02.md` (research branch; not yet part of main) for the dated evidence and
 limitations. This assessment does not rerun, inspect or alter sealed studies.
 
 ## Reproduce the assessment
