@@ -27,6 +27,10 @@ def money(value: float | Decimal) -> Decimal:
     return Decimal(str(value)).quantize(Decimal("0.01"))
 
 
+def sell_price(raw: float, penalty: float) -> Decimal:
+    return Decimal(str(raw * (1 - penalty))).quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+
+
 @dataclass
 class Position:
     shares: int
@@ -178,7 +182,7 @@ def run_funded_replay(
                     * max(
                         0.0,
                         max(float(p.entry), marks[s])
-                        - float(money(p.signal.stop_price * (1 - penalty))),
+                        - float(sell_price(p.signal.stop_price, penalty)),
                     )
                     + float(p.entry_fee)
                     + cm.commission(p.shares)
@@ -197,7 +201,7 @@ def run_funded_replay(
             # Includes commissions in both affordability and total open risk.
             while shares > 0 and (
                 fill * shares + money(cm.commission(shares)) > cash
-                or (float(fill) - float(money(sig.stop_price * (1 - penalty)))) * shares
+                or (float(fill) - float(sell_price(sig.stop_price, penalty))) * shares
                 + 2 * cm.commission(shares)
                 > min(
                     equity * limits.per_trade_risk_pct / 100,
@@ -255,7 +259,7 @@ def run_funded_replay(
         for symbol, p in positions.items():
             raw = float(series[symbol].close[i])
             gross_close += money(raw) * p.shares
-            liquidation += money(raw * (1 - penalty)) * p.shares - money(cm.commission(p.shares))
+            liquidation += sell_price(raw, penalty) * p.shares - money(cm.commission(p.shares))
         result.marks.append(
             {
                 "day": str(day),
