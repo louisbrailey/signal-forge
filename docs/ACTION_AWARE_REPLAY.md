@@ -131,7 +131,7 @@ is not evidence of earnings entitlement. Historical event coverage remains
 unavailable and stock entries are blocked in this run. Supplying a current earnings
 calendar later would not retroactively prove what was known historically.
 
-The launchd template is `deploy/launchd/com.signalforge.funded-validation.plist`.
+The launchd template is `deploy/launchd/templates/com.signalforge.funded-validation.plist`.
 Replace `__CHECKOUT__`, `__STUDY_ROOT__`, and `__ENV_FILE__` with absolute paths;
 keep credentials inside the referenced environment file. Install the rendered
 plist under `~/Library/LaunchAgents`, then use
