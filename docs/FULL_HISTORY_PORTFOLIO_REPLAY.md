@@ -47,4 +47,15 @@ A November 3 engineering smoke run used the unchanged short-swing trend baseline
 
 ## Remaining before full-history validation
 
-Corporate-action cash/dividend accounting, point-in-time event/liquidity eligibility and sector data, a funded benchmark, calendar-day evidence export, delisting and changing-universe lifecycle handling, and drawdown-triggered entry suspension need implementation and tests. Existing risk controls cover per-trade, total open risk, notional, sector, cash and volume; no new drawdown guard is claimed. No cash-flow API is exposed by this first core. No all-asset or all-history profitability claim follows from the smoke run.
+Corporate-action cash/dividend accounting, point-in-time event/liquidity eligibility and sector data, a risk-equivalent benchmark, delisting and changing-universe lifecycle handling, and drawdown-triggered entry suspension need implementation and tests. Existing risk controls cover per-trade, total open risk, notional, sector, cash and volume; no new drawdown guard is claimed. No cash-flow API is exposed by this first core. No all-asset or all-history profitability claim follows from the smoke run.
+
+## Income-target diagnostics
+
+The runner now exports calendar-day income evidence, explicit target misses,
+round-trip reconciliation, per-symbol P&L, exposure and rejection counts.
+`--cost-scenarios` adds fixed zero-fee/spread/slippage and higher-cost cases;
+cent rounding remains active. A capped passive reference is reported with its
+different risk profile disclosed. Closure carry is allowed only on known XNYS
+non-sessions; missing session marks fail. See
+[diagnostic results](../reports/INCOME_TARGET_DIAGNOSTICS_2026-11-03.md) and
+[research protocol](INCOME_TARGET_RESEARCH_NEXT.md). No strategy or live settings changed.
