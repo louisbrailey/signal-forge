@@ -90,7 +90,7 @@ configured limit and these ceilings (constants in `paper/ledger.py`):
 | Limit | Ceiling | Note |
 |---|---|---|
 | Planned risk per trade | 0.5% of book equity | unchanged |
-| Aggregate open stop risk | **12.33%** | ceiling raised 1.5% → 3.0% (2026-10-03) → 12.33% (operator decision 2026-11-02, paper only); the configured value binds (see below) |
+| Aggregate open stop risk | **3.0%** | ceiling raised from 1.5%, **no effect**: configured 1.5% still binds (see below) |
 | Allocation per symbol | **10%** | raised from 5% — operator decision 2026-10-03, paper only |
 | Allocation per sector | 20% | unchanged; now applies to every instrument |
 | Gross exposure | 100% (no leverage) | unchanged |
@@ -99,22 +99,17 @@ The effective limit is always `min(configured value, ceiling)`. Stated plainly:
 
 - **Per symbol: 10% is effective.** Configured `max_position_concentration_pct`
   is 10 and the ceiling is 10.
-- **Open risk: the configured `max_daily_portfolio_risk_pct` is effective**
-  up to the 12.33% ceiling. The shipped default is 1.5 (operator decision
-  2026-10-04); on 2026-11-02 the operator raised the LIVE value to 12.33
-  through the `research_overrides` setting (the same mechanism as the other
-  live risk overrides), not by editing the default. The ceiling only says how
-  far the setting *can* be raised; it raises nothing by itself.
+- **Open risk: 1.5% is effective. The 3.0% ceiling has NO effect** while
+  `max_daily_portfolio_risk_pct` is configured at 1.5 — and it stays 1.5
+  (operator decision 2026-10-04). The ceiling only says how far the setting
+  *could* be raised; it raises nothing by itself.
 - **Raising it has a cost.** `risk` is part of the approved-scope `config_hash`.
-  Changing `max_daily_portfolio_risk_pct` changes the live `config_hash` and
-  takes every approved strategy version **out of scope** (every candidate is
-  `NO TRADE — approval does not apply to this dataset`) until each version has
-  a new PASSING `strategy_promotion_evaluation` row in the live database
-  carrying the new hash, on its approved dataset snapshot and exact symbol
-  list (`evaluate-promotion` on the live database; gate 9 replays the locked
-  sealed test verbatim, so no new sealed look is consumed). The default
-  config's hash is still pinned by `tests/paper/test_open_risk_config_scope_pin.py`
-  and `tests/execution/test_config_scope.py`.
+  Raising `max_daily_portfolio_risk_pct` would change `config_hash` and take
+  both approved strategy versions **out of scope** (no automatic acceptance)
+  until they are re-evaluated. This release changes no configuration, so the
+  approved scope hashes are unchanged (pinned by
+  `tests/paper/test_open_risk_config_scope_pin.py` and
+  `tests/execution/test_config_scope.py`).
 
 Stops and ATR-based candidate sizing remain deterministic. Stops cannot guarantee
 maximum loss through a gap. Existing larger positions are not resized or

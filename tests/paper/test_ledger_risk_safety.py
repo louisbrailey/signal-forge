@@ -401,9 +401,8 @@ def test_loose_config_is_narrowed_without_mutation_and_reduction_is_frozen(
     assert res.shares == 1  # 0.5% risk ceiling, not the persisted 10%
     evidence = session.get(PaperTrade, res.paper_trade_id).plan_json["risk_decision"]
     assert evidence["effective_limits"]["per_trade_risk_pct"] == 0.5
-    # Ceilings (paper only): 12.33% open risk (2026-11-02), 10% symbol (2026-10-03).
-    # The configured 10% is under the open-risk ceiling, so it is what binds.
-    assert evidence["effective_limits"]["max_daily_portfolio_risk_pct"] == 10
+    # Operator decision 2026-10-03, paper only: ceilings 3.0% open risk, 10% symbol.
+    assert evidence["effective_limits"]["max_daily_portfolio_risk_pct"] == 3.0
     assert evidence["effective_limits"]["max_position_concentration_pct"] == 10
     assert evidence["effective_limits"]["max_correlated_exposure_pct"] == 20
     assert evidence["reduced"] is True
@@ -413,18 +412,18 @@ def test_loose_config_is_narrowed_without_mutation_and_reduction_is_frozen(
     assert effective_research_config(session).model_dump(mode="json") == before
 
 
-def test_loose_aggregate_risk_config_cannot_exceed_the_ceiling(session, passing_candidate, account):
-    """The open-risk CEILING is 12.33% (operator decision 2026-11-02; was 3.0%,
-    before that 1.5%).
+def test_loose_aggregate_risk_config_cannot_exceed_three_percent(
+    session, passing_candidate, account
+):
+    """The open-risk CEILING is 3.0% (operator decision 2026-10-03, was 1.5%).
 
-    Equity = 5000 cash + 50 * 100 held = 10000 -> ceiling 1233.00. The held
+    Equity = 9000 cash + 10 * 100 held = 10000 -> ceiling 300.00. The held
     position's adverse stop fill is 70 * (1 - 0.00055) = 69.9615 -> 69.96, so its
-    open risk is (100 - 69.96) * 50 = 1502.00 > 1233.00: no open-risk budget is
-    left, however loose the configured 50% is (the 10% symbol ceiling is over
-    too; both budgets are negative)."""
-    set_setting(session, "research_overrides", {"risk": {"max_daily_portfolio_risk_pct": 50}})
-    holding(session, account, passing_candidate, qty=50, price=100, stop=70, sector="Other")
-    account.cash = Decimal("5000")
+    open risk is (100 - 69.96) * 10 = 300.40 > 300.00: no budget is left, however
+    loose the configured 10% is."""
+    set_setting(session, "research_overrides", {"risk": {"max_daily_portfolio_risk_pct": 10}})
+    holding(session, account, passing_candidate, qty=10, price=100, stop=70, sector="Other")
+    account.cash = Decimal("9000")
     with pytest.raises(ValueError, match="limits"):
         accept(session, passing_candidate)
 
@@ -432,18 +431,17 @@ def test_loose_aggregate_risk_config_cannot_exceed_the_ceiling(session, passing_
 def test_open_risk_between_old_and_new_ceiling_is_now_allowed_when_configured(
     session, passing_candidate, account
 ):
-    """Same book, held risk (100 - 59.97) * 10 = 400.30 — over the old 3.0%
-    ceiling (300), under the new 12.33% one (1233). With the limit CONFIGURED at
-    50% the ceiling governs: budget 1233 - 400.30 = 832.70 -> shares by open risk
-    = floor(832.70 / risk_per_share); the symbol ceiling (1000 / 100.06 -> 9)
-    binds."""
-    set_setting(session, "research_overrides", {"risk": {"max_daily_portfolio_risk_pct": 50}})
-    holding(session, account, passing_candidate, qty=10, price=100, stop=60, sector="Other")
+    """Same book, held risk (100 - 84.95) * 10 = 150.50 — over the old 1.5%
+    ceiling (150), under the new 3.0% one (300). With the limit CONFIGURED at
+    10% the ceiling governs: budget 300 - 150.50 = 149.50 -> floor(149.50 / 4.11)
+    = 36 shares by open risk; the symbol ceiling (1000 / 100.06 -> 9) binds."""
+    set_setting(session, "research_overrides", {"risk": {"max_daily_portfolio_risk_pct": 10}})
+    holding(session, account, passing_candidate, qty=10, price=100, stop=85, sector="Other")
     account.cash = Decimal("9000")
     res = accept(session, passing_candidate)
     assert res.shares == 9
     caps = session.get(PaperTrade, res.paper_trade_id).plan_json["risk_decision"]["share_caps"]
-    assert caps["open_risk"] == 202  # floor(832.70 / 4.11)
+    assert caps["open_risk"] == 36
 
 
 def test_configured_open_risk_still_narrows_below_the_ceiling(session, passing_candidate, account):
