@@ -337,6 +337,32 @@ def _sensitivity_plan(
             strategy, {"contraction_max": [0.65, 0.75, 0.85], "stop_atr": [1.5, 1.75, 2.0]}
         )
 
+    # Pre-registered 2026-11-02 (PREREGISTRATION_universe_program_2026-11-02.md §2A/§2B),
+    # written before any bar of either universe was backtested.
+    if key.startswith("tsmom_etf"):
+        from signalforge.research.strategies.tsmom_etf import TsmomEtf
+
+        base = strategy.params  # type: ignore[attr-defined]
+
+        def factory(p: Mapping[str, Any]) -> BaselineStrategy:
+            return TsmomEtf(_replace(base, **p))
+
+        return factory, _merge_declared_axes(
+            strategy, {"lookback": [189, 252, 315], "sma_window": [168, 210, 252]}
+        )
+
+    if key.startswith("turn_of_month"):
+        from signalforge.research.strategies.turn_of_month import TurnOfMonth
+
+        base = strategy.params  # type: ignore[attr-defined]
+
+        def factory(p: Mapping[str, Any]) -> BaselineStrategy:
+            return TurnOfMonth(_replace(base, **p))
+
+        return factory, _merge_declared_axes(
+            strategy, {"hold_bars": [2, 3, 4], "stop_atr": [2.0, 3.0, 4.0]}
+        )
+
     return None
 
 

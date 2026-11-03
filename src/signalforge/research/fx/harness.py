@@ -39,10 +39,14 @@ from signalforge.backtest.walkforward import run_walkforward
 from signalforge.data.series import PriceSeries
 from signalforge.db.models import CryptoBarDaily, FxBarDaily
 from signalforge.research.fx.strategies import (
+    CRYPTO2_STRATEGIES,
+    CRYPTO2_STRATEGY_VERSION,
     CRYPTO_STRATEGIES,
     CRYPTO_STRATEGY_VERSION,
     FX2_STRATEGIES,
     FX2_STRATEGY_VERSION,
+    FX3_STRATEGIES,
+    FX3_STRATEGY_VERSION,
     FX_STRATEGIES,
     FX_STRATEGY_VERSION,
     FxStrategy,
@@ -121,6 +125,30 @@ CRYPTO_MARKET = ResearchMarket(
     ingest_hint="run crypto-ingest",
     caveat="Perpetual funding and exchange counterparty risk not modelled; spot-style costs only.",
 )
+# Pre-registered 2026-11-02 (PREREGISTRATION_universe_program_2026-11-02.md §2C/§2D).
+FX3_MARKET = ResearchMarket(
+    name="FX",
+    version=FX3_STRATEGY_VERSION,
+    model=FxBarDaily,
+    source=FX_SOURCE,
+    spreads=FX_SPREAD_BPS,
+    default_spread_bps=DEFAULT_SPREAD_BPS,
+    ingest_hint="run forex-ingest",
+    caveat="Swap approximated by a 1 bp/day holding-cost stress gate, not modelled exactly.",
+)
+CRYPTO2_MARKET = ResearchMarket(
+    name="Crypto",
+    version=CRYPTO2_STRATEGY_VERSION,
+    model=CryptoBarDaily,
+    source=CRYPTO_SOURCE,
+    spreads=CRYPTO_SPREAD_BPS,
+    default_spread_bps=CRYPTO_DEFAULT_SPREAD_BPS,
+    ingest_hint="run crypto-ingest",
+    caveat=(
+        "Perpetual funding and exchange counterparty risk not modelled; spot-style costs only; "
+        "pairs without a listed spread use the 50 bps/side default."
+    ),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +174,8 @@ class FxGates:
 
 # FX-2's pre-registered gates: every FX-1 gate, plus 1 bp/day holding cost.
 FX2_GATES = FxGates(holding_cost_bps_per_day=1.0)
+# FX-3 is pre-registered with the FX-2 gates unchanged.
+FX3_GATES = FX2_GATES
 
 
 def holding_cost_r(trade: SimTrade, bps_per_day: float, fallback_risk_frac: float) -> float:
@@ -357,6 +387,28 @@ def run_crypto_research(
     strategies: Sequence[FxStrategy] = CRYPTO_STRATEGIES,
 ) -> dict[str, Any]:
     return run_research(session, pairs, market=CRYPTO_MARKET, gates=gates, strategies=strategies)
+
+
+def run_fx3_research(
+    session: Session,
+    pairs: Sequence[str],
+    *,
+    gates: FxGates | None = None,
+    strategies: Sequence[FxStrategy] = FX3_STRATEGIES,
+) -> dict[str, Any]:
+    return run_research(
+        session, pairs, market=FX3_MARKET, gates=gates or FX3_GATES, strategies=strategies
+    )
+
+
+def run_crypto2_research(
+    session: Session,
+    pairs: Sequence[str],
+    *,
+    gates: FxGates | None = None,
+    strategies: Sequence[FxStrategy] = CRYPTO2_STRATEGIES,
+) -> dict[str, Any]:
+    return run_research(session, pairs, market=CRYPTO2_MARKET, gates=gates, strategies=strategies)
 
 
 def run_research(

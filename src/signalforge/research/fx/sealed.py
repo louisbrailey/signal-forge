@@ -33,9 +33,12 @@ from signalforge.backtest.engine import SimTrade
 from signalforge.backtest.metrics import compute_metrics
 from signalforge.db.models import CurrencySealedTest
 from signalforge.research.fx.harness import (
+    CRYPTO2_MARKET,
     CRYPTO_MARKET,
     FX2_GATES,
     FX2_MARKET,
+    FX3_GATES,
+    FX3_MARKET,
     FX_MARKET,
     FxGates,
     ResearchMarket,
@@ -46,8 +49,10 @@ from signalforge.research.fx.harness import (
     sealed_start,
 )
 from signalforge.research.fx.strategies import (
+    CRYPTO2_STRATEGIES,
     CRYPTO_STRATEGIES,
     FX2_STRATEGIES,
+    FX3_STRATEGIES,
     FX_STRATEGIES,
     FxStrategy,
 )
@@ -59,8 +64,15 @@ SEALED_MIN_STRESS_EXPECTANCY_R = 0.0
 # Each market lists its pre-registered versions: (market+version, strategies,
 # the gates that version was pre-registered with).
 _MARKETS: dict[str, tuple[tuple[ResearchMarket, tuple[FxStrategy, ...], FxGates], ...]] = {
-    "fx": ((FX_MARKET, FX_STRATEGIES, FxGates()), (FX2_MARKET, FX2_STRATEGIES, FX2_GATES)),
-    "crypto": ((CRYPTO_MARKET, CRYPTO_STRATEGIES, FxGates()),),
+    "fx": (
+        (FX_MARKET, FX_STRATEGIES, FxGates()),
+        (FX2_MARKET, FX2_STRATEGIES, FX2_GATES),
+        (FX3_MARKET, FX3_STRATEGIES, FX3_GATES),
+    ),
+    "crypto": (
+        (CRYPTO_MARKET, CRYPTO_STRATEGIES, FxGates()),
+        (CRYPTO2_MARKET, CRYPTO2_STRATEGIES, FxGates()),
+    ),
 }
 
 

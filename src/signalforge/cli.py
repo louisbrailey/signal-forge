@@ -354,7 +354,7 @@ def fx_research(
         typer.Option(help="Write the markdown report here (default: <data dir>/research/fx/)."),
     ] = None,
     version: Annotated[
-        str, typer.Option(help="Pre-registered strategy set: FX-1 or FX-2.")
+        str, typer.Option(help="Pre-registered strategy set: FX-1, FX-2 or FX-3.")
     ] = "FX-1",
 ) -> None:
     """Evaluate the pre-registered FX strategies on the development window.
@@ -368,14 +368,16 @@ def fx_research(
     from signalforge.research.fx.harness import (
         render_markdown,
         run_fx2_research,
+        run_fx3_research,
         run_fx_research,
     )
 
-    if version not in ("FX-1", "FX-2"):
-        typer.echo("--version must be FX-1 or FX-2")
+    runners = {"FX-1": run_fx_research, "FX-2": run_fx2_research, "FX-3": run_fx3_research}
+    if version not in runners:
+        typer.echo("--version must be FX-1, FX-2 or FX-3")
         raise typer.Exit(2)
     chosen = parse_pairs(pairs if pairs is not None else get_settings().forex_pairs)
-    runner = run_fx2_research if version == "FX-2" else run_fx_research
+    runner = runners[version]
     with session_scope() as session:
         report = runner(session, chosen)
     md = render_markdown(report)
@@ -415,6 +417,9 @@ def crypto_research(
         Path | None,
         typer.Option(help="Write the markdown report here (default: <data dir>/research/crypto/)."),
     ] = None,
+    version: Annotated[
+        str, typer.Option(help="Pre-registered strategy set: CRYPTO-1 or CRYPTO-2.")
+    ] = "CRYPTO-1",
 ) -> None:
     """Evaluate the pre-registered crypto strategies on the development window.
     The sealed final year is never evaluated here. Research only."""
@@ -424,11 +429,19 @@ def crypto_research(
     from signalforge.config.paths import data_dir
     from signalforge.data.forex import CRYPTO, parse_pairs
     from signalforge.db.session import session_scope
-    from signalforge.research.fx.harness import render_markdown, run_crypto_research
+    from signalforge.research.fx.harness import (
+        render_markdown,
+        run_crypto2_research,
+        run_crypto_research,
+    )
 
+    runners = {"CRYPTO-1": run_crypto_research, "CRYPTO-2": run_crypto2_research}
+    if version not in runners:
+        typer.echo("--version must be CRYPTO-1 or CRYPTO-2")
+        raise typer.Exit(2)
     chosen = parse_pairs(pairs if pairs is not None else get_settings().crypto_pairs, CRYPTO)
     with session_scope() as session:
-        report = run_crypto_research(session, chosen)
+        report = runners[version](session, chosen)
     target = out or (
         data_dir()
         / "research"
