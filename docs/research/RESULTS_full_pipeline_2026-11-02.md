@@ -21,6 +21,11 @@ evaluation ran on a scratch copy taken with `sqlite3 .backup` at 2026-11-02
 copies and are quoted so the log lines can be matched; they are **not** rows in
 `data/signalforge.sqlite`.
 
+No strategy yet has a sufficiently sized, positive prospective paper record to establish
+that a backtested edge holds in operation. Existing approvals permit observation; the
+"viable" research labels below are provisional and do not establish monthly income.
+The expanded CRYPTO-2 evidence is specifically invalidated by the coverage audit above.
+
 ## 1. Headline
 
 | Rank | Strategy | Verdict | One-line reason |

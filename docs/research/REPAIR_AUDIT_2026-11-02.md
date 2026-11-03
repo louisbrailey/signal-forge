@@ -44,3 +44,23 @@ CRYPTO-2 promotion claim. Raw locked evidence remains intact.
   interpolation or selectively deleted to force a pass. A repaired dataset requires a
   documented new evaluation and genuinely fresh prospective evidence.
 - Corrected research run outputs and full-suite results are recorded below when complete.
+
+## Verification completed
+
+- Full suite: **2,628 passed**, 0 failures, in 300.8s using
+  `devkit run --timeout 3600 -- uv run pytest --no-cov -q -n 4`.
+  Full local log: `.toolkit-runs/20261103T052831.787423Z.log`.
+- `make lint`: exit 0; Ruff, Black, mypy and all 21 import contracts pass.
+- Focused opening-range/calendar parity, crypto continuity, paper-hold behavior,
+  registry isolation, profit-denominator and dashboard tests pass.
+- Launchd worker PID 35030 and API PID 33899 running after restart; `/healthz` returns OK.
+- Live status displays the CRYPTO-2 data hold; the affected book has zero closed and
+  open trades. It remains tied to preserved sealed row 2. Sealed row count remains 3;
+  armed strategy count remains zero.
+
+## Research calculations still distinct from verification
+
+The intraday ORB grid and remaining mega-cap daily strategies are numerical research jobs.
+Their slow runtime did not mean tests were failing or the production worker was hung.
+Replacement jobs run only on scratch copies and preserve locked live evidence. Results are
+recorded here on completion, including failures; none is used to adjust a gate threshold.
