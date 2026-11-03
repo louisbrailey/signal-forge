@@ -53,3 +53,22 @@ permission to bypass arming, data holds or hard risk limits. Real-money activati
 and order submissions were not performed in this assessment.
 
 Reference: [SEC Investor Bulletin: Performance Claims](https://www.investor.gov/introduction-investing/general-resources/news-alerts/alerts-bulletins/investor-bulletins-47).
+
+## Full stored-history inventory — November 3
+
+Run `python3 scripts/income_target_assessment.py /absolute/path/to/signalforge.sqlite --history`. The tool inventories every row in six known bar tables under one read-only transaction and groups source, latency, and interval separately. Missing simulation metadata is unknown, not evidence that rows are real; absent quality metadata is counted as unknown. Counts are inventory, not a completeness or backtest pass.
+
+| Table | Rows | First observation | Last observation |
+|---|---:|---|---|
+| Equity daily | 3,355,095 | 2003-10-20 | 2026-11-02 |
+| Equity intraday | 1,519,695 | 2016-09-01 13:30 UTC | 2026-10-26 19:45 UTC |
+| Crypto daily | 39,144 | 2015-01-01 | 2026-11-02 |
+| Crypto intraday | 413,658 | 2017-01-01 00:00 UTC | 2026-11-03 02:00 UTC |
+| FX daily | 33,974 | 2010-01-04 | 2026-11-02 |
+| Option daily aggregates | 428,070 | 2023-09-11 | 2026-09-04 |
+
+These global bounds do not imply every instrument spans those dates. Preserve per-symbol coverage checks, corporate-action handling and actual market calendars. Existing datasets include known gaps; never interpolate or discard bad intervals to force a strategy pass.
+
+The imported income-target evaluator requires an explicitly sourced daily net-liquidation panel. The operating ledger is not automatically exported as that panel because its current-state snapshots cannot reconstruct historical cash and positions. Historical coverage and valid income evidence remain separate requirements.
+
+A full-history replay of frozen rules may be reported descriptively after recording every window, cost model, eligibility exclusion and failed experiment. Training and evaluation remain chronologically separated. Once a holdout has informed revisions, it is development evidence; further validation requires new prospective observations. Never search repeatedly until every historical day meets a dollar target.
