@@ -54,6 +54,26 @@ class FundedReplay:
     open_lots: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class EntryProposal:
+    """Sized next-open proposal; no later price or current-session close is exposed."""
+
+    symbol: str
+    day: date
+    signal_day: date
+    shares: int
+    notional: Decimal
+    round_trip_cost: Decimal
+    reference_open: Decimal
+
+
+@dataclass(frozen=True)
+class EntryVerdict:
+    accepted: bool
+    reason: str
+    evidence: dict[str, Any]
+
+
 def run_funded_replay(
     series: dict[str, PriceSeries],
     signals: dict[str, SignalFn],
@@ -73,6 +93,7 @@ def run_funded_replay(
     eligibility: Callable[[str, PriceSeries, int], tuple[str, ...]] | None = None,
     max_drawdown_pct: float | None = None,
     allow_staggered_start: bool = False,
+    entry_admission: Callable[[EntryProposal], EntryVerdict] | None = None,
 ) -> FundedReplay:
     """Deterministic alphabetic admission order; shared cash, no leverage.
 
@@ -169,7 +190,8 @@ def run_funded_replay(
         fill = Decimal(str(raw * (1 - penalty))).quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
         fee = money(cm.commission(p.shares))
         cash += fill * p.shares - fee
-        result.costs += money(abs(raw - float(fill)) * p.shares) + fee
+        cost = money(abs(raw - float(fill)) * p.shares) + fee
+        result.costs += cost
         result.fills.append(
             {
                 "day": str(dates[i]),
@@ -179,6 +201,7 @@ def run_funded_replay(
                 "shares": p.shares,
                 "price": str(fill),
                 "commission": str(fee),
+                "modeled_cost_usd": str(cost),
                 "reason": reason,
                 "realized_pnl_usd": str(fill * p.shares - p.cost_basis - fee - p.entry_fee),
             }
@@ -395,6 +418,21 @@ def run_funded_replay(
                 shares -= 1
             if shares < 1:
                 reason = reason or "cash_or_open_risk"
+            admission_evidence: dict[str, Any] = {}
+            if reason is None and entry_admission is not None:
+                proposal = EntryProposal(
+                    symbol,
+                    day,
+                    dates[i - 1],
+                    shares,
+                    fill * shares,
+                    (fill - sell_price(raw, penalty)) * shares + 2 * money(cm.commission(shares)),
+                    Decimal(str(raw)),
+                )
+                verdict = entry_admission(proposal)
+                admission_evidence = verdict.evidence
+                if not verdict.accepted:
+                    reason = verdict.reason
             result.decisions.append(
                 {
                     "day": str(day),
@@ -403,13 +441,15 @@ def run_funded_replay(
                     "reason": reason,
                     "shares": 0 if reason else shares,
                     "signal_day": str(dates[i - 1]),
+                    "entry_admission": admission_evidence,
                 }
             )
             if reason:
                 continue
             fee = money(cm.commission(shares))
             cash -= fill * shares + fee
-            result.costs += money(abs(float(fill) - raw) * shares) + fee
+            cost = money(abs(float(fill) - raw) * shares) + fee
+            result.costs += cost
             positions[symbol] = Position(shares, fill, sig, i, fee, fill * shares)
             result.fills.append(
                 {
@@ -421,6 +461,7 @@ def run_funded_replay(
                     "shares": shares,
                     "price": str(fill),
                     "commission": str(fee),
+                    "modeled_cost_usd": str(cost),
                 }
             )
         pending = {}
