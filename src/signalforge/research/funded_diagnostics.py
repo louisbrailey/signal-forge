@@ -75,13 +75,15 @@ def diagnose(
             buys[symbol] = fill
         elif fill["side"] == "sell":
             buy = buys.pop(symbol, None)
-            if buy is None or buy["shares"] != fill["shares"]:
+            if buy is None or (buy["shares"] != fill["shares"] and "realized_pnl_usd" not in fill):
                 raise ValueError("Unmatched round trip")
             net = (
                 (Decimal(fill["price"]) - Decimal(buy["price"])) * fill["shares"]
                 - Decimal(fill["commission"])
                 - Decimal(buy["commission"])
             )
+            if "realized_pnl_usd" in fill:
+                net = Decimal(fill["realized_pnl_usd"])
             pnl.append(net)
             pnl_by_symbol[symbol] = pnl_by_symbol.get(symbol, Decimal(0)) + net
         else:
@@ -93,7 +95,15 @@ def diagnose(
     ):
         raise ValueError("Terminal liquidation required")
     net = value - initial_cash
-    if sum(pnl, Decimal(0)) != net:
+    dividend_income = sum(
+        (
+            Decimal(e["amount_usd"])
+            for e in result.corporate_events
+            if e["kind"] == "dividend_entitlement"
+        ),
+        Decimal(0),
+    )
+    if sum(pnl, Decimal(0)) + dividend_income != net:
         raise ValueError("Round trips do not reconcile to terminal cash")
     exposures = [
         float(Decimal(m["gross_exposure_usd"]) / Decimal(m["net_liquidation_usd"]))
@@ -112,6 +122,8 @@ def diagnose(
             ((value / initial_cash) ** (Decimal("365.25") / len(observations)) - 1) * 100
         ),
         "closed_trades": len(pnl),
+        "dividend_income_usd": str(dividend_income),
+        "terminal_dividend_receivable_usd": result.marks[-1].get("dividend_receivable_usd", "0"),
         "hit_rate": sum(p > 0 for p in pnl) / len(pnl) if pnl else None,
         "profit_factor": float(gains / losses) if losses else None,
         "average_session_exposure_pct": (
