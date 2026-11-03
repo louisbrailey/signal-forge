@@ -87,3 +87,12 @@ up the daily results. Gate 9 remains a diagnostic development window, not fresh 
 None passes. Relative strength is the strongest development signal (+0.495R /116)
 but lacks sufficient bear-regime coverage (7 trades, threshold10). Keeping that gate
 unchanged is essential; it is not evidence to force another universe selection.
+
+## Intraday family verdict now available
+
+The independently completed mega-cap invocation on `sfdata6` has an actual intraday
+result (eval57, snapshot31): 1,633 OOS trades at −0.0320R after costs, CI low−0.0610R,
+zero positive walk-forward folds and zero positive sensitivity points out of18.
+Its diagnostic final window is −0.0605R on464 trades. This is a rejection, not a code
+error to tune away. The distinct 23-symbol confirmation remains a running scratch job.
+No result is fabricated for an interrupted or unfinished run.

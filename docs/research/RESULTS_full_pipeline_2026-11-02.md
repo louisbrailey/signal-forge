@@ -37,7 +37,7 @@ The expanded CRYPTO-2 evidence is specifically invalidated by the coverage audit
 | 5 | `volatility_breakout.short_swing` v0.2.0 | **reject (power)** | OOS +0.36R but 25 trades, CI low −0.02R, 1 bear trade; needs ~5,000 trades to clear gate 4 at its dispersion |
 | 6 | `mean_reversion.short_swing` v0.2.0 | **reject** | OOS +0.03R / 194, CI low −0.08R, 6 bear trades, Sharpe 0.20 vs SPY 0.68; pre-registration allows no further iteration |
 | 7 | `options_short_vertical.medium_swing` v0.1.3 | **reject (not evaluable)** | 1 structure entered in 2023-09..2026-09; 0 OOS; every gate 1–7 fails on an empty sample |
-| 8 | `intraday_orb.intraday` v0.2.0 | **not evaluated to completion** (gate 0 passes; gates 1–10 unfinished) | First evaluation on real 15m bars (1.52M rows, 23 symbols); the full ladder needs ~4–6 h and was terminated twice (§3.6) |
+| 8 | `intraday_orb.intraday` v0.2.0 | **reject on 9-stock universe** | OOS −0.032R / 1,633; 0/18 sensitivity points positive; separate 23-symbol run pending (§3.6) |
 | 9 | FX-1 (3 rules) and FX-2 (1 rule), 8 pairs, 2010–2025 | **reject** | DEV_FAIL on every gate, 32 strategy×pair tests; no carry model, no rate data |
 | 10 | `crypto_tsmom_126_ma50`, `crypto_zfade_20` CRYPTO-1 | **reject** | OOS −0.14R and −0.10R, 0% of pairs positive |
 | 11 | CRYPTO-H1 (3 hourly rules) | **reject (near miss on one)** | Hourly data ingested today; `donchian168_trail72` +0.39R / 425 trades but CI low +0.010R < +0.02R; the other two negative |
@@ -170,26 +170,32 @@ filter (the one pre-registered change) moved it from −0.08R to +0.03R and
 halved the drawdown, but there is no positive edge after costs. Family sealed
 looks k=5; the pre-registration forbids further iteration.
 
-### 3.6 `intraday_orb.intraday` v0.2.0 — not evaluated to completion (no verdict)
+### 3.6 `intraday_orb.intraday` v0.2.0 — reject on the completed nine-stock test
 
-Three attempts on the 23-symbol 15-minute snapshot `research_23_intraday15m_2016_2025`
-(`--since 2016-10-17 --until 2025-09-07`, scratch copy `sfdata2`):
+The nine-mega-cap run completed on scratch copy `sfdata6`, evaluation **57**, snapshot
+**31**, source `massive`, git SHA `e86b16e`, window 2016-10-17..2025-09-07:
 
-1. Run C (13:03 PST): gate 0 (data availability) **passed for the first time on real intraday
-   bars**, then gate 1 raised `TypeError: can't compare datetime.datetime to datetime.date`
-   in the walk-forward fold filter. Fixed in commit `02e2640` (`_fold_trades`, regression
-   test); gate logic unchanged.
-2. Run C2 (13:34): killed after 2h09m when this Claude session restarted (the process was
-   attached to it). No row written.
-3. Run C4 (18:26, detached with nohup): terminated by SIGTERM at 21:16 PST after 3h45m while
-   still inside gate 5's grid (3 × 3 × 2 = 18 full 15-minute-bar backtests, ~20–28 min each).
-   At the same minute a Codex CLI session (ChatGPT app) started the identical command through
-   `devkit run`, which caps commands at 600 s, so that re-run cannot finish either.
+- Gate 0 passes: 462,762 actual 15-minute bars, 9 symbols × 1,985 pre-sealed sessions,
+  every required regular-session bar present.
+- OOS 1,633 trades, expectancy **−0.0320R**, bootstrap CI low **−0.0610R**.
+- Walk-forward: **0 of 4** folds positive with the minimum trade count.
+- Sensitivity: **0 of 18** grid points positive; no positive one-step neighbours.
+- Development portfolio metric: Sharpe −2.28, max drawdown 72.9%, turnover 562.6/year.
+- Diagnostic final window (2024-09-07..2025-09-07): **−0.0605R / 464 trades**.
+  This is development data, not a new genuine sealed look.
+- Fails gates 1, 3, 4, 5, 7 and 9. No paper approval.
 
-Consequence: there is **no gate 1–10 verdict for intraday ORB**. The honest expectation from
-the literature stands (Zarattini–Aziz 2023 reproduced gross, ~zero net by an independent
-replication), but it is untested here. The run needs 4–6 uninterrupted hours on a scratch
-copy with no other agent killing or relaunching it; the exact command is in §2 (run C).
+Reproduction: `evaluate-promotion --symbols AAPL,AMZN,GOOGL,HD,JPM,MSFT,NVDA,UNH,XOM
+--snapshot-key research_megacap9_2016_2025 --since 2016-10-17 --until 2025-09-07`
+(the complete default-strategy invocation on `sfdata6`; raw local log `run_megacap_sf6.log`).
+
+The earlier attempts on the 23-symbol universe encountered the fixed date-comparison bug,
+session termination and slow full-history opening-range scans. Those interrupted attempts
+have no result and are not counted as failures. The replacement 23-symbol run uses the
+same frozen gates with a 7,200-second command budget; its separate numerical result remains
+pending. Performance changes in `64223fb` preserve causal feature values and calendar
+counts, with parity tests. The completed nine-stock rejection above is sufficient to record
+a family verdict; it is not represented as the 23-symbol result.
 
 ### 3.7 `options_short_vertical.medium_swing` v0.1.3 — reject (not evaluable)
 
