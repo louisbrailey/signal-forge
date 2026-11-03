@@ -37,12 +37,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from signalforge.backtest.costs import CostModel
-from signalforge.backtest.engine import SimTrade, run_backtest
+from signalforge.backtest.engine import SimTrade
 from signalforge.data.series import PriceSeries
 from signalforge.db.models import CryptoPaperBook, CryptoPaperTrade, CurrencySealedTest
 from signalforge.killswitch import get_kill_switch
-from signalforge.research.fx.harness import CRYPTO_MARKET, FxGates, load_series
-from signalforge.research.fx.strategies import CRYPTO_STRATEGIES, FxStrategy
+from signalforge.research.fx.harness import FxGates, ResearchMarket, backtest, load_series
+from signalforge.research.fx.sealed import _lookup as _lookup_registered
+from signalforge.research.fx.strategies import FxStrategy
 
 PAPER_VERSION = "CRYPTO-PAPER-1"
 OBSERVATION_DAYS = 180
@@ -54,34 +55,45 @@ class PaperBookRefused(RuntimeError):
     """A book may not be created or cycled."""
 
 
+def _resolve(key: str) -> tuple[ResearchMarket, FxStrategy]:
+    """The pre-registered crypto version a strategy key belongs to (CRYPTO-1,
+    CRYPTO-2, ...) and its frozen rule — the SAME registry the sealed test
+    used, so a book can only ever replay the rule that was sealed. Keys are
+    unique across versions by construction (``_u10`` suffixes)."""
+    try:
+        market, strat, _gates = _lookup_registered("crypto", key)
+    except ValueError as exc:
+        raise PaperBookRefused(f"unknown crypto strategy {key!r}: {exc}") from None
+    return market, strat
+
+
 def _strategy(key: str) -> FxStrategy:
-    for s in CRYPTO_STRATEGIES:
-        if s.key == key:
-            return s
-    raise PaperBookRefused(f"unknown crypto strategy {key!r}")
+    return _resolve(key)[1]
 
 
 def _sealed_pass(session: Session, key: str) -> CurrencySealedTest:
+    market, _ = _resolve(key)
     row = session.scalar(
         select(CurrencySealedTest).where(
-            CurrencySealedTest.market == CRYPTO_MARKET.name,
-            CurrencySealedTest.version == CRYPTO_MARKET.version,
+            CurrencySealedTest.market == market.name,
+            CurrencySealedTest.version == market.version,
             CurrencySealedTest.strategy_key == key,
         )
     )
     if row is None or row.verdict != "SEALED_PASS":
         state = "no sealed test" if row is None else row.verdict
         raise PaperBookRefused(
-            f"{key} {CRYPTO_MARKET.version} has {state}; a paper book needs SEALED_PASS"
+            f"{key} {market.version} has {state}; a paper book needs SEALED_PASS"
         )
     return row
 
 
 def get_book(session: Session, key: str) -> CryptoPaperBook | None:
+    market, _ = _resolve(key)
     return session.scalar(
         select(CryptoPaperBook).where(
             CryptoPaperBook.strategy_key == key,
-            CryptoPaperBook.version == CRYPTO_MARKET.version,
+            CryptoPaperBook.version == market.version,
         )
     )
 
@@ -95,14 +107,14 @@ def start_book(
 ) -> CryptoPaperBook:
     """Create the book. ``start_date`` is today (UTC): only signals on bars
     completed from today onward can produce a trade."""
-    _strategy(key)
+    market, _ = _resolve(key)
     sealed = _sealed_pass(session, key)
     if get_book(session, key) is not None:
-        raise PaperBookRefused(f"a paper book for {key} {CRYPTO_MARKET.version} already exists")
+        raise PaperBookRefused(f"a paper book for {key} {market.version} already exists")
     today = (now or datetime.now(UTC)).astimezone(UTC).date()
     book = CryptoPaperBook(
         strategy_key=key,
-        version=CRYPTO_MARKET.version,
+        version=market.version,
         sealed_test_id=sealed.id,
         pairs=list(sealed.pairs),
         start_date=today,
@@ -128,16 +140,18 @@ class CycleReport:
 def _replay(
     session: Session, book: CryptoPaperBook, strat: FxStrategy, pair: str
 ) -> tuple[list[SimTrade], PriceSeries]:
-    series = load_series(session, pair, CRYPTO_MARKET)
+    market, _ = _resolve(book.strategy_key)
+    series = load_series(session, pair, market)
     if not len(series):
         return [], series
     gates = FxGates()
-    out = run_backtest(
+    # research.fx.harness.backtest is what the sealed test ran: the frozen
+    # engine, or its trailing-exit twin when the rule declares one.
+    out = backtest(
+        strat,
         series,
-        strat.signal,
         cost_model=CostModel(slippage_bps=gates.slippage_bps),
-        spread_bps=CRYPTO_MARKET.spread(pair),
-        warmup=strat.warmup,
+        spread_bps=market.spread(pair),
     )
     trades = [t for t in out.trades if t.entry_date > book.start_date]
     return trades, series

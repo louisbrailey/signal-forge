@@ -504,9 +504,18 @@ def job_crypto_ingest() -> None:
         raise RuntimeError("crypto ingest skipped: EOD update still running")
     try:
         with session_scope(write=True) as session:
+            from sqlalchemy import select
+
+            from signalforge.db.models import CryptoPaperBook
+
+            # Every pair a paper book replays must stay current, not only the
+            # configured research pairs (a CRYPTO-2 book trades ten pairs).
+            pairs = {p.strip().upper() for p in settings.crypto_pairs.split(",") if p.strip()}
+            for book in session.scalars(select(CryptoPaperBook)):
+                pairs.update(p.upper() for p in book.pairs)
             rep = ingest_crypto(
                 session,
-                settings.crypto_pairs.split(","),
+                sorted(pairs),
                 lookback_days=settings.crypto_lookback_days,
             )
         _log.info("crypto.ingest", end=rep.end, written=rep.written, failed=rep.failed)

@@ -274,3 +274,37 @@ def test_crypto_chart_does_not_append_pre_start_bar(session: Session) -> None:
     assert chart["as_of"] == book.last_bar_date.isoformat()
     assert chart["series"][0]["data"] == [{"time": NOW.date().isoformat(), "value": 0.0}]
     assert chart["series"][1]["data"] == []
+
+
+def test_a_crypto2_key_books_under_its_own_version_and_replays_the_sealed_rule(
+    session: Session,
+) -> None:
+    """A book for a CRYPTO-2 key (``_u10``) is keyed to version CRYPTO-2 and its
+    SEALED_PASS row, never to CRYPTO-1's; the CRYPTO-1 key is unaffected."""
+    from signalforge.research.fx.harness import CRYPTO2_MARKET
+
+    key2 = "crypto_donchian_55_u10"
+    with pytest.raises(cl.PaperBookRefused):  # no sealed pass for CRYPTO-2 yet
+        cl.start_book(session, key2, now=NOW)
+    _sealed(session)  # CRYPTO-1 pass does NOT unlock the CRYPTO-2 key
+    with pytest.raises(cl.PaperBookRefused):
+        cl.start_book(session, key2, now=NOW)
+    row = CurrencySealedTest(
+        market="Crypto",
+        version=CRYPTO2_MARKET.version,
+        strategy_key=key2,
+        sealed_from=date(2025, 11, 3),
+        sealed_to=date(2026, 11, 2),
+        pairs=["BTCUSD", "XRPUSD"],
+        result={"metrics": {"expectancy_r": 0.69}},
+        verdict="SEALED_PASS",
+    )
+    session.add(row)
+    session.commit()
+    book = cl.start_book(session, key2, now=NOW)
+    assert book.version == "CRYPTO-2" and book.sealed_test_id == row.id
+    assert book.pairs == ["BTCUSD", "XRPUSD"]
+    assert cl.get_book(session, key2) is book
+    assert cl.get_book(session, STRATEGY) is None  # CRYPTO-1 book not created by this
+    with pytest.raises(cl.PaperBookRefused):
+        cl.start_book(session, "crypto_mom_21_long_u10", now=NOW)  # CRYPTO-3: no pass
