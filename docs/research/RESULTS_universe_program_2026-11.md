@@ -17,7 +17,7 @@ evidence after the shipped cost models.
 | C `fx_mom_21` (FX-3) | 7 majors + gold | DEV_FAIL, as the pre-registration expected | −0.086R / 784, CI low −0.175R, 0/4 folds; only GBP, JPY and gold positive |
 | D′ `crypto_mom_21_long_u10` (CRYPTO-3, refinement §7.2) | 10 crypto pairs | **DEV_PASS** (one refinement look disclosed) | +0.279R / 433, CI low +0.040R, 2× costs +0.233R, 8/10 pairs positive, 4/4 folds positive |
 | A `tsmom_etf.medium_swing` | 10 ETFs 2016+ / 9 ETFs 2006+ | fails gate 4 (CI) and gate 7 (Sharpe vs SPY); positive expectancy, 100% grid positive | +0.130R / 93 and +0.077R / 224; diagnostic sealed +0.109R / 45 and +0.051R / 40 |
-| A2 `tsmom_etf.position` (quarterly hold, §7.1) | same | running | |
+| A2 `tsmom_etf.position` (quarterly hold, §7.1) | same | **fails** gates 4, 7 and the diagnostic sealed window; refinement did not help — family A closed | +0.142R / 61 and +0.213R / 145 (higher per trade, fewer trades); diag. sealed −0.084R / 31 and −0.126R / 29 |
 | B `turn_of_month.short_swing` | 6 index ETFs 2016+ / 5 ETFs 2003+ | **reject**: −0.037R on 2016+ (0% grid positive); +0.040R on 2003+ but CI low −0.012R and Sharpe 0.25 vs 0.43 | effect is small and fading; diagnostic sealed +0.052R / 72 and +0.074R / 60 |
 | E existing six strategies | sector SPDRs (10); mega-caps (9) | running | |
 
@@ -42,6 +42,21 @@ Reading: the sign is right everywhere (every grid point positive on both windows
 diagnostic sealed windows positive), but the per-trade edge is small and the fixed-risk,
 one-month-hold implementation produces too few trades for the CI gate and too little return
 per unit risk to beat SPY's Sharpe. This is the motivation for refinement A2 (quarterly hold).
+
+### A2. `tsmom_etf.position` v0.1.0 (refinement §7.1: same signal, 63-session hold)
+
+| Universe / window | OOS trades | Expectancy | CI low | Grid | Sharpe vs SPY | Diag. sealed | Verdict |
+|---|---|---|---|---|---|---|---|
+| 10 ETFs, 2016+ | 61 | +0.142R | −0.309R ✗ | 6/9 positive ✓ | 0.57 vs 0.68 ✗ (20 trades/yr) | **−0.084R / 31** ✗ | fails 4, 7, 9 |
+| 9 ETFs, 2006+ | 145 | +0.213R | −0.085R ✗ | 8/9 positive ✓ | 0.38 vs 0.41 ✗ | **−0.126R / 29** ✗ | fails 4, 7, 9 |
+
+Reading: the quarterly hold raised expectancy per trade as hypothesised, but it cut the trade
+count by a third (CI wider), left the Sharpe below buy-and-hold SPY, and the 2024-09..2025-09
+diagnostic window is negative on both universes. The refinement is reported as a failure.
+**Family A is closed**: the published diversified-trend result depends on volatility-scaled,
+continuously-held exposure across many futures markets, which this fixed-risk, stop-based,
+one-position-per-symbol engine cannot express; a third parameterisation would be curve
+fitting. No further A variants will be run.
 
 ### B. `turn_of_month.short_swing` v0.1.0
 
