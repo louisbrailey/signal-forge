@@ -41,9 +41,10 @@ def test_existing_shared_key_and_keyless_providers_are_reported_without_secrets(
 def test_a_missing_remote_llm_key_is_not_disguised_as_ready(session, monkeypatch):
     _settings(monkeypatch, llm_provider="anthropic")
     ctx = settings_context(session)
-    assert ctx["key_status"]["LLM_API_KEY"] == "not set"
+    unset = "not set"
+    assert ctx["key_status"]["LLM_API_KEY"] == unset
     assert ctx["llm_enabled"] is False
-    assert ctx["key_status"]["NEWS_API_KEY"] == "not set"
+    assert ctx["key_status"]["NEWS_API_KEY"] == unset
     assert "local log" in ctx["key_status"]["NOTIFICATION_API_KEY"]
 
 

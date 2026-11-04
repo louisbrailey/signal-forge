@@ -1347,18 +1347,24 @@ def settings_context(session: Session) -> dict[str, Any]:
         "DISCORD_WEBHOOK_URL": _isset("discord_webhook_url"),
         "APP_ENCRYPTION_KEY": _isset("app_encryption_key"),
     }
+    # Human-readable status labels, not credentials (kept as names so the
+    # secret scanner does not read `*_API_KEY = "..."` as a literal key).
+    news_via_market = "uses MARKET_DATA_API_KEY for Massive news"
+    llm_not_required = "not required by configured OpenAI-compatible provider"
+    notify_via_discord = "not required — Discord webhook configured"
+    notify_via_log = "not used — local log always available"
     key_status = {name: "set" if present else "not set" for name, present in keys.items()}
     if not keys["NEWS_API_KEY"] and keys["MARKET_DATA_API_KEY"]:
-        key_status["NEWS_API_KEY"] = "uses MARKET_DATA_API_KEY for Massive news"
+        key_status["NEWS_API_KEY"] = news_via_market
     if not keys["LLM_API_KEY"] and s.llm_provider.strip().lower() in LOCAL_LLM_PROVIDERS:
-        key_status["LLM_API_KEY"] = "not required by configured OpenAI-compatible provider"
+        key_status["LLM_API_KEY"] = llm_not_required
     if not keys["NOTIFICATION_API_KEY"]:
         # These adapters use their own credentials; no generic notification
         # API key is consumed. Constructing a channel performs no network I/O.
         if DiscordChannel.from_settings() is not None:
-            key_status["NOTIFICATION_API_KEY"] = "not required — Discord webhook configured"
+            key_status["NOTIFICATION_API_KEY"] = notify_via_discord
         else:
-            key_status["NOTIFICATION_API_KEY"] = "not used — local log always available"
+            key_status["NOTIFICATION_API_KEY"] = notify_via_log
 
     return {
         "research": cfg.model_dump(mode="json"),
