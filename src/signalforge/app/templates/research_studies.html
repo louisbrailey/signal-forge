@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Study collection — Signal Forge{% endblock %}
+{% block content %}
+<div id="studies-panel" hx-get="/research-studies" hx-trigger="every 60s" hx-select="#studies-panel" hx-swap="outerHTML">
+  <h1 class="text-2xl font-semibold">Study collection</h1>
+  <p class="mt-2 text-sm text-slate-600">Automatic paper research, separate from the operating paper account. Refreshes every 60 seconds. Collection health is not strategy performance or approval.</p>
+  <div class="mt-5 grid gap-5 lg:grid-cols-2">
+    <section class="border bg-white p-5">
+      <h2 class="text-lg font-semibold">Kronos comparison books</h2>
+      <p class="mt-2 font-semibold {{ 'text-emerald-700' if kronos.health == 'Healthy' else 'text-amber-700' }}">{{ kronos.health }}</p>
+      <p class="text-sm">Collector checked: {{ kronos.checked_at or 'No check recorded' }} (UTC)</p>
+      {% for book in kronos.books %}
+      <div class="mt-4 border-t pt-3">
+        <h3 class="font-medium break-words">{{ book.name }}</h3>
+        <p>{{ book.status }}</p>
+        <p class="text-sm">Last successful collection: {{ book.last_success or 'None recorded' }}</p>
+        <p class="text-sm">Collected session: {{ book.session or 'None recorded' }}</p>
+      </div>
+      {% endfor %}
+      <p class="mt-4 text-xs text-slate-500">Collector checks every minute; only eligible completed approved scans collect. Runtime, configuration and frozen-plan gates still apply.</p>
+    </section>
+    <section class="border bg-white p-5">
+      <h2 class="text-lg font-semibold">Funded forward books</h2>
+      <p class="mt-2 font-semibold {{ 'text-emerald-700' if forward.health == 'Current' else 'text-amber-700' }}">{{ forward.health }}</p>
+      <p>{{ forward.state or 'No valid collector status' }}</p>
+      <dl class="mt-3 space-y-2 text-sm">
+        <dt>Collector status file updated (UTC)</dt><dd>{{ forward.checked_at or 'Unknown' }}</dd>
+        <dt>First observation / first eligible fill</dt><dd>{{ forward.first_observation or 'Unknown' }} / {{ forward.first_entry or 'Unknown' }}</dd>
+        <dt>Books / recorded sessions</dt><dd>{{ forward.books or 'Unknown' }} / {{ forward.observed_sessions | default('Unknown') }}</dd>
+        <dt>Latest recorded session</dt><dd>{{ forward.last_session or 'None yet' }}</dd>
+        <dt>Last collection file timestamp (UTC)</dt><dd>{{ forward.last_success or 'None yet' }}</dd>
+      </dl>
+      <p class="mt-4 text-xs text-slate-500">Checks every 30 minutes; completed sessions after 17:30 New York time. Timestamps above are filesystem observations, not independent validation of book contents. Collector checks its pinned source and immutable records. No heartbeat after 90 minutes is shown as stale.</p>
+    </section>
+  </div>
+  <p class="mt-5 rounded border border-amber-300 bg-amber-50 p-4 text-sm">Protocols remain frozen while observations accumulate. Interim outcomes are not opened by this page and never feed entries, sizing or promotion. A changed strategy requires a new study. The Mac must remain awake and collectors running. Research signal only — no order was placed.</p>
+</div>
+{% endblock %}

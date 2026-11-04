@@ -221,6 +221,13 @@ def ops_status_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
     return _page(request, user, "ops_status.html", ops_status_context(db))
 
 
+@router.get("/research-studies", response_class=HTMLResponse)
+def research_studies_page(request: Request, user: UserDep) -> HTMLResponse:
+    from signalforge.observability.studies import studies_context
+
+    return _page(request, user, "research_studies.html", studies_context())
+
+
 @router.get("/universe", response_class=HTMLResponse)
 def universe_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
     """Liquid-universe coverage — read-only; research only."""

@@ -6,6 +6,7 @@
 {{ page_intro('Research on Kronos, an open-source AI model that forecasts price paths. It runs in shadow: forecasts are recorded and scored later, but never used to trade.') }}
 <section id="collection-panel" class="my-4 border rounded p-4 overflow-x-auto" hx-get="/kronos" hx-trigger="every 60s" hx-select="#collection-panel" hx-swap="outerHTML" aria-labelledby="collection-title">
 <h2 id="collection-title" class="text-xl font-semibold">Comparison books · automatic collection</h2>
+<p class="text-sm"><a class="underline" href="/research-studies">View Kronos and funded forward collection together →</a></p>
 <p role="status"><strong>{{ collection.health }}</strong> · Last collector check: {{ collection.checked_at or 'Unavailable' }} UTC</p>
 <p class="text-sm">Checks every minute while this Mac is awake. Collects once after a successful approved daily scan. Waiting outside the eligible window is normal.</p>
 <table class="w-full text-left text-sm"><thead><tr><th>Book</th><th>Collection status</th><th>Last successful collection (UTC)</th><th>Market session</th></tr></thead><tbody>
