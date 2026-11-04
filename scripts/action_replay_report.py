@@ -22,6 +22,28 @@ def read_metadata(database, listing_evidence=None):
             s: {"sector": sector, "instrument_type": kind}
             for s, sector, kind in c.execute("SELECT symbol,sector,instrument_type FROM instrument")
         }
+        # Ingest may have created these rows with its default "stock" type
+        # before reference discovery. Use sourced classifications for this
+        # descriptive replay only; never rewrite an operating/frozen database.
+        if c.execute("SELECT 1 FROM sqlite_master WHERE name='universe_ticker'").fetchone():
+            for symbol, security_type, refreshed_at in c.execute(
+                "SELECT ticker,security_type,refreshed_at FROM universe_ticker"
+            ):
+                kind = {"ETF": "etf", "CS": "stock"}.get(security_type)
+                if symbol not in metadata or kind is None or not refreshed_at:
+                    continue
+                previous = metadata[symbol]["instrument_type"]
+                metadata[symbol]["instrument_type"] = kind
+                metadata[symbol]["classification_reference"] = json.dumps(
+                    {
+                        "source_table": "universe_ticker",
+                        "security_type": security_type,
+                        "refreshed_at": refreshed_at,
+                        "previous_type": previous,
+                        "point_in_time": False,
+                    },
+                    sort_keys=True,
+                )
         mappings = []
         for old, new, day, source, evidence in c.execute(
             """SELECT old_symbol,new_symbol,effective_date,

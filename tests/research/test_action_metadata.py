@@ -35,3 +35,38 @@ def test_verified_etf_metadata_does_not_rewrite_operating_defaults(tmp_path):
     meta, _ = module.read_metadata(db, evidence)
     assert meta["SPY"]["instrument_type"] == "etf"
     assert db.read_bytes() == before
+
+
+def test_stored_reference_corrects_replay_types_without_database_writes(tmp_path):
+    db = tmp_path / "data.sqlite"
+    with sqlite3.connect(db) as c:
+        c.execute("CREATE TABLE instrument(symbol,sector,instrument_type)")
+        c.executemany(
+            "INSERT INTO instrument VALUES (?,?,?)",
+            [
+                ("SPY", "broad", "stock"),
+                ("AAPL", "technology", "etf"),
+                ("UNKNOWN", "unknown", "stock"),
+            ],
+        )
+        c.execute("CREATE TABLE universe_ticker(ticker,security_type,refreshed_at)")
+        c.executemany(
+            "INSERT INTO universe_ticker VALUES (?,?,?)",
+            [
+                ("SPY", "ETF", "2026-11-03 00:00:00"),
+                ("AAPL", "CS", "2026-11-03 00:00:00"),
+                ("UNKNOWN", "ETV", "2026-11-03 00:00:00"),
+            ],
+        )
+        c.execute("""CREATE TABLE symbol_continuity_mapping(old_symbol,new_symbol,effective_date,
+            source,validation_evidence_json,validation_status,ratio,version)""")
+    before = db.read_bytes()
+    meta, _ = module.read_metadata(db)
+    assert meta["SPY"]["instrument_type"] == "etf"
+    assert meta["AAPL"]["instrument_type"] == "stock"
+    assert meta["UNKNOWN"]["instrument_type"] == "stock"
+    evidence = json.loads(meta["SPY"]["classification_reference"])
+    assert evidence["source_table"] == "universe_ticker"
+    assert evidence["point_in_time"] is False
+    assert evidence["previous_type"] == "stock"
+    assert db.read_bytes() == before
