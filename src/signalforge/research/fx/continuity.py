@@ -12,6 +12,7 @@ engine still treats the surviving bars as adjacent, which is disclosed in every 
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from itertools import pairwise
 
 
 def missing_intervals(
@@ -78,10 +79,10 @@ def gap_profile(
     expected = int((hi - lo) / step) + 1
     longest = 0
     if inside:
-        longest = max(longest, int(round((inside[0] - lo) / step)))
-        longest = max(longest, int(round((hi - inside[-1]) / step)))
-        for a, b in zip(inside[:-1], inside[1:], strict=True):
-            longest = max(longest, int(round((b - a) / step)) - 1)
+        longest = max(longest, round((inside[0] - lo) / step))
+        longest = max(longest, round((hi - inside[-1]) / step))
+        for a, b in pairwise(inside):
+            longest = max(longest, round((b - a) / step) - 1)
     else:
         longest = expected
     return GapProfile(missing, expected, longest)

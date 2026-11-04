@@ -365,6 +365,31 @@ def _sensitivity_plan(
             strategy, {"hold_bars": [2, 3, 4], "stop_atr": [2.0, 3.0, 4.0]}
         )
 
+    # Round 2, pre-registered 2026-11-03 (PREREGISTRATION_round2_2026-11-03.md R2-E1 / R2-E2).
+    if key.startswith("high52_breakout"):
+        from signalforge.research.strategies.high52_breakout import High52Breakout
+
+        base = strategy.params  # type: ignore[attr-defined]
+
+        def factory(p: Mapping[str, Any]) -> BaselineStrategy:
+            return High52Breakout(_replace(base, **p))
+
+        return factory, _merge_declared_axes(
+            strategy, {"lookback": [189, 252, 315], "stop_atr": [1.5, 2.0, 2.5]}
+        )
+
+    if key.startswith("trend_pullback"):
+        from signalforge.research.strategies.trend_pullback import TrendPullback
+
+        base = strategy.params  # type: ignore[attr-defined]
+
+        def factory(p: Mapping[str, Any]) -> BaselineStrategy:
+            return TrendPullback(_replace(base, **p))
+
+        return factory, _merge_declared_axes(
+            strategy, {"sma_fast": [5, 10, 15], "stop_atr": [1.5, 2.0, 2.5]}
+        )
+
     return None
 
 

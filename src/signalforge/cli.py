@@ -699,7 +699,7 @@ def crypto_research_hourly(
         typer.Option(help="Report path (default: <data dir>/research/crypto/)."),
     ] = None,
     version: Annotated[
-        str, typer.Option(help="Pre-registered hourly universe label: CRYPTO-H1 or CRYPTO-H2.")
+        str, typer.Option(help="Pre-registered hourly set: CRYPTO-H1, CRYPTO-H2 or CRYPTO-H4.")
     ] = "CRYPTO-H1",
 ) -> None:
     """Evaluate the pre-registered hourly rules on the development window.

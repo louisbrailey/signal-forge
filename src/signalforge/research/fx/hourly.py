@@ -35,7 +35,12 @@ CRYPTO_H1_VERSION = "CRYPTO-H1"
 # the SAME three hourly rules on a 6-pair universe. A different universe is a
 # different version, so its report and any future sealed look carry their own label.
 CRYPTO_H2_VERSION = "CRYPTO-H2"
-HOURLY_VERSIONS = (CRYPTO_H1_VERSION, CRYPTO_H2_VERSION)
+# Round 2 hourly variants pre-registered 2026-11-03 in
+# PREREGISTRATION_round2_hourly_H4_2026-11-03.md: the baseline hourly Donchian plus two
+# declared variants (120h trail; ATR(24)>=ATR(168) entry filter) on zero-gap pairs.
+# "CRYPTO-H3" is reserved by PREREGISTRATION_round2_2026-11-03.md for a different family.
+CRYPTO_H4_VERSION = "CRYPTO-H4"
+HOURLY_VERSIONS = (CRYPTO_H1_VERSION, CRYPTO_H2_VERSION, CRYPTO_H4_VERSION)
 SOURCE = "massive_crypto"
 BAR_SIZE = "1h"
 
@@ -170,16 +175,80 @@ CRYPTO_H1_STRATEGIES: tuple[FxStrategy, ...] = (
 )
 
 
+# --- CRYPTO-H4 variants (pre-registered 2026-11-03) ------------------------- #
+_DON_TRAIL_LONG = 120  # 5-day exit channel instead of 72h
+_VOLX_FAST, _VOLX_SLOW = 24, 168  # enter only when ATR(24) >= ATR(168)
+
+
+def _h_donchian_trail120(series: PriceSeries, t: int) -> EntrySignal | None:
+    return _h_donchian(series, t)  # same entry/stop; the harness applies trail_channel=120
+
+
+def _h_donchian_volx(series: PriceSeries, t: int) -> EntrySignal | None:
+    sig = _h_donchian(series, t)
+    if sig is None:
+        return None
+    fast, slow = atr(series, _VOLX_FAST), atr(series, _VOLX_SLOW)
+    if not (np.isfinite(fast) and np.isfinite(slow)) or slow <= 0 or fast < slow:
+        return None
+    return EntrySignal(
+        sig.direction, sig.stop_price, sig.time_stop_bars, reason=sig.reason + "; ATR24>=ATR168"
+    )
+
+
+CRYPTO_H4_STRATEGIES: tuple[FxStrategy, ...] = (
+    CRYPTO_H1_STRATEGIES[0],  # unchanged baseline, look #4 for this rule (disclosed)
+    FxStrategy(
+        "crypto_h_donchian168_trail120",
+        "Close beyond the prior 168h high/low; 2xATR(24) stop; exit on a close back through the "
+        "prior 120h channel; 720h safety stop.",
+        {
+            "channel": _DON_N,
+            "atr_n": _DON_ATR,
+            "stop_atr": _DON_STOP,
+            "trail": _DON_TRAIL_LONG,
+            "safety_time": _DON_SAFETY,
+        },
+        warmup=_DON_N + 2,
+        signal=_h_donchian_trail120,
+        trail_channel=_DON_TRAIL_LONG,
+    ),
+    FxStrategy(
+        "crypto_h_donchian168_trail72_volx",
+        "Baseline 168h Donchian entry only when ATR(24) >= ATR(168); 2xATR(24) stop; exit on a "
+        "close back through the prior 72h channel; 720h safety stop.",
+        {
+            "channel": _DON_N,
+            "atr_n": _DON_ATR,
+            "stop_atr": _DON_STOP,
+            "trail": _DON_TRAIL,
+            "safety_time": _DON_SAFETY,
+            "vol_fast": _VOLX_FAST,
+            "vol_slow": _VOLX_SLOW,
+        },
+        warmup=_VOLX_SLOW + 2,
+        signal=_h_donchian_volx,
+        trail_channel=_DON_TRAIL,
+    ),
+)
+HOURLY_STRATEGIES: dict[str, tuple[FxStrategy, ...]] = {
+    CRYPTO_H1_VERSION: CRYPTO_H1_STRATEGIES,
+    CRYPTO_H2_VERSION: CRYPTO_H1_STRATEGIES,
+    CRYPTO_H4_VERSION: CRYPTO_H4_STRATEGIES,
+}
+
+
 def run_crypto_hourly_research(
     session: Session,
     pairs: Sequence[str],
     *,
     gates: FxGates | None = None,
-    strategies: Sequence[FxStrategy] = CRYPTO_H1_STRATEGIES,
+    strategies: Sequence[FxStrategy] | None = None,
     version: str = CRYPTO_H1_VERSION,
 ) -> dict[str, Any]:
     if version not in HOURLY_VERSIONS:
         raise ValueError(f"unknown hourly version {version!r}; expected one of {HOURLY_VERSIONS}")
+    strategies = strategies if strategies is not None else HOURLY_STRATEGIES[version]
     gates = gates or FxGates()
     series_by_pair = {p: load_hourly_series(session, p) for p in pairs}
     series_by_pair = {p: s for p, s in series_by_pair.items() if len(s)}
