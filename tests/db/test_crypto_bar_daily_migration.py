@@ -32,6 +32,8 @@ def test_upgrade_creates_the_table_and_downgrade_removes_only_it(db_url: str) ->
     after = set(inspect(create_engine(db_url)).get_table_names())
     assert "crypto_bar_daily" in before - after
     assert before - after <= {
+        "crypto_hourly_paper_book",
+        "crypto_hourly_paper_trade",
         "crypto_bar_daily",
         "currency_sealed_test",
         "crypto_paper_book",

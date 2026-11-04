@@ -29,6 +29,13 @@ FIDELITY_HISTORY_CSV = (
     "01/09/2024,YOU SOLD,AAPL,-5,160.00,800.00\n"
 )
 
+COINBASE_HISTORY_CSV = (
+    "Transactions report\n"
+    "Timestamp,Transaction Type,Asset,Quantity Transacted,Spot Price at Transaction,"
+    "Total (inclusive of fees and/or spread)\n"
+    "2026-10-27T15:30:00Z,Buy,BTC,0.01,100000,1001\n"
+)
+
 
 def test_sniff_detects_kinds() -> None:
     assert sniff(POSITIONS_CSV).kind == "positions"
@@ -62,6 +69,28 @@ def test_import_transactions(session: Session) -> None:
     txns = list(session.scalars(select(ImportedTransaction)))
     assert txns[0].action.upper().startswith("YOU BOUGHT")
     assert txns[0].symbol == "AAPL"
+
+
+def test_coinbase_transaction_report_is_offline_and_preserves_time(session: Session) -> None:
+    assert sniff(COINBASE_HISTORY_CSV).detected_format == "coinbase_history"
+    summary = import_csv(session, "coinbase.csv", COINBASE_HISTORY_CSV)
+    assert summary.transactions_imported == 1
+    txn = session.scalar(select(ImportedTransaction))
+    assert txn is not None
+    assert txn.symbol == "BTC"
+    assert txn.quantity == Decimal("0.01")
+    assert txn.trade_date is not None and txn.trade_date.hour == 15
+    assert session.scalar(select(func.count()).select_from(Candidate)) == 0
+
+
+def test_manual_webull_and_coinbase_holdings_use_generic_format(session: Session) -> None:
+    summary = import_csv(
+        session,
+        "holdings.csv",
+        "Symbol,Quantity,Cost Basis,Account\nAAPL,2,300,Webull\nBTC,0.01,800,Coinbase\n",
+    )
+    assert summary.positions_imported == 2
+    assert {row.symbol for row in session.scalars(select(ImportedPosition))} == {"AAPL", "BTC"}
 
 
 def test_analytics_reports_exposure_and_never_scans(session: Session) -> None:

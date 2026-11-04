@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -38,11 +38,20 @@ from signalforge.backtest.montecarlo import bootstrap_ci
 from signalforge.backtest.walkforward import run_walkforward
 from signalforge.data.series import PriceSeries
 from signalforge.db.models import CryptoBarDaily, FxBarDaily
+from signalforge.research.fx.continuity import continuity_breach
 from signalforge.research.fx.strategies import (
+    CRYPTO2_STRATEGIES,
+    CRYPTO2_STRATEGY_VERSION,
+    CRYPTO3_STRATEGIES,
+    CRYPTO3_STRATEGY_VERSION,
+    CRYPTO4_STRATEGIES,
+    CRYPTO4_STRATEGY_VERSION,
     CRYPTO_STRATEGIES,
     CRYPTO_STRATEGY_VERSION,
     FX2_STRATEGIES,
     FX2_STRATEGY_VERSION,
+    FX3_STRATEGIES,
+    FX3_STRATEGY_VERSION,
     FX_STRATEGIES,
     FX_STRATEGY_VERSION,
     FxStrategy,
@@ -121,6 +130,56 @@ CRYPTO_MARKET = ResearchMarket(
     ingest_hint="run crypto-ingest",
     caveat="Perpetual funding and exchange counterparty risk not modelled; spot-style costs only.",
 )
+# Pre-registered 2026-11-02 (PREREGISTRATION_universe_program_2026-11-02.md §2C/§2D).
+FX3_MARKET = ResearchMarket(
+    name="FX",
+    version=FX3_STRATEGY_VERSION,
+    model=FxBarDaily,
+    source=FX_SOURCE,
+    spreads=FX_SPREAD_BPS,
+    default_spread_bps=DEFAULT_SPREAD_BPS,
+    ingest_hint="run forex-ingest",
+    caveat="Swap approximated by a 1 bp/day holding-cost stress gate, not modelled exactly.",
+)
+CRYPTO4_MARKET = ResearchMarket(
+    name="Crypto",
+    version=CRYPTO4_STRATEGY_VERSION,
+    model=CryptoBarDaily,
+    source=CRYPTO_SOURCE,
+    spreads=CRYPTO_SPREAD_BPS,
+    default_spread_bps=CRYPTO_DEFAULT_SPREAD_BPS,
+    ingest_hint="run crypto-ingest",
+    caveat=(
+        "Perpetual funding and exchange counterparty risk not modelled; spot-style costs only; "
+        "pairs without a listed spread use the 50 bps/side default."
+    ),
+)
+CRYPTO3_MARKET = ResearchMarket(
+    name="Crypto",
+    version=CRYPTO3_STRATEGY_VERSION,
+    model=CryptoBarDaily,
+    source=CRYPTO_SOURCE,
+    spreads=CRYPTO_SPREAD_BPS,
+    default_spread_bps=CRYPTO_DEFAULT_SPREAD_BPS,
+    ingest_hint="run crypto-ingest",
+    caveat=(
+        "Perpetual funding and exchange counterparty risk not modelled; spot-style costs only; "
+        "pairs without a listed spread use the 50 bps/side default."
+    ),
+)
+CRYPTO2_MARKET = ResearchMarket(
+    name="Crypto",
+    version=CRYPTO2_STRATEGY_VERSION,
+    model=CryptoBarDaily,
+    source=CRYPTO_SOURCE,
+    spreads=CRYPTO_SPREAD_BPS,
+    default_spread_bps=CRYPTO_DEFAULT_SPREAD_BPS,
+    ingest_hint="run crypto-ingest",
+    caveat=(
+        "Perpetual funding and exchange counterparty risk not modelled; spot-style costs only; "
+        "pairs without a listed spread use the 50 bps/side default."
+    ),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +205,8 @@ class FxGates:
 
 # FX-2's pre-registered gates: every FX-1 gate, plus 1 bp/day holding cost.
 FX2_GATES = FxGates(holding_cost_bps_per_day=1.0)
+# FX-3 is pre-registered with the FX-2 gates unchanged.
+FX3_GATES = FX2_GATES
 
 
 def holding_cost_r(trade: SimTrade, bps_per_day: float, fallback_risk_frac: float) -> float:
@@ -289,6 +350,13 @@ def evaluate_strategy(
         res.holding_stress_expectancy_r = sum(charged) / len(charged)
 
     reasons = []
+    if mk.name.startswith("Crypto"):
+        for pair, full in sorted(series_by_pair.items()):
+            dev = _cut(full, seal_from)
+            step = timedelta(hours=1) if isinstance(seal_from, datetime) else timedelta(days=1)
+            breach = continuity_breach(dev.dates, step)
+            if breach:
+                reasons.append(f"data continuity: {pair} development window {breach}")
     if pooled.n_trades < gates.min_oos_trades:
         reasons.append(f"OOS trades {pooled.n_trades} < {gates.min_oos_trades}")
     if pooled.expectancy_r < gates.min_oos_expectancy_r:
@@ -359,6 +427,48 @@ def run_crypto_research(
     return run_research(session, pairs, market=CRYPTO_MARKET, gates=gates, strategies=strategies)
 
 
+def run_fx3_research(
+    session: Session,
+    pairs: Sequence[str],
+    *,
+    gates: FxGates | None = None,
+    strategies: Sequence[FxStrategy] = FX3_STRATEGIES,
+) -> dict[str, Any]:
+    return run_research(
+        session, pairs, market=FX3_MARKET, gates=gates or FX3_GATES, strategies=strategies
+    )
+
+
+def run_crypto4_research(
+    session: Session,
+    pairs: Sequence[str],
+    *,
+    gates: FxGates | None = None,
+    strategies: Sequence[FxStrategy] = CRYPTO4_STRATEGIES,
+) -> dict[str, Any]:
+    return run_research(session, pairs, market=CRYPTO4_MARKET, gates=gates, strategies=strategies)
+
+
+def run_crypto3_research(
+    session: Session,
+    pairs: Sequence[str],
+    *,
+    gates: FxGates | None = None,
+    strategies: Sequence[FxStrategy] = CRYPTO3_STRATEGIES,
+) -> dict[str, Any]:
+    return run_research(session, pairs, market=CRYPTO3_MARKET, gates=gates, strategies=strategies)
+
+
+def run_crypto2_research(
+    session: Session,
+    pairs: Sequence[str],
+    *,
+    gates: FxGates | None = None,
+    strategies: Sequence[FxStrategy] = CRYPTO2_STRATEGIES,
+) -> dict[str, Any]:
+    return run_research(session, pairs, market=CRYPTO2_MARKET, gates=gates, strategies=strategies)
+
+
 def run_research(
     session: Session,
     pairs: Sequence[str],
@@ -377,6 +487,11 @@ def run_research(
         evaluate_strategy(s, series_by_pair, seal_from=seal_from, gates=gates, market=market)
         for s in strategies
     ]
+    absent = sorted(set(pairs) - set(series_by_pair))
+    if absent:
+        for result in results:
+            result.reasons.append(f"data availability: no history for requested pairs {absent}")
+            result.verdict = "DEV_FAIL"
     return {
         "market": market.name,
         "version": market.version,

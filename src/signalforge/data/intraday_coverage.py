@@ -33,8 +33,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from signalforge.data.calendar import BAR_MINUTES, bar_minutes, rth_bounds
-from signalforge.data.calendar import sessions as calendar_sessions
+from signalforge.data.calendar import BAR_MINUTES, bar_minutes, rth_bar_counts, rth_bounds
 from signalforge.data.repository import SourceFilter
 from signalforge.db.models import Instrument, OHLCVIntraday
 
@@ -221,8 +220,8 @@ def intraday_rth_coverage(
     the right source, real (not simulated) and ``session == 'rth'``; every
     other row is counted separately and reported, never silently dropped."""
     syms = [s.strip().upper() for s in symbols]
-    expected_sessions = list(calendar_sessions(start, end))
-    expected_by_day = {d: expected_rth_bars(d, bar_size) for d in expected_sessions}
+    expected_by_day = rth_bar_counts(start, end, bar_size)
+    expected_sessions = list(expected_by_day)
     src = _first_source(source)
 
     lo = datetime.combine(start, datetime.min.time(), tzinfo=UTC)

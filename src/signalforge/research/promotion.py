@@ -337,6 +337,59 @@ def _sensitivity_plan(
             strategy, {"contraction_max": [0.65, 0.75, 0.85], "stop_atr": [1.5, 1.75, 2.0]}
         )
 
+    # Pre-registered 2026-11-02 (PREREGISTRATION_universe_program_2026-11-02.md §2A/§2B),
+    # written before any bar of either universe was backtested.
+    if key.startswith("tsmom_etf"):
+        from signalforge.research.strategies.tsmom_etf import TsmomEtf
+
+        base = strategy.params  # type: ignore[attr-defined]
+
+        horizon = strategy.horizon  # type: ignore[attr-defined]
+
+        def factory(p: Mapping[str, Any]) -> BaselineStrategy:
+            return TsmomEtf(horizon, _replace(base, **p))
+
+        return factory, _merge_declared_axes(
+            strategy, {"lookback": [189, 252, 315], "sma_window": [168, 210, 252]}
+        )
+
+    if key.startswith("turn_of_month"):
+        from signalforge.research.strategies.turn_of_month import TurnOfMonth
+
+        base = strategy.params  # type: ignore[attr-defined]
+
+        def factory(p: Mapping[str, Any]) -> BaselineStrategy:
+            return TurnOfMonth(_replace(base, **p))
+
+        return factory, _merge_declared_axes(
+            strategy, {"hold_bars": [2, 3, 4], "stop_atr": [2.0, 3.0, 4.0]}
+        )
+
+    # Round 2, pre-registered 2026-11-03 (PREREGISTRATION_round2_2026-11-03.md R2-E1 / R2-E2).
+    if key.startswith("high52_breakout"):
+        from signalforge.research.strategies.high52_breakout import High52Breakout
+
+        base = strategy.params  # type: ignore[attr-defined]
+
+        def factory(p: Mapping[str, Any]) -> BaselineStrategy:
+            return High52Breakout(_replace(base, **p))
+
+        return factory, _merge_declared_axes(
+            strategy, {"lookback": [189, 252, 315], "stop_atr": [1.5, 2.0, 2.5]}
+        )
+
+    if key.startswith("trend_pullback"):
+        from signalforge.research.strategies.trend_pullback import TrendPullback
+
+        base = strategy.params  # type: ignore[attr-defined]
+
+        def factory(p: Mapping[str, Any]) -> BaselineStrategy:
+            return TrendPullback(_replace(base, **p))
+
+        return factory, _merge_declared_axes(
+            strategy, {"sma_fast": [5, 10, 15], "stop_atr": [1.5, 2.0, 2.5]}
+        )
+
     return None
 
 
@@ -437,6 +490,13 @@ def _regime_census(trades: list[Any], regimes: Mapping[date, str]) -> _RegimeCen
         unlabelled=unlabelled,
         n_trades=len(trades),
     )
+
+
+def _fold_trades(trades: list[Any], lo: date, hi: date) -> list[Any]:
+    """Trades whose entry falls in ``[lo, hi)``. Intraday trades carry a
+    ``datetime`` entry stamp; comparing it to a fold's ``date`` bound raises
+    ``TypeError``, so the stamp is normalised the same way gate 6 does."""
+    return [t for t in trades if lo <= _as_date(t.entry_date) < hi]
 
 
 def _last_warmup_date(regimes: Mapping[date, str]) -> date | None:
@@ -825,6 +885,25 @@ def format_sealed_look_line(ledger: Mapping[str, Any]) -> str:
 # --------------------------------------------------------------------------- #
 # gate 9 — sealed test, computed once, reused forever
 # --------------------------------------------------------------------------- #
+#: Calendar days of history loaded BEFORE a sealed window so indicators and the
+#: regime proxy are warm on the window's first session (730 days ≈ 500 sessions,
+#: enough for a 12-month lookback plus a 10-month moving average). Trades are
+#: still scored only when ENTERED inside the window (``_sealed_window_trades``).
+SEALED_WARMUP_LEAD_DAYS = 730
+
+
+def sealed_lead_start(sealed_start: date) -> date:
+    """First day of history fed to the sealed-window backtest (warm-up only)."""
+    return sealed_start - timedelta(days=SEALED_WARMUP_LEAD_DAYS)
+
+
+def _sealed_window_trades(trades: list[Any], sealed_start: date, end: date) -> list[Any]:
+    """Only trades whose ENTRY falls inside ``[sealed_start, end]``: a position
+    opened on lead-in (development) data is not sealed evidence, however it
+    exits; a position opened inside the window is, wherever it exits."""
+    return [t for t in trades if sealed_start <= _as_date(t.entry_date) <= end]
+
+
 def _get_or_create_sealed_test(
     session: Session,
     strategy: BaselineStrategy,
@@ -859,11 +938,19 @@ def _get_or_create_sealed_test(
     if existing is not None:
         return existing, True  # locked — never recomputed, never overwritten
 
+    # Feature warm-up lead-in (2026-11-02): the strategy's indicators (and the
+    # regime proxy's 200-session lookback) are fed history from BEFORE the
+    # sealed window, exactly as a live scan would have had on the window's
+    # first day. Only trades ENTERED inside [sealed_start, end] are scored, so
+    # no sealed outcome is read twice and no development outcome is counted.
+    # Without this, any rule whose warm-up exceeds the window (a 12-month
+    # lookback against a 365-day window) scored "0 trades" by construction.
+    lead_start = sealed_lead_start(sealed_start)
     result = run_strategy_over_universe(
         session,
         strategy,
         symbols,
-        sealed_start,
+        lead_start,
         end,
         proxy_symbol=proxy_symbol,
         source=source,
@@ -871,8 +958,9 @@ def _get_or_create_sealed_test(
         intraday=intraday,
         bar_size=bar_size,
     )
-    trades = result.trades  # every trade in the sealed window, evaluated once
+    trades = _sealed_window_trades(result.trades, sealed_start, end)
     n = len(trades)
+    n_lead_in_excluded = len(result.trades) - n
     exp = sum(t.pnl_r for t in trades) / n if n else 0.0
     pm = compute_portfolio_metrics(trades, span_start=sealed_start, span_end=end)
     proxy = PriceSeries.load(session, proxy_symbol, sealed_start, end, source=source)
@@ -880,7 +968,9 @@ def _get_or_create_sealed_test(
     passed = bool(n >= th.sealed_min_trades and exp >= th.sealed_min_expectancy_r)
     detail = (
         f"{n} trades, net expectancy {exp:+.4f}R (need >= {th.sealed_min_expectancy_r:+.4f}R "
-        f"on >= {th.sealed_min_trades} trades)"
+        f"on >= {th.sealed_min_trades} trades); features warmed up on "
+        f"{SEALED_WARMUP_LEAD_DAYS} days before the window, {n_lead_in_excluded} lead-in "
+        "entries excluded"
     )
     row = StrategySealedTest(
         strategy_version_id=version.id,
@@ -893,7 +983,13 @@ def _get_or_create_sealed_test(
             "simulated": result.data.simulated,
             "bars": result.data.bars,
         },
-        metrics_json={"n_trades": n, "expectancy_r": round(exp, 4), **pm.to_dict()},
+        metrics_json={
+            "n_trades": n,
+            "expectancy_r": round(exp, 4),
+            "warmup_lead_days": SEALED_WARMUP_LEAD_DAYS,
+            "lead_in_entries_excluded": n_lead_in_excluded,
+            **pm.to_dict(),
+        },
         benchmark_metrics_json=bench,
         passed=passed,
         detail=detail,
@@ -1136,7 +1232,7 @@ def evaluate_promotion(
     for k in range(n_folds):
         lo = start + timedelta(days=span_days * k // n_folds)
         hi = start + timedelta(days=span_days * (k + 1) // n_folds)
-        ft = [t for t in full.trades if lo <= t.entry_date < hi]
+        ft = _fold_trades(full.trades, lo, hi)
         pm = compute_portfolio_metrics(ft, span_start=lo, span_end=hi)
         fold_rows.append(
             {

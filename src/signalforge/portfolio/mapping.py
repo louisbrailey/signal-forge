@@ -48,6 +48,14 @@ POSITION_FORMATS: dict[str, PositionColumns] = {
 }
 
 TRANSACTION_FORMATS: dict[str, TransactionColumns] = {
+    "coinbase_history": TransactionColumns(
+        date=("timestamp",),
+        action=("transaction type",),
+        symbol=("asset",),
+        quantity=("quantity transacted",),
+        price=("spot price at transaction",),
+        amount=("total (inclusive of fees and/or spread)",),
+    ),
     "fidelity_history": TransactionColumns(
         date=("run date", "date"),
         action=("action",),

@@ -80,6 +80,7 @@ def test_off_schedules_no_intraday_job(db_url: str) -> None:
         "forex_ingest",
         "crypto_ingest",
         "crypto_paper",
+        "crypto_hourly_paper",
         "daily_briefing",
         "alerts",
         "strategy_health",

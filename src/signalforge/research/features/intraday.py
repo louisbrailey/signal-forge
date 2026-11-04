@@ -6,7 +6,8 @@ are timezone-aware datetimes. Point-in-time: index ``t`` reads only ``<= t``.
 
 from __future__ import annotations
 
-from datetime import datetime
+from bisect import bisect_left
+from datetime import datetime, time
 
 import numpy as np
 
@@ -21,27 +22,31 @@ def _session_date(series: PriceSeries, i: int):  # type: ignore[no-untyped-def]
     return d.date() if isinstance(d, datetime) else d
 
 
+def _session_start(series: PriceSeries, t: int) -> int:
+    stamp = series.dates[t]
+    boundary = (
+        datetime.combine(stamp.date(), time.min, tzinfo=stamp.tzinfo)
+        if isinstance(stamp, datetime)
+        else stamp
+    )
+    return bisect_left(series.dates, boundary, 0, t + 1)
+
+
 def bars_since_open(series: PriceSeries, t: int) -> int:
     """Number of bars so far in the session that contains bar ``t`` (0 = first bar)."""
-    day = _session_date(series, t)
-    n = 0
-    i = t
-    while i >= 0 and _session_date(series, i) == day:
-        n += 1
-        i -= 1
-    return n - 1
+    return t - _session_start(series, t)
 
 
 def opening_range(series: PriceSeries, t: int, k_bars: int) -> tuple[float, float]:
     """(high, low) of the first ``k_bars`` bars of bar ``t``'s session, or (nan, nan)
     if the session has not yet produced ``k_bars`` bars at ``t``."""
-    day = _session_date(series, t)
-    idxs = [i for i in range(t + 1) if _session_date(series, i) == day]
-    if len(idxs) < k_bars:
+    # PriceSeries is chronological: a session is contiguous. Walking only its
+    # suffix avoids scanning years of earlier sessions on every intraday bar.
+    start = _session_start(series, t)
+    if t - start + 1 < k_bars:
         return NAN, NAN
-    first_k = idxs[:k_bars]
-    hi = float(np.max(series.high[first_k]))
-    lo = float(np.min(series.low[first_k]))
+    hi = float(np.max(series.high[start : start + k_bars]))
+    lo = float(np.min(series.low[start : start + k_bars]))
     return hi, lo
 
 

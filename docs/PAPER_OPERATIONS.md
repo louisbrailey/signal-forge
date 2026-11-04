@@ -277,3 +277,27 @@ windows, 2–4 h) should be scheduled when the live worker's catch-up and scan a
 not due. `plan` and `report` perform no inference and are safe at any time.
 
 Research signal only — no order was placed.
+
+
+## Hourly crypto paper book (CRYPTO-PAPER-H1) — added 2026-11-04
+
+The hourly twin of the daily crypto paper book, for hourly-bar rules that passed their one-time
+sealed test (first: `crypto_h_donchian168_trail72_volx`, CRYPTO-H4, `currency_sealed_test` id 4,
+BTCUSD + ETHUSD). Separate tables (`crypto_hourly_paper_book`, `crypto_hourly_paper_trade`,
+migration `f3a7c1d9e5b2`) because the daily tables key trades by calendar date. Same rules as
+the daily book: SEALED_PASS required and re-checked every cycle; the kill switch and audited
+data holds (`crypto_paper_data_holds`, keyed by strategy) block OPENING only; declined entries
+are stored `SKIPPED` and never opened late; CLOSED rows are immutable, disagreements go to
+`divergence`; the replay is `research.fx.harness.backtest` (frozen engine or trailing twin), so
+parity with the sealed test is structural. Paper only; import contract S18 covers the module.
+
+- Enable: `CRYPTO_HOURLY_PAPER_ENABLED=true` (its own flag; OFF by default). The scheduler job
+  `crypto_hourly_paper` runs every 60 minutes: when `CRYPTO_INGEST_ENABLED` and the provider is
+  Massive it tops up the books' pairs' completed hourly bars (last 2 days), then replays each book.
+- Start (once, operator): `signalforge crypto paper-hourly start crypto_h_donchian168_trail72_volx --confirm`
+  — start = the current hour (UTC, floored); 180-day observation; $100 R illustration.
+- Inspect: `signalforge crypto paper-hourly status <key>`, `... run <key>` for one cycle now, and the
+  "Hourly crypto paper book" section of `/crypto-paper` in the dashboard.
+- Live book row (2026-11-04): `crypto_hourly_paper_book` id 1 — strategy
+  `crypto_h_donchian168_trail72_volx`, version CRYPTO-H4, sealed_test_id 4, pairs BTCUSD, ETHUSD,
+  start 2026-11-04T03:00:00Z, observation to 2027-05-03T03:00:00Z.

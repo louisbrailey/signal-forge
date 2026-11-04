@@ -110,3 +110,57 @@ def test_fx2_strategies_seal_under_their_own_version_and_gates(session: Session)
     mk1, _, gates1 = sl._lookup("fx", "fx_donchian_55")
     assert mk1.version == "FX-1" and gates1.holding_cost_bps_per_day == 0.0
     assert sl.existing(session, "fx", "fx_donchian_55_trail20") is None
+
+
+def test_hourly_crypto_strategies_seal_under_their_own_market_rows(session: Session) -> None:
+    """CRYPTO-H3/H4 rules are reachable through market key 'crypto_hourly', carry
+    market name 'Crypto (hourly)' and their own version, read crypto_bar_intraday,
+    and store the sealed window as dates. Synthetic hourly bars only."""
+    from datetime import date
+
+    import numpy as np
+
+    from signalforge.db.models import CryptoBarIntraday
+    from signalforge.research.fx.hourly import CRYPTO_H4_STRATEGIES
+
+    mk, strat, _gates = sl._lookup("crypto_hourly", "crypto_h_donchian168_trail72_volx")
+    assert mk.name == "Crypto (hourly)" and mk.version == "CRYPTO-H4"
+    assert strat is CRYPTO_H4_STRATEGIES[2] and _gates.holding_cost_bps_per_day == 0.0
+    with pytest.raises(ValueError):
+        sl._lookup("crypto", "crypto_h_donchian168_trail72_volx")  # not a daily rule
+    # ~2 years of hourly bars with a trend so the lenient dev gates can pass.
+    rng = np.random.default_rng(21)
+    n = 24 * 800
+    closes = 30000 * np.exp(np.cumsum(rng.normal(0.00005, 0.004, n)))
+    t0 = datetime(2023, 1, 1, tzinfo=UTC)
+    prev = float(closes[0])
+    for i, c in enumerate(closes):
+        c = float(c)
+        session.add(
+            CryptoBarIntraday(
+                pair="BTCUSD",
+                bar_size="1h",
+                bar_start=t0 + timedelta(hours=i),
+                open=prev,
+                high=max(prev, c) * 1.002,
+                low=min(prev, c) * 0.998,
+                close=c,
+                source="massive_crypto",
+                latency_category=LatencyCategory.END_OF_DAY,
+                ingested_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        )
+        prev = c
+    session.commit()
+    row = sl.run_sealed_test(
+        session, "crypto_hourly", "crypto_h_donchian168_trail72_volx", ["BTCUSD"], gates=OPEN
+    )
+    assert row.market == "Crypto (hourly)" and row.version == "CRYPTO-H4"
+    assert isinstance(row.sealed_from, date) and isinstance(row.sealed_to, date)
+    assert (row.sealed_to - row.sealed_from).days == 364
+    assert row.verdict in ("SEALED_PASS", "SEALED_FAIL")
+    assert row.result["metrics"]["n_trades"] >= 0
+    with pytest.raises(sl.SealedTestRefused):  # the look is consumed
+        sl.run_sealed_test(
+            session, "crypto_hourly", "crypto_h_donchian168_trail72_volx", ["BTCUSD"], gates=OPEN
+        )

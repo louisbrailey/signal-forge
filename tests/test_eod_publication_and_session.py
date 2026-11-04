@@ -180,6 +180,17 @@ def test_catch_up_retries_soon_after_an_unpublished_probe(db_url: str) -> None:
     assert pending is True, reason
 
 
+def test_catch_up_retries_soon_after_a_deadline_stop(db_url: str) -> None:
+    # The stopped run is checkpointed and resumable; waiting the full two-hour
+    # backoff would only delay finishing the remaining symbols.
+    _failed_eod(
+        _EVENING - timedelta(minutes=30),
+        "IngestDeadlineExceeded('daily-bar ingest passed the 45-minute deadline')",
+    )
+    pending, reason = sched.catch_up_pending(_EVENING)
+    assert pending is True, reason
+
+
 def test_catch_up_still_backs_off_after_a_real_failure(db_url: str) -> None:
     _failed_eod(_EVENING - timedelta(minutes=30), "AdapterError('HTTP 500')")
     pending, reason = sched.catch_up_pending(_EVENING)

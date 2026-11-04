@@ -215,3 +215,138 @@ FX2_STRATEGIES: tuple[FxStrategy, ...] = (
         trail_channel=_TRAIL_N,
     ),
 )
+
+# --------------------------------------------------------------------------- #
+# FX-3 (pre-registered 2026-11-02,
+# docs/research/PREREGISTRATION_universe_program_2026-11-02.md §2C).
+# One-month time-series momentum after Menkhoff, Sarno, Schmeling & Schrimpf
+# (JFE 2012): direction = sign of the 21-day return; 2xATR(20) stop; 21-bar
+# hold. Pre-registered expectation: likely to FAIL on majors (stated there).
+# --------------------------------------------------------------------------- #
+FX3_STRATEGY_VERSION = "FX-3"
+_M21_LOOKBACK, _M21_ATR_N, _M21_STOP_ATR, _M21_TIME = 21, 20, 2.0, 21
+
+
+def _mom21(series: PriceSeries, t: int) -> EntrySignal | None:
+    if len(series) < _M21_LOOKBACK + 2:
+        return None
+    c = float(series.close[-1])
+    c0 = float(series.close[-_M21_LOOKBACK - 1])
+    a = atr(series, _M21_ATR_N)
+    if not np.isfinite(a) or a <= 0 or c0 <= 0:
+        return None
+    r = c / c0 - 1.0
+    if r > 0:
+        return EntrySignal(
+            Direction.LONG,
+            c - _M21_STOP_ATR * a,
+            _M21_TIME,
+            reason=f"{_M21_LOOKBACK}d ret {r:+.2%}",
+        )
+    if r < 0:
+        return EntrySignal(
+            Direction.SHORT,
+            c + _M21_STOP_ATR * a,
+            _M21_TIME,
+            reason=f"{_M21_LOOKBACK}d ret {r:+.2%}",
+        )
+    return None
+
+
+_M21_PARAMS = {
+    "lookback": _M21_LOOKBACK,
+    "atr_n": _M21_ATR_N,
+    "stop_atr": _M21_STOP_ATR,
+    "time": _M21_TIME,
+}
+_M21_DESC = (
+    "Direction = sign of the 21-day return (one-month momentum); 2xATR(20) stop; "
+    "21-bar time stop."
+)
+FX3_STRATEGIES: tuple[FxStrategy, ...] = (
+    FxStrategy("fx_mom_21", _M21_DESC, dict(_M21_PARAMS), warmup=_M21_LOOKBACK + 2, signal=_mom21),
+)
+
+# --------------------------------------------------------------------------- #
+# CRYPTO-2 (pre-registered 2026-11-02, same document §2D): the three CRYPTO-1
+# rules UNCHANGED on a 10-pair universe (keys carry a ``_u10`` suffix so each
+# version's sealed test is its own row), plus the one-month momentum rule after
+# Liu, Tsyvinski & Wu (JF 2022).
+# --------------------------------------------------------------------------- #
+CRYPTO2_STRATEGY_VERSION = "CRYPTO-2"
+CRYPTO2_STRATEGIES: tuple[FxStrategy, ...] = (
+    *(
+        FxStrategy(
+            f"{s.key}_u10",
+            s.description + " (CRYPTO-1 rule, unchanged; 10-pair universe)",
+            dict(s.params),
+            warmup=s.warmup,
+            signal=s.signal,
+        )
+        for s in CRYPTO_STRATEGIES
+    ),
+    FxStrategy(
+        "crypto_mom_21_u10", _M21_DESC, dict(_M21_PARAMS), warmup=_M21_LOOKBACK + 2, signal=_mom21
+    ),
+)
+
+
+# --------------------------------------------------------------------------- #
+# CRYPTO-3 (refinement round 1, pre-registered 2026-11-02, same document §7.2,
+# after ONE development look at CRYPTO-2): the one-month momentum rule LONG
+# ONLY. Spot books cannot short, and Liu–Tsyvinski–Wu's momentum premium is
+# documented in the long leg of large coins. Nothing else changes.
+# --------------------------------------------------------------------------- #
+CRYPTO3_STRATEGY_VERSION = "CRYPTO-3"
+
+
+def _mom21_long(series: PriceSeries, t: int) -> EntrySignal | None:
+    sig = _mom21(series, t)
+    return sig if sig is not None and sig.direction is Direction.LONG else None
+
+
+CRYPTO3_STRATEGIES: tuple[FxStrategy, ...] = (
+    FxStrategy(
+        "crypto_mom_21_long_u10",
+        "LONG when the 21-day return is positive (one-month momentum, long only); "
+        "2xATR(20) stop; 21-bar time stop.",
+        {**_M21_PARAMS, "long_only": 1},
+        warmup=_M21_LOOKBACK + 2,
+        signal=_mom21_long,
+    ),
+)
+
+
+# --------------------------------------------------------------------------- #
+# CRYPTO-4 (round 2, pre-registered 2026-11-03, PREREGISTRATION_round2 §1 R2-E1):
+# the 52-week-high anchor (George & Hwang, JF 2004) on the nine admissible
+# daily pairs: close above the prior 252-day high; 2xATR(20) stop; 40-bar
+# time stop. Long only; no volume term (crypto bars carry none here).
+# --------------------------------------------------------------------------- #
+CRYPTO4_STRATEGY_VERSION = "CRYPTO-4"
+_H252_N, _H252_ATR_N, _H252_STOP_ATR, _H252_TIME = 252, 20, 2.0, 40
+
+
+def _high252(series: PriceSeries, t: int) -> EntrySignal | None:
+    if len(series) < _H252_N + 2:
+        return None
+    c = float(series.close[-1])
+    prior_hi = float(series.high[-_H252_N - 1 : -1].max())
+    a = atr(series, _H252_ATR_N)
+    if not np.isfinite(a) or a <= 0:
+        return None
+    if c > prior_hi:
+        return EntrySignal(Direction.LONG, c - _H252_STOP_ATR * a, _H252_TIME, reason="252d high")
+    return None
+
+
+CRYPTO4_STRATEGIES: tuple[FxStrategy, ...] = (
+    FxStrategy(
+        "crypto_high252_u9",
+        "Close above the prior 252-day high (52-week-high anchor); 2xATR(20) stop; "
+        "40-bar time stop; long only.",
+        {"channel": _H252_N, "atr_n": _H252_ATR_N, "stop_atr": _H252_STOP_ATR, "time": _H252_TIME},
+        warmup=_H252_N + 2,
+        signal=_high252,
+    ),
+)

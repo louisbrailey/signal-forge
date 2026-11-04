@@ -117,8 +117,12 @@ def markets(request: Request, db: DbDep, user: PageUser) -> HTMLResponse:
 
 @router.get("/crypto-paper", response_class=HTMLResponse)
 def crypto_paper(request: Request, db: DbDep, user: PageUser) -> HTMLResponse:
+    from signalforge.db.models import CryptoHourlyPaperBook
+    from signalforge.paper.crypto_hourly_ledger import status as hourly_status
     from signalforge.paper.crypto_ledger import status
 
     keys = [b.strategy_key for b in db.scalars(select(CryptoPaperBook))]
     books = [status(db, k) for k in keys]
-    return _page(request, user, "crypto_paper.html", {"books": books})
+    hourly_keys = [b.strategy_key for b in db.scalars(select(CryptoHourlyPaperBook))]
+    hourly_books = [hourly_status(db, k) for k in hourly_keys]
+    return _page(request, user, "crypto_paper.html", {"books": books, "hourly_books": hourly_books})
