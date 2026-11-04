@@ -151,6 +151,13 @@ The explicit, offline-data experiment CLI is documented in
 [the frozen comparison plan](docs/KRONOS-COMPARISON-PLAN.md). It creates three
 private accounts per approved daily strategy/horizon (baseline, Kronos filter,
 and matched-selection control), uses the existing paper ledger, and reads the
-operating database without writing to it. It is not registered with the worker
-or dashboard. Results remain sealed until the predefined final analysis; this
-is research infrastructure, not evidence of improved profitability.
+operating database without writing to it. Independent collectors automate the
+approved studies; the authenticated **Research → Study collection** page at
+`/research-studies` shows their operational status alongside the funded forward
+books, refreshing every minute. See [study operations](docs/RESEARCH-STUDY-OPERATIONS.md)
+for configuration and failure semantics. Interim results remain sealed until the
+predefined analysis; neither dashboard nor collector can promote a strategy.
+
+The separate [slow-trend hypothesis](docs/research/SLOW_TREND_V1.md) and
+[after-cost evaluation](reports/SLOW_TREND_2026-11-03.md) remain experimental and
+unregistered: positive historical net P&L did not establish an incremental edge.
