@@ -315,3 +315,38 @@ CRYPTO3_STRATEGIES: tuple[FxStrategy, ...] = (
         signal=_mom21_long,
     ),
 )
+
+
+# --------------------------------------------------------------------------- #
+# CRYPTO-4 (round 2, pre-registered 2026-11-03, PREREGISTRATION_round2 §1 R2-E1):
+# the 52-week-high anchor (George & Hwang, JF 2004) on the nine admissible
+# daily pairs: close above the prior 252-day high; 2xATR(20) stop; 40-bar
+# time stop. Long only; no volume term (crypto bars carry none here).
+# --------------------------------------------------------------------------- #
+CRYPTO4_STRATEGY_VERSION = "CRYPTO-4"
+_H252_N, _H252_ATR_N, _H252_STOP_ATR, _H252_TIME = 252, 20, 2.0, 40
+
+
+def _high252(series: PriceSeries, t: int) -> EntrySignal | None:
+    if len(series) < _H252_N + 2:
+        return None
+    c = float(series.close[-1])
+    prior_hi = float(series.high[-_H252_N - 1 : -1].max())
+    a = atr(series, _H252_ATR_N)
+    if not np.isfinite(a) or a <= 0:
+        return None
+    if c > prior_hi:
+        return EntrySignal(Direction.LONG, c - _H252_STOP_ATR * a, _H252_TIME, reason="252d high")
+    return None
+
+
+CRYPTO4_STRATEGIES: tuple[FxStrategy, ...] = (
+    FxStrategy(
+        "crypto_high252_u9",
+        "Close above the prior 252-day high (52-week-high anchor); 2xATR(20) stop; "
+        "40-bar time stop; long only.",
+        {"channel": _H252_N, "atr_n": _H252_ATR_N, "stop_atr": _H252_STOP_ATR, "time": _H252_TIME},
+        warmup=_H252_N + 2,
+        signal=_high252,
+    ),
+)

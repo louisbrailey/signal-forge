@@ -36,6 +36,7 @@ from signalforge.research.fx.continuity import continuity_breach
 from signalforge.research.fx.harness import (
     CRYPTO2_MARKET,
     CRYPTO3_MARKET,
+    CRYPTO4_MARKET,
     CRYPTO_MARKET,
     FX2_GATES,
     FX2_MARKET,
@@ -53,6 +54,7 @@ from signalforge.research.fx.harness import (
 from signalforge.research.fx.strategies import (
     CRYPTO2_STRATEGIES,
     CRYPTO3_STRATEGIES,
+    CRYPTO4_STRATEGIES,
     CRYPTO_STRATEGIES,
     FX2_STRATEGIES,
     FX3_STRATEGIES,
@@ -76,6 +78,7 @@ _MARKETS: dict[str, tuple[tuple[ResearchMarket, tuple[FxStrategy, ...], FxGates]
         (CRYPTO_MARKET, CRYPTO_STRATEGIES, FxGates()),
         (CRYPTO2_MARKET, CRYPTO2_STRATEGIES, FxGates()),
         (CRYPTO3_MARKET, CRYPTO3_STRATEGIES, FxGates()),
+        (CRYPTO4_MARKET, CRYPTO4_STRATEGIES, FxGates()),
     ),
 }
 
