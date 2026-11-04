@@ -87,9 +87,36 @@ sides of one finding: hourly crypto breakouts work when volatility is rising int
 out of a lull. The two-week channel is positive on three of four pairs with a strong ETH
 (+1.08R) and a bad SOL (−0.53R) and misses the CI gate. Both CRYPTO-H3 rules are rejected.
 
-## 4. CRYPTO-4 `crypto_high252_u9` (Codex session)
+## 4. CRYPTO-4 `crypto_high252_u9` — DEV_FAIL (statistical power), run 2026-11-03
 
-_Codex's family; results to be appended by that session under this heading._
+`run_crypto4_research` (equivalent of `crypto research --version CRYPTO-4`), live DB
+read-only, nine admissible daily pairs (BTC, ETH, SOL, XRP, DOGE, ADA, LINK, AVAX, LTC; no
+BNB), CRYPTO-1 gates plus the §0 admissibility policy (every pair admitted; no continuity
+reason raised). Report `data/research/crypto/crypto_research_CRYPTO-4_2026-11-03.md`. Sealed
+from 2025-11-04, not evaluated. Code `92a9af5`.
+
+| Strategy | Verdict | OOS trades | Expectancy (R) | CI low (R) | 2x-spread (R) | Folds (R) |
+|---|---|---|---|---|---|---|
+| crypto_high252_u9 | **DEV_FAIL** | 37 | +0.573 | −0.227 | +0.523 | +0.46, −0.56, +1.49, +0.30 |
+
+| Pair | OOS from | OOS trades | Expectancy (R) | 2x-spread (R) |
+|---|---|---|---|---|
+| ADAUSD | 2022-10-07 | 3 | −1.019 | −1.036 |
+| AVAXUSD | 2024-04-01 | 0 | — | — |
+| BTCUSD | 2021-07-04 | 9 | +1.397 | +1.333 |
+| DOGEUSD | 2022-06-21 | 2 | +3.591 | +3.458 |
+| ETHUSD | 2021-10-01 | 7 | +0.025 | −0.010 |
+| LINKUSD | 2023-04-19 | 5 | +1.049 | +0.979 |
+| LTCUSD | 2022-03-29 | 4 | −1.018 | −1.034 |
+| SOLUSD | 2023-12-19 | 3 | −0.224 | −0.248 |
+| XRPUSD | 2022-04-27 | 4 | +0.959 | +0.897 |
+
+Reading: a close above the prior 252-day high is rare on daily crypto bars (37 out-of-sample
+trades across nine pairs, four pairs with ≤ 3), so the only failed gate is the bootstrap CI
+(−0.227R vs +0.02R). The sign is positive (+0.57R, +0.52R at double costs) but one fold is
+negative and per-pair results swing from −1.0R to +3.6R on a handful of trades. A power
+failure, not evidence either way; shortening the channel to manufacture trades would be the
+Donchian-55 rule the system already has. **Rejected at this parameterisation; not refined.**
 
 ## 5. Summary for the operator
 
@@ -99,6 +126,6 @@ _Codex's family; results to be appended by that session under this heading._
 | CRYPTO-H3: 2 hourly rules, 4 pairs | both fail | no |
 | R2-E1 `high52_breakout`, snapshots 3 and 11 | **PASS on 150**; fail on 24 | **yes** — `high52_breakout.medium_swing` on snapshot 11 |
 | R2-E2 `trend_pullback`, snapshots 3 and 11 | fail on both | no |
-| CRYPTO-4 `crypto_high252_u9`, 9 daily pairs | pending (Codex) | — |
+| CRYPTO-4 `crypto_high252_u9`, 9 daily pairs | fail (37 trades, CI low −0.227R) | no |
 
 No sealed year was consumed in this round. Nothing is armed. BNB is in no universe.
