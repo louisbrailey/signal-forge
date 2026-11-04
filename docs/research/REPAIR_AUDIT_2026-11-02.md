@@ -96,3 +96,14 @@ zero positive walk-forward folds and zero positive sensitivity points out of18.
 Its diagnostic final window is −0.0605R on464 trades. This is a rejection, not a code
 error to tune away. The distinct 23-symbol confirmation remains a running scratch job.
 No result is fabricated for an interrupted or unfinished run.
+
+
+## Operator decision 2026-11-03 — CRYPTO-2 book hold lifted for nine pairs
+
+The operator chose "Lift for 9 pairs". Applied by the Claude session: BNBUSD removed from
+`crypto_paper_book` id 2's pair list; the `crypto_paper_data_holds` entry for
+`crypto_donchian_55_u10` removed; a `crypto_paper_notes` entry records the book as an
+**EXPERIMENTAL** paper record whose pooled sealed pass is not promotion evidence. Locked sealed
+rows 1–3 unchanged; no gate, threshold or continuity check changed; nothing armed. The nine
+remaining pairs are continuous by the coverage audit (XRP −13 days, ETH −6 days, all others
+complete). Prospective trades from 2026-11-03 are the only evidence this book produces.

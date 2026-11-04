@@ -192,7 +192,14 @@ seen for all ten pairs, so a BNB-free CRYPTO-2b cannot get a clean sealed look o
 window; the only honest route to evidence for the nine clean pairs is **prospective paper
 forward results**, which the operator may choose to collect by lifting the hold for a book
 explicitly labelled experimental. `crypto_mom_21_long_u10` is rejected on its sealed year
-regardless (it was negative on 7/10 pairs, BNB being one of its three positives). Taking that
+regardless (it was negative on 7/10 pairs, BNB being one of its three positives).
+
+**Operator decision 2026-11-03 ("Lift for 9 pairs").** BNBUSD was removed from the CRYPTO-2
+book's pair list and the data hold was lifted; the book now replays the nine continuous pairs
+(ADA, AVAX, BTC, DOGE, ETH, LINK, LTC, SOL, XRP) from 2026-11-03 to 2027-05-02 at $100 R. It is
+recorded in the `crypto_paper_notes` setting as an **EXPERIMENTAL** paper record: the pooled
+sealed pass is not promotion evidence, and only its prospective trades count. Locked sealed
+row 2 is unchanged. Taking that
 look consumes CRYPTO-2's one sealed year for this rule and needs the operator's explicit
 authorisation; it is **not** taken by this program. If authorised and passed, the existing
 crypto paper book mechanism (currently CRYPTO-1 on 3 pairs, $100 R) is the paper venue.

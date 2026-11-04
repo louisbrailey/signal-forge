@@ -278,7 +278,7 @@ or data since 2026-10-26 and the results are deterministic.
 | `default` ($30k) | trend_continuation.medium_swing (sv3) | 2026-09-25 | 9 (+2 voided) | +$3.76, mean −0.16R | 6 | auto-simulate on, 2/day cap |
 | `book-sv2` ($30k) | trend_continuation.short_swing (sv2) | 2026-10-08 | 4 | +$5.12, mean −0.21R | 3 | auto-simulate on |
 | CRYPTO-PAPER-1 | crypto_donchian_55 (CRYPTO-1, 3 pairs) | 2026-10-26 | 0 | — | 2 | daily cycle, $100/trade |
-| CRYPTO-PAPER-1 | crypto_donchian_55_u10 (CRYPTO-2, 10 pairs) | 2026-11-03 | 0 | — | 0 | started this evening after SEALED_PASS (+0.693R/55); daily cycle, $100/trade; observation to 2027-05-02 |
+| CRYPTO-PAPER-1 | crypto_donchian_55_u10 (CRYPTO-2, **9 pairs, EXPERIMENTAL**) | 2026-11-03 | 0 | — | 0 | sealed pass invalidated by the BNB coverage audit; BNB removed and hold lifted by operator decision 2026-11-03; daily cycle, $100/trade; observation to 2027-05-02 |
 | (none) | relative_strength.medium_swing (sv5) | — | 0 | — | 0 | approved; scan gate rejects every candidate (§3.2) |
 | `options` ($25k) | — | — | 0 | — | 0 | auto-simulate off, nothing approved |
 | `grid` ($5k) | mechanical grid | — | — | — | — | research lane, off |
