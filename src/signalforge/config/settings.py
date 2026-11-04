@@ -48,6 +48,7 @@ class Settings(BaseSettings):
 
     # Operational metadata only; never read private comparison performance.
     kronos_comparison_status_path: str = ""
+    webull_readonly_snapshot_path: str = ""
 
     # --- Market data ---
     market_data_provider: str = "fixture"

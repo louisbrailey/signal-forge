@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.signalforge.webull-readonly</string>
+  <key>ProgramArguments</key><array>
+    <string>__SDK_PYTHON__</string><string>-m</string><string>signalforge.execution.brokers.webull_readonly</string>
+    <string>--allow-account-reads</string>
+    <string>--private-config</string><string>__EXISTING_PRIVATE_CONFIG__</string>
+    <string>--output</string><string>__DATA_DIR__/webull-readonly/account.json</string>
+    <string>--kill-switch</string><string>__DATA_DIR__/kill_switch.json</string>
+  </array>
+  <key>EnvironmentVariables</key><dict><key>PYTHONPATH</key><string>__CHECKOUT__/src</string></dict>
+  <key>WorkingDirectory</key><string>__CHECKOUT__</string>
+  <key>RunAtLoad</key><true/><key>StartInterval</key><integer>300</integer>
+  <key>Umask</key><integer>63</integer>
+  <key>StandardOutPath</key><string>__DATA_DIR__/webull-readonly/collector.log</string>
+  <key>StandardErrorPath</key><string>__DATA_DIR__/webull-readonly/collector.log</string>
+</dict></plist>

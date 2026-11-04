@@ -111,6 +111,21 @@ def portfolio_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
     )
 
 
+@router.get("/accounts/webull", response_class=HTMLResponse)
+def webull_account_page(request: Request, user: UserDep) -> HTMLResponse:
+    from pathlib import Path
+
+    from signalforge.account_view import read_snapshot
+    from signalforge.config.paths import data_dir
+    from signalforge.config.settings import get_settings
+
+    configured = get_settings().webull_readonly_snapshot_path
+    path = Path(configured) if configured else data_dir() / "webull-readonly/account.json"
+    response = _page(request, user, "webull_account.html", read_snapshot(path))
+    response.headers["Cache-Control"] = "no-store, private"
+    return response
+
+
 @router.get("/strategies", response_class=HTMLResponse)
 def strategies_page(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
     return _page(request, user, "strategies.html", strategies_context(db))
