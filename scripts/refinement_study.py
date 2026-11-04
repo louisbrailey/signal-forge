@@ -40,7 +40,10 @@ CASES = {
 }
 LIMITS = RiskLimits(max_position_concentration_pct=5, max_correlated_exposure_pct=20)
 _CTX = {}
-EXPECTED_MANIFEST = "edb199c01af7811a9ac8dd4237209af97cea476a9088949d7f84daa018dd8eb1"
+# Public dataset-manifest checksum, not a credential.
+EXPECTED_MANIFEST = (
+    "edb199c01af7811a9ac8dd4237209af97cea476a9088949d7f84daa018dd8eb1"  # pragma: allowlist secret
+)
 EXPECTED_KEYS = {
     "trend_continuation.short_swing@0.1.0",
     "trend_continuation.medium_swing@0.1.0",

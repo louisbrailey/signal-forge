@@ -67,6 +67,12 @@ offline `scripts/cost_attribution_report.py` reproduces fixed cost comparisons
 with funded quantities and shared cash. These are previously observed research
 results; they do not authorize promotion or establish reliable daily income.
 
+The [fixed R1 refinement study](reports/STRATEGY_REFINEMENT_2026-11-04.md)
+compares ten separate challengers against unchanged baselines across chronological
+periods and three cost cases. Six improved the mean stress-validation return,
+but none cleared every predeclared replacement criterion. The isolated runner
+records failures, preserves checkpoints, and never activates a strategy.
+
 ## Requirements
 
 - macOS / Linux
