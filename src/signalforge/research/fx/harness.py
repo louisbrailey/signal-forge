@@ -350,7 +350,7 @@ def evaluate_strategy(
         res.holding_stress_expectancy_r = sum(charged) / len(charged)
 
     reasons = []
-    if mk.name == "Crypto":
+    if mk.name.startswith("Crypto"):
         for pair, full in sorted(series_by_pair.items()):
             dev = _cut(full, seal_from)
             step = timedelta(hours=1) if isinstance(seal_from, datetime) else timedelta(days=1)

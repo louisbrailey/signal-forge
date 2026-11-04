@@ -21,8 +21,9 @@ Rules (pre-registered with FX-1 / CRYPTO-1):
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable, Sequence
+from dataclasses import replace as _replace
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -50,6 +51,13 @@ from signalforge.research.fx.harness import (
     holding_cost_r,
     load_series,
     sealed_start,
+)
+from signalforge.research.fx.hourly import (
+    CRYPTO_H3_STRATEGIES,
+    CRYPTO_H3_VERSION,
+    CRYPTO_H4_STRATEGIES,
+    CRYPTO_H4_VERSION,
+    load_hourly_series,
 )
 from signalforge.research.fx.strategies import (
     CRYPTO2_STRATEGIES,
@@ -80,7 +88,39 @@ _MARKETS: dict[str, tuple[tuple[ResearchMarket, tuple[FxStrategy, ...], FxGates]
         (CRYPTO3_MARKET, CRYPTO3_STRATEGIES, FxGates()),
         (CRYPTO4_MARKET, CRYPTO4_STRATEGIES, FxGates()),
     ),
+    # Hourly crypto (2026-11-04): same spreads as the daily crypto market, bars
+    # from crypto_bar_intraday, sealed window = the final 365 calendar days of
+    # hourly bars. Rows carry market "Crypto (hourly)" so they never collide
+    # with a daily row of the same strategy key.
+    "crypto_hourly": (
+        (
+            _replace(CRYPTO_MARKET, name="Crypto (hourly)", version=CRYPTO_H3_VERSION),
+            CRYPTO_H3_STRATEGIES,
+            FxGates(),
+        ),
+        (
+            _replace(CRYPTO_MARKET, name="Crypto (hourly)", version=CRYPTO_H4_VERSION),
+            CRYPTO_H4_STRATEGIES,
+            FxGates(),
+        ),
+    ),
 }
+
+HOURLY_MARKET_KEY = "crypto_hourly"
+
+
+def _series_loader(session: Session, market: str, mk: ResearchMarket) -> Callable[[str], Any]:
+    if market == HOURLY_MARKET_KEY:
+        return lambda pair: load_hourly_series(session, pair)
+    return lambda pair: load_series(session, pair, mk)
+
+
+def _bar_step(market: str) -> timedelta:
+    return timedelta(hours=1) if market == HOURLY_MARKET_KEY else timedelta(days=1)
+
+
+def _as_date(stamp: date | datetime) -> date:
+    return stamp.date() if isinstance(stamp, datetime) else stamp
 
 
 class SealedTestRefused(RuntimeError):
@@ -134,7 +174,8 @@ def run_sealed_test(
             "A changed parameter is a new version with its own development run."
         )
 
-    series_by_pair = {p: load_series(session, p, mk) for p in pairs}
+    loader = _series_loader(session, market, mk)
+    series_by_pair = {p: loader(p) for p in pairs}
     series_by_pair = {p: s for p, s in series_by_pair.items() if len(s)}
     if not series_by_pair:
         raise SealedTestRefused(f"no {mk.name} history for the requested pairs")
@@ -156,8 +197,8 @@ def run_sealed_test(
         market=mk.name,
         version=mk.version,
         strategy_key=strategy_key,
-        sealed_from=seal_from,
-        sealed_to=seal_to,
+        sealed_from=_as_date(seal_from),
+        sealed_to=_as_date(seal_to),
         pairs=sorted(series_by_pair),
         dev_summary={
             "pooled": dev.pooled,
@@ -211,10 +252,10 @@ def run_sealed_test(
             t.pnl_r - holding_cost_r(t, gates.holding_cost_bps_per_day, fallback) for t in base
         ) / len(base)
     reasons = []
-    if mk.name == "Crypto":
+    if mk.name.startswith("Crypto"):
         for pair, series in sorted(series_by_pair.items()):
             breach = continuity_breach(
-                series.dates, timedelta(days=1), start=seal_from, end=seal_to
+                series.dates, _bar_step(market), start=seal_from, end=seal_to
             )
             if breach:
                 reasons.append(f"sealed data continuity: {pair} sealed window {breach}")
