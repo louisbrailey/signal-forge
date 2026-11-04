@@ -279,6 +279,7 @@ or data since 2026-10-26 and the results are deterministic.
 | `book-sv2` ($30k) | trend_continuation.short_swing (sv2) | 2026-10-08 | 4 | +$5.12, mean −0.21R | 3 | auto-simulate on |
 | CRYPTO-PAPER-1 | crypto_donchian_55 (CRYPTO-1, 3 pairs) | 2026-10-26 | 0 | — | 2 | daily cycle, $100/trade |
 | (pending book) | high52_breakout.medium_swing (sv13, snapshot 11, 150 symbols) | 2026-11-04 | 0 | — | 0 | **PAPER_APPROVED 2026-11-04** after a real sealed year (+0.263R / 201); scan picks it up next session; see RESULTS_round2 §6.1 |
+| CRYPTO-PAPER-H1 | crypto_h_donchian168_trail72_volx (CRYPTO-H4, hourly, BTC+ETH) | 2026-11-04 03:00 UTC | 0 | — | 0 | started after SEALED_PASS (+0.373R/79); hourly cycle, $100/trade; observation to 2027-05-03 |
 | CRYPTO-PAPER-1 | crypto_donchian_55_u10 (CRYPTO-2, **9 pairs, EXPERIMENTAL**) | 2026-11-03 | 0 | — | 0 | sealed pass invalidated by the BNB coverage audit; BNB removed and hold lifted by operator decision 2026-11-03; daily cycle, $100/trade; observation to 2027-05-02 |
 | (none) | relative_strength.medium_swing (sv5) | — | 0 | — | 0 | approved; scan gate rejects every candidate (§3.2) |
 | `options` ($25k) | — | — | 0 | — | 0 | auto-simulate off, nothing approved |

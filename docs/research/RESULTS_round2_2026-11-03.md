@@ -176,6 +176,15 @@ hourly bars; development gates recomputed and passed first; the look is consumed
 | Total | +29.5R over the year |
 
 A pass, with the shape of a trend rule: one win in five, paid for by large winners, and a
-twelve-trade losing streak inside the year. There is no hourly paper book yet; the daily
-crypto ledger replays daily bars only, so a prospective record needs an hourly replay path
-before this rule can be observed in paper.
+twelve-trade losing streak inside the year.
+
+**Hourly paper book (operator decision 2026-11-04, "Restart + build book").** The daily crypto
+ledger keys trades by calendar date, so an hourly twin was built (commit `9b19b70`): tables
+`crypto_hourly_paper_book` / `crypto_hourly_paper_trade` (migration `f3a7c1d9e5b2`), module
+`paper/crypto_hourly_ledger.py` (same rules as the daily book: SEALED_PASS required, kill
+switch and data holds block opening only, SKIPPED never opened late, CLOSED immutable; replays
+`research.fx.harness.backtest` so parity with the sealed test is structural), an hourly
+scheduler job that tops up the book's pairs' bars then replays, and `crypto paper-hourly
+start|run|status`. Book started 2026-11-04 03:00 UTC on BTCUSD + ETHUSD, $100 R per trade,
+observation to 2027-05-03; first cycle clean, no trade yet (bars through 2026-11-02 20:00 UTC
+at start; the hourly job tops them up). Paper-only; nothing armed.
