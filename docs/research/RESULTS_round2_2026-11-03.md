@@ -187,4 +187,7 @@ switch and data holds block opening only, SKIPPED never opened late, CLOSED immu
 scheduler job that tops up the book's pairs' bars then replays, and `crypto paper-hourly
 start|run|status`. Book started 2026-11-04 03:00 UTC on BTCUSD + ETHUSD, $100 R per trade,
 observation to 2027-05-03; first cycle clean, no trade yet (bars through 2026-11-02 20:00 UTC
-at start; the hourly job tops them up). Paper-only; nothing armed.
+at start; the hourly job tops them up). Paper-only; nothing armed. Start command:
+`signalforge crypto paper-hourly start crypto_h_donchian168_trail72_volx --confirm`; book row
+`crypto_hourly_paper_book` id 1 (sealed_test_id 4). The cycle is gated by its own flag
+`CRYPTO_HOURLY_PAPER_ENABLED` (off by default; set true in the live `.env` on 2026-11-04).

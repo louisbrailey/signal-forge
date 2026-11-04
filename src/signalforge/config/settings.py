@@ -89,6 +89,11 @@ class Settings(BaseSettings):
     # ``signalforge crypto paper start --confirm`` for a SEALED_PASS strategy.
     # Env: CRYPTO_PAPER_ENABLED.
     crypto_paper_enabled: bool = False
+    # HOURLY crypto PAPER book (CRYPTO-PAPER-H1; simulated; no broker). OFF by default,
+    # separately from the daily book: the hourly cycle runs only when this is true AND an
+    # hourly book was created with ``signalforge crypto paper-hourly start --confirm`` for a
+    # SEALED_PASS hourly strategy. Env: CRYPTO_HOURLY_PAPER_ENABLED.
+    crypto_hourly_paper_enabled: bool = False
 
     # --- News ---
     news_provider: str = ""

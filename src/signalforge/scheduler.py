@@ -563,7 +563,7 @@ def job_crypto_paper() -> None:
 
 def job_crypto_hourly_paper() -> None:
     """Hourly SIMULATED crypto paper cycle for HOURLY-bar books (CRYPTO-H4).
-    Config-gated OFF (``CRYPTO_PAPER_ENABLED``); needs a book created by the
+    Config-gated OFF (``CRYPTO_HOURLY_PAPER_ENABLED``); needs a book created by the
     operator. Tops up the book's pairs' completed hourly bars first (Massive,
     research data) when ``CRYPTO_INGEST_ENABLED``, then replays. No broker, no
     order path. The kill switch blocks new paper trades, never closes."""
@@ -577,7 +577,7 @@ def job_crypto_hourly_paper() -> None:
     from signalforge.paper.crypto_hourly_ledger import run_cycle
 
     settings = get_settings()
-    if not settings.crypto_paper_enabled:
+    if not settings.crypto_hourly_paper_enabled:
         _log.info("crypto.hourly_paper.skipped_disabled")
         return
     with session_scope(write=True) as session:

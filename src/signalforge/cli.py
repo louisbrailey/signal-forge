@@ -690,7 +690,7 @@ def crypto_hourly_paper_start(
 def crypto_hourly_paper_run(
     strategy: Annotated[str, typer.Argument()] = "crypto_h_donchian168_trail72_volx",
 ) -> None:
-    """Run one cycle now (the scheduler does this hourly when CRYPTO_PAPER_ENABLED)."""
+    """Run one cycle now (the scheduler does this hourly when CRYPTO_HOURLY_PAPER_ENABLED)."""
     from signalforge.db.session import session_scope
     from signalforge.paper.crypto_hourly_ledger import PaperBookRefused, run_cycle
 

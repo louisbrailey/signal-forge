@@ -46,6 +46,7 @@ def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
     monkeypatch.setenv("FOREX_INGEST_ENABLED", "false")
     monkeypatch.setenv("CRYPTO_INGEST_ENABLED", "false")
     monkeypatch.setenv("CRYPTO_PAPER_ENABLED", "false")
+    monkeypatch.setenv("CRYPTO_HOURLY_PAPER_ENABLED", "false")
 
     import signalforge.killswitch as ks
     from signalforge.config.settings import get_settings

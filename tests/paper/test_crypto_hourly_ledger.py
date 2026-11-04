@@ -163,3 +163,14 @@ def test_status_reports_the_record_against_the_sealed_result(session: Session) -
     assert st["sealed_expectancy_r"] == 0.373
     assert st["closed_trades"] >= 1 and isinstance(st["total_r"], float)
     assert "No order was placed" in st["notice"]
+
+
+def test_scheduled_hourly_cycle_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``CRYPTO_HOURLY_PAPER_ENABLED`` defaults to false (its own flag, separate from the
+    daily book's): the job returns before touching any book."""
+    from signalforge import scheduler
+
+    called: list[bool] = []
+    monkeypatch.setattr(hl, "run_cycle", lambda *a, **k: called.append(True))
+    scheduler.job_crypto_hourly_paper()
+    assert called == []
