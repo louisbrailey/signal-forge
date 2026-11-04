@@ -1,38 +1,19 @@
-"""Order-execution layer — DISABLED BY DEFAULT, and nothing is armed by default.
+"""Execution boundary — disabled by default, nothing armed by default.
 
-Authorised by the D6 execution ADR (`docs/research/options_designs/D6_execution_adr.md`),
-which supersedes the "no brokerage, at any phase" roadmap boundary **for this
-package only, paper endpoints only**. Every other module keeps the prohibition.
+D6 and ADR 0006 separate two paths: paper/sandbox strategy execution uses the
+existing registry, risk limits, arming and is_paper proof; production operations
+use immutable human reviews and explicit per-action confirmation through the CLI.
+Production adapters never enter the strategy registry or automated cycle.
 
-What this package may become: a path that submits orders to a broker's
-**paper/sandbox** endpoint, disabled by default, armed only by an audited
-operator ceremony per strategy version, with a hard expiry.
+No LLM, app, research, or scheduler import path may reach either order surface.
+No automatic liquidation, credential acquisition, credential persistence, browser
+automation, or blind retry is provided. Credentials are operator-provisioned
+references only. Production shares durable account admission with other apps.
+The kill switch blocks openings and transfers; exact protective close/cancel
+still requires its own confirmation and validated account/order identity.
 
-What it may never do, and what is re-prohibited here rather than merely omitted:
-
-* reach any real-money endpoint;
-* carry any order decided, shaped, ranked, sized, timed, or described by an LLM;
-* source an order from a manually accepted paper trade (§5 precondition P6);
-* hold any structure with undefined max loss, submit any multi-leg structure
-  leg by leg, trade 0DTE, or open a naked short option;
-* liquidate automatically, repair a reconciliation automatically, or retry a
-  broker rejection;
-* acquire, store, rotate, or log a credential.
-
-**The kill switch blocks opening and never blocks closing.** The OPEN lane and
-the PROTECTIVE_CLOSE lane are built by two different factories with two
-different precondition sets and **opposite** fail directions: a check that
-cannot be evaluated blocks opening and never blocks closing.
-
-State of this phase (I-E3): protocol, intent data model, the two factories, the
-state machine, limits, audit records, credential resolution, and the **first**
-adapter — ``brokers.paper_reference``, which is local, deterministic and
-network-free, whose fills are drill artifacts fenced off from every gate
-(§3.1 rule 4), and which is reachable only through
-``brokers.build_adapter`` behind the ``execution.enabled`` config flag.
-**Nothing in this package opens a socket.** There is still no arming ceremony
-and no scheduler registration. Importing this package performs no network call,
-reads no credential, and constructs no adapter.
+This package opens no sockets: CLI-injected transports own HTTP. Importing it
+performs no network call, reads no credential, and constructs no adapter.
 """
 
 from __future__ import annotations

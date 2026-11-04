@@ -48,6 +48,21 @@ def _job_rows(name: str) -> list[JobRun]:
 # --------------------------------------------------------------------------- #
 # 1. ingest deadline
 # --------------------------------------------------------------------------- #
+def test_deadline_stop_retries_on_next_catchup_but_other_errors_back_off() -> None:
+    deadline = JobRun(
+        name="daily_eod_update",
+        status="failed",
+        detail="IngestDeadlineExceeded('deadline exceeded')",
+    )
+    unpublished = JobRun(
+        name="daily_eod_update", status="failed", detail="ProviderBarsNotPublished('pending')"
+    )
+    other = JobRun(name="daily_eod_update", status="failed", detail="RuntimeError('other failure')")
+    assert sched._retry_backoff(deadline) == timedelta(minutes=25)
+    assert sched._retry_backoff(unpublished) == timedelta(minutes=25)
+    assert sched._retry_backoff(other) == timedelta(hours=2)
+
+
 class _SteppingClock:
     """Deterministic monotonic clock: every reading is ``step`` seconds later."""
 
@@ -583,10 +598,10 @@ def test_deadline_clock_is_the_larger_of_monotonic_and_wall_elapsed(
 ) -> None:
     monkeypatch.setattr(sched, "_mono_source", lambda: sched._MONO_BASE + 10.0)
     monkeypatch.setattr(sched, "_wall_source", lambda: sched._WALL_BASE + 3600.0)
-    assert sched._deadline_clock() == 3600.0  # a sleep counts in full
+    assert sched._deadline_clock() == pytest.approx(3600.0, abs=1e-9, rel=0)
     # a wall clock stepped backwards (NTP) cannot shrink the budget
     monkeypatch.setattr(sched, "_wall_source", lambda: sched._WALL_BASE - 3600.0)
-    assert sched._deadline_clock() == 10.0
+    assert sched._deadline_clock() == pytest.approx(10.0, abs=1e-9, rel=0)
 
 
 def test_guarded_writes_a_running_row_first_and_finishes_the_same_row(db_url: str) -> None:

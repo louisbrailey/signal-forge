@@ -1,10 +1,16 @@
 # ADR — Execution layer (pointer)
 
-- **Status:** accepted and IMPLEMENTED through increment W4c (2026-09-12). The execution
-  layer exists, is default-disabled, and its cycle can submit orders once a strategy is
-  armed — see "Increment W4c" at the foot of this file. **Nothing is armed. Nothing reaches
-  real money:** the only registered adapter is `paper_reference`, a local, deterministic,
-  network-free simulator, and `research.execution.enabled` ships False.
+**2026-11-01 amendment:** [ADR 0006](0006-broker-access-expansion.md) records
+operator authorization to implement separate human-confirmed production access.
+Canonical D6 carries the corresponding scope amendment. The strategy execution
+cycle and its registered adapters remain paper/sandbox-only. Nothing is activated
+by the amendment; implementation merges require gatekeeper ALLOW and passing gates.
+
+- **Status:** sandbox strategy execution implemented through W5, disabled by default.
+  Registered strategy adapters are `paper_reference`, `webull_sandbox` and
+  `coinbase_sandbox`. ADR 0006 additionally authorizes implementation of separate
+  operator-confirmed production commands, never selection by the strategy registry.
+  No runtime arming or particular transaction is authorized by this documentation.
 - **Deciders:** Louis Brailey (operator). Direction of 2026-09-11: Signal Forge is "no longer
   research use only"; end-to-end operational control granted.
 - **Full text:** `docs/research/options_designs/D6_execution_adr.md` — this file is a short
@@ -118,3 +124,68 @@ than inert.
 $25,000 reference account is `min($1,000, 0.5% x equity)` = **$125**, so no
 instrument priced above $125 can be opened under v1. See
 `docs/PAPER_PROBATION_ACTIVATION.md` ("The OPEN lane") and drill V30.
+
+## Increment W5 — two vendor SANDBOX adapters (2026-11-01)
+
+Operator direction of 2026-11-01: connect Webull and Coinbase to Signal Forge.
+Within this ADR that can mean exactly one thing — **sandbox endpoints only** —
+and that is what landed. Nothing here touches a production host, and nothing
+here changes the default posture: `execution.enabled` still ships False,
+`paper_reference` is still the default adapter name, and nothing is armed.
+
+What landed:
+
+* `execution/brokers/webull_sandbox.py` — Webull OpenAPI **test environment**,
+  US equities, `LIMIT`/`DAY`, no short opening, `place_combo` refused. Request
+  signing is re-implemented from Webull's published scheme over plain REST
+  (D6-A: no vendor SDK). The one host it will accept a response from is
+  `api.sandbox.webull.com`, the sole entry of its `PAPER_HOST_ALLOWLIST`.
+  Credentials are the sandbox app key pair, read by NAME only
+  (`SF_EXECUTION_WEBULL_SANDBOX_APP_KEY` / `..._APP_SECRET`, or the Keychain
+  items `webull_sandbox.app_key` / `webull_sandbox.app_secret` under service
+  `signalforge-execution`) — §16 unchanged.
+* `execution/brokers/coinbase_sandbox.py` — Coinbase Advanced Trade
+  **sandbox**, single spot `BASE-USD` products, `LIMIT` good-till-date at the
+  intent's expiry, no short opening, `place_combo` refused. The sandbox is
+  unauthenticated by Coinbase's design, so this adapter holds **no credential**.
+  Its only allowlisted host is `api-sandbox.coinbase.com`. The sandbox answers
+  with static bodies: it rehearses the wire format and the OMS state machine,
+  and produces no evidence — exactly as `paper_reference` produces none.
+* `execution/brokers/vendor_base.py` — the request/response shapes both
+  adapters use, and **no HTTP client**. The client is
+  `signalforge/sandbox_http.py`, *outside* the execution package, injected by
+  `cli.py` (the one sanctioned importer). So the posture tests that assert the
+  execution package imports no HTTP client, no `socket` and no `urllib` still
+  hold, unchanged.
+* `ADAPTER_NAMES` is now `("paper_reference", "webull_sandbox",
+  "coinbase_sandbox")`; the registry still maps names to loaders, and no
+  adapter is constructed by an import.
+
+Eligibility A1–A4 for both: A1 by a pre-submission lookup on `client_order_id`
+(and, for Coinbase, by resolving its `DUPLICATE_CLIENT_ORDER_ID` rejection
+rather than retrying); A2 by refusal — there is no leg-by-leg path; A3 by
+reading the account/portfolio id out of the broker's own body and the host out
+of the transport's report of the connection, every call; A4 by endpoints that
+return filled, cancelled, expired and rejected orders.
+
+**The deviation from §0, recorded rather than glossed.** §0 scopes this phase
+to `paper_reference` "and one vendor **paper** endpoint". This increment adds
+**two** sandbox endpoints. Both are inside the boundary §0 draws (no real-money
+endpoint, no credential acquisition, no LLM on the path) and the count is the
+only departure; it is the operator's explicit direction and is recorded here so
+D6 §0 and this pointer disagree in exactly one known place. A live-money
+endpoint remains a separate decision and a separate ADR (§22).
+
+**Two further limitations, stated so no one infers the opposite.** Coinbase's
+`clock()` reports the venue open at all times (spot crypto has no session), so
+the cycle's local-calendar cross-check (§11) is what gates opening through it:
+disagreement blocks, which means opening is possible only inside the local
+equity session. And neither adapter marks positions to a price: Coinbase
+equity is quote cash only, Webull equity is the broker's own net liquidation
+figure. An unmarked holding never inflates the equity the limits read.
+
+Safety tests: `tests/execution/test_webull_sandbox.py`,
+`tests/execution/test_coinbase_sandbox.py`, `tests/test_sandbox_http.py`, all
+against fake transports — no socket is opened in the test suite. The S1/S15
+safety suites and the execution posture suite pass unchanged except for the
+`ADAPTER_NAMES` assertion and the module list they enumerate.

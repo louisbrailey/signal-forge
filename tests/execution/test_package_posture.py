@@ -19,6 +19,11 @@ EXECUTION_MODULES = (
     "signalforge.execution",
     "signalforge.execution.brokers",
     "signalforge.execution.brokers.paper_reference",
+    "signalforge.execution.brokers.vendor_base",
+    "signalforge.execution.brokers.production",
+    "signalforge.execution.production",
+    "signalforge.execution.brokers.webull_sandbox",
+    "signalforge.execution.brokers.coinbase_sandbox",
     "signalforge.execution.arming",
     "signalforge.execution.calendarcheck",
     "signalforge.execution.credentials",
@@ -59,6 +64,8 @@ def test_importing_every_submodule_performs_no_network_call_and_reads_no_credent
 import importlib, os, sys
 
 os.environ["SF_EXECUTION_BROKER_KEY_ID"] = "would-be-read-if-anything-read-it"
+os.environ["SF_EXECUTION_WEBULL_SANDBOX_APP_KEY"] = "planted"  # pragma: allowlist secret
+os.environ["SF_EXECUTION_WEBULL_SANDBOX_APP_SECRET"] = "planted"  # pragma: allowlist secret
 read = []
 real_get = os.environ.get
 
@@ -249,4 +256,4 @@ def test_an_adapter_is_reachable_only_through_the_config_selector() -> None:
         if isinstance(value, PaperReferenceBroker)  # pragma: no cover - must stay empty
     ]
     assert not module_level_adapters
-    assert brokers.ADAPTER_NAMES == ("paper_reference",)
+    assert brokers.ADAPTER_NAMES == ("paper_reference", "webull_sandbox", "coinbase_sandbox")

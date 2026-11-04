@@ -46,7 +46,7 @@ __all__ = [
 
 #: Every adapter this build can select, by name. A name absent from this tuple
 #: cannot be selected however the config is written.
-ADAPTER_NAMES: tuple[str, ...] = ("paper_reference",)
+ADAPTER_NAMES: tuple[str, ...] = ("paper_reference", "webull_sandbox", "coinbase_sandbox")
 
 
 class AdapterNotSelectable(RuntimeError):
@@ -72,8 +72,25 @@ def _load_paper_reference() -> Callable[..., BrokerAdapter]:
 
 #: name -> a loader returning the adapter factory. The loader is called only
 #: from :func:`build_adapter`; importing this module calls none of them.
+def _load_webull_sandbox() -> Callable[..., BrokerAdapter]:
+    from signalforge.execution.brokers.webull_sandbox import WebullSandboxBroker
+
+    return WebullSandboxBroker
+
+
+def _load_coinbase_sandbox() -> Callable[..., BrokerAdapter]:
+    from signalforge.execution.brokers.coinbase_sandbox import CoinbaseSandboxBroker
+
+    return CoinbaseSandboxBroker
+
+
 _REGISTRY: dict[str, Callable[[], Callable[..., BrokerAdapter]]] = {
     "paper_reference": _load_paper_reference,
+    # Increment W5 (2026-11-01): two vendor SANDBOX adapters, each pinned to
+    # its vendor's test host by a one-entry allowlist in its own module. Neither
+    # holds a production host literal; see docs/decisions/0003-execution-layer.md.
+    "webull_sandbox": _load_webull_sandbox,
+    "coinbase_sandbox": _load_coinbase_sandbox,
 }
 
 

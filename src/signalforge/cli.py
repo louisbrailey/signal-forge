@@ -11,8 +11,10 @@ from typing import TYPE_CHECKING, Annotated, Any
 import typer
 
 if TYPE_CHECKING:
+    from pydantic import SecretStr
     from sqlalchemy.orm import Session
 
+    from signalforge.config.research import ResearchConfig
     from signalforge.data.options_backfill import (
         BackfillRequestPlan,
         OptionsCoverageSummary,
@@ -30,7 +32,10 @@ from signalforge.observability import configure_logging
 
 app = typer.Typer(
     add_completion=False,
-    help="Signal Forge — research first; execution is off by default and requires arming.",
+    help=(
+        "Signal Forge — research first; sandbox execution needs arming; "
+        "production needs per-action confirmation. Both default off."
+    ),
 )
 killswitch_app = typer.Typer(help="Emergency kill switch (S6): halt polling, jobs, alerts, paper.")
 app.add_typer(killswitch_app, name="killswitch")
@@ -5073,10 +5078,14 @@ def _execution_adapter(
         typer.secho(f"no adapter: {exc}", fg=typer.colors.YELLOW)
         return None
 
-    if name != "paper_reference":  # pragma: no cover - only one adapter exists
+    if name in ("webull_sandbox", "coinbase_sandbox"):
+        return _vendor_sandbox_adapter(
+            session, cfg, name, expected_account_id=expected_account_id, now=now
+        )
+    if name != "paper_reference":  # pragma: no cover - every registered name is handled above
         raise RuntimeError(
-            f"execution.adapter_name={name!r} is registered but this CLI knows how to "
-            "assemble the constructor arguments for 'paper_reference' only"
+            f"execution.adapter_name={name!r} is registered but this CLI does not know how to "
+            "assemble its constructor arguments"
         )
     try:
         account = SimulatedAccount(
@@ -5106,6 +5115,67 @@ def _execution_adapter(
         book=PaperReferenceOrderStore(session),
     )
     return adapter
+
+
+#: Keychain item names (service ``signalforge-execution``) for the Webull
+#: sandbox key pair, tried when the env-var NAMES in
+#: ``execution.credentials.ENV_VAR_NAMES`` are unset. Names only, never values.
+WEBULL_SANDBOX_KEYCHAIN_ITEMS = ("webull_sandbox.app_key", "webull_sandbox.app_secret")
+
+
+def _vendor_sandbox_adapter(
+    session: Session,
+    cfg: ResearchConfig,
+    name: str,
+    *,
+    expected_account_id: str,
+    now: datetime,
+) -> BrokerAdapter | None:
+    """Assemble a vendor SANDBOX adapter (Increment W5).
+
+    This is the one place the execution layer meets an HTTP client: the
+    transport is ``signalforge.sandbox_http.HttpxTransport``, constructed here
+    and injected, so nothing under ``signalforge.execution`` imports ``httpx``
+    and the posture tests that assert that keep holding. Credentials are
+    resolved by NAME (§16) — env var first, keychain second — and a missing
+    one is a refusal that builds no adapter, never a fallback.
+    """
+    from signalforge.execution import brokers as brokers_mod
+    from signalforge.execution.brokers.paper_reference import ExecutionEventAudit
+    from signalforge.execution.credentials import (
+        CredentialRef,
+        CredentialSource,
+        CredentialUnavailable,
+        resolve_credential,
+    )
+    from signalforge.sandbox_http import HttpxTransport
+
+    transport = HttpxTransport()
+    common = {
+        "audit": ExecutionEventAudit(session),
+        "expected_account_id": expected_account_id,
+        "transport": transport,
+        "now": _dt_now_utc,
+    }
+    if name == "coinbase_sandbox":
+        # Coinbase's sandbox is unauthenticated by design: no credential exists.
+        return brokers_mod.build_adapter(cfg, **common)
+
+    def _secret(env_name: str, keychain_item: str) -> SecretStr:
+        try:
+            return resolve_credential(CredentialRef(CredentialSource.ENV, env_name))
+        except CredentialUnavailable:
+            return resolve_credential(CredentialRef(CredentialSource.KEYCHAIN, keychain_item))
+
+    try:
+        app_key = _secret("SF_EXECUTION_WEBULL_SANDBOX_APP_KEY", WEBULL_SANDBOX_KEYCHAIN_ITEMS[0])
+        app_secret = _secret(
+            "SF_EXECUTION_WEBULL_SANDBOX_APP_SECRET", WEBULL_SANDBOX_KEYCHAIN_ITEMS[1]
+        )
+    except CredentialUnavailable as exc:
+        typer.secho(f"no adapter: {exc}", fg=typer.colors.YELLOW)
+        return None
+    return brokers_mod.build_adapter(cfg, app_key=app_key, app_secret=app_secret, **common)
 
 
 def _dt_now_utc() -> datetime:
@@ -6010,6 +6080,281 @@ def _configured_adapter_name() -> str:
             return effective_research_config(session).execution.adapter_name
     except Exception:
         return "paper_reference"
+
+
+# Production is intentionally NOT added to the strategy adapter registry.
+broker_app = typer.Typer(help="Human-confirmed production broker access; off by default.")
+app.add_typer(broker_app, name="broker")
+
+
+@broker_app.callback()
+def broker_options(
+    ctx: typer.Context,
+    provider: str = typer.Option("", help="coinbase or webull"),
+    account: str = typer.Option("", help="Expected portfolio UUID / Webull account ID"),
+    key_ref: str = typer.Option("", help="env:NAME or keychain:ITEM; never a credential value"),
+    secret_ref: str = typer.Option("", help="env:NAME or keychain:ITEM"),
+    token_ref: str = typer.Option("", help="Webull operator-provisioned access token reference"),
+    allow_production_reads: bool = False,
+    allow_production_actions: bool = False,
+    allow_production_transfers: bool = False,
+) -> None:
+    ctx.obj = {
+        "provider": provider,
+        "account": account,
+        "key_ref": key_ref,
+        "secret_ref": secret_ref,
+        "token_ref": token_ref,
+        "reads": allow_production_reads,
+        "actions": allow_production_actions,
+        "transfers": allow_production_transfers,
+    }
+
+
+def _production_ledger() -> Any:
+    from signalforge.execution.production import AdmissionLedger, default_admission_path
+
+    # No CLI override: selecting another database must not bypass cross-app holds.
+    return AdmissionLedger(default_admission_path())
+
+
+def _production_broker(options: dict[str, Any]) -> tuple[Any, Any]:
+    from signalforge.execution.brokers.production import ProductionBroker
+    from signalforge.execution.credentials import CredentialRef, CredentialSource
+    from signalforge.execution.production import ProductionRefusal
+    from signalforge.sandbox_http import HttpxTransport
+
+    if not options["reads"]:
+        raise ProductionRefusal(
+            "production access disabled; explicit --allow-production-reads required"
+        )
+
+    def ref(value: str) -> CredentialRef:
+        source, separator, name = value.partition(":")
+        if not separator or source not in {"env", "keychain"}:
+            raise ProductionRefusal(
+                "use an operator-provisioned env:NAME or keychain:ITEM reference"
+            )
+        return CredentialRef(CredentialSource(source), name)
+
+    key, secret = ref(options["key_ref"]), ref(options["secret_ref"])
+    token = ref(options["token_ref"]) if options["token_ref"] else None
+    transport = HttpxTransport()
+    try:
+        broker = ProductionBroker(
+            options["provider"], options["account"], transport, key, secret, token, enabled=True
+        )
+    except Exception:
+        transport.close()
+        raise
+    return broker, transport
+
+
+def _production_error() -> None:
+    # Never render exceptions that might include a credential or provider response.
+    typer.secho(
+        "Broker operation refused or unavailable. No automatic retry; inspect local review status.",
+        fg=typer.colors.RED,
+    )
+    raise typer.Exit(1)
+
+
+@broker_app.command("capabilities")
+def broker_capabilities() -> None:
+    """Offline implemented scope, with no inferred entitlement or runtime verification."""
+    typer.echo(
+        "Production defaults OFF; requested account/data/trade/transfer access is not a grant."
+    )
+    typer.echo(
+        "Coinbase: portfolio attestation, scoped accounts/balances, orders/fills, "
+        "products, "
+        "cancel and synchronous internal portfolio transfers. Ambiguous transfers retain holds."
+    )
+    typer.echo(
+        "Webull retail: account attestation, balances, positions, order reads. "
+        "Equity LIMIT/DAY estimate mode and exact tracked-order cancellation supported."
+    )
+    typer.echo(
+        "Orders: Coinbase spot LIMIT/GTD supports explicit accept_rechecked_estimate policy. "
+        "Webull equity LIMIT/DAY uses the same explicit policy; default hard caps refuse."
+    )
+    typer.echo(
+        "External withdrawals, retail Webull funding, derivatives, shorting, order replacement "
+        "and streaming: UNSUPPORTED."
+    )
+    typer.echo(
+        "Granted: unknown until audit. Verified: no production runtime verification recorded. "
+        "No strategy-cycle integration."
+    )
+
+
+@broker_app.command("audit")
+def broker_audit(ctx: typer.Context) -> None:
+    """Read production account identity and provider-granted permission metadata."""
+    import json
+    from dataclasses import asdict
+
+    transport = None
+    try:
+        broker, transport = _production_broker(ctx.obj)
+        typer.echo(json.dumps(asdict(broker.attest()), default=str, indent=2))
+    except Exception:
+        _production_error()
+    finally:
+        if transport:
+            transport.close()
+
+
+@broker_app.command("read")
+def broker_read(ctx: typer.Context, resource: str, identifier: str = "") -> None:
+    """Read a supported resource; partial snapshots refuse."""
+    import json
+
+    from signalforge.observability import redact
+
+    transport = None
+    try:
+        broker, transport = _production_broker(ctx.obj)
+        typer.echo(json.dumps(redact(broker.read(resource, identifier)), default=str, indent=2))
+    except Exception:
+        _production_error()
+    finally:
+        if transport:
+            transport.close()
+
+
+@broker_app.command("review")
+def broker_review(terms: Path) -> None:
+    """Save immutable action JSON offline; see `schema` for fields."""
+    from datetime import UTC
+
+    from signalforge.execution.production import Action
+
+    try:
+        action = Action.model_validate_json(terms.read_text())
+        if not datetime.now(UTC) < action.expires_at <= datetime.now(UTC) + timedelta(minutes=10):
+            raise ValueError("review expiry must be within ten minutes")
+        ledger = _production_ledger()
+        token = ledger.save(action)
+        typer.echo(action.canonical())
+        typer.echo("One-use confirmation (retain locally): " + action.confirmation(token))
+    except Exception:
+        _production_error()
+
+
+@broker_app.command("schema")
+def broker_schema() -> None:
+    """Print the exact offline action JSON schema; all extra fields are refused."""
+    import json
+
+    from signalforge.execution.production import Action
+
+    typer.echo(json.dumps(Action.model_json_schema(), indent=2))
+
+
+@broker_app.command("status")
+def broker_review_status(action_id: str) -> None:
+    """Show immutable terms and durable outcome; never clears a hold."""
+    try:
+        action, state, outcome = _production_ledger().read(action_id)
+        typer.echo(action.canonical())
+        typer.echo(f"state={state} outcome_id={outcome}")
+    except Exception:
+        _production_error()
+
+
+def _production_killed() -> bool:
+    from signalforge.execution.oms import read_execution_kill_state
+
+    try:
+        k2 = read_execution_kill_state()
+        return get_kill_switch().is_active() or k2.engaged or not k2.readable
+    except Exception:
+        return True
+
+
+@broker_app.command("submit")
+def broker_submit(ctx: typer.Context, action_id: str) -> None:
+    """One explicit action from a trusted local terminal; no piped/automated confirmation."""
+    import sys
+
+    from signalforge.execution.production import submit_review
+
+    # A typed phrase from an HTTP request, command argument, or pipe is not human proof.
+    # This deliberately has no --yes/--confirm/--confirmation-token argument.
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        typer.echo("Submission requires a trusted local interactive terminal.")
+        raise typer.Exit(1)
+    transport = None
+    try:
+        if not ctx.obj["actions"] or not ctx.obj["reads"]:
+            raise ValueError("production gates disabled")
+        ledger = _production_ledger()
+        action, state, _ = ledger.read(action_id)
+        if state != "REVIEWED":
+            raise ValueError("review consumed")
+        typer.echo(action.canonical())
+        if action.fee_policy == "accept_rechecked_estimate":
+            typer.echo("ESTIMATES ONLY: actual fees/debit may exceed pre-send admission ceilings.")
+        typer.echo("This changes a production account. Review every field above.")
+        confirmation = typer.prompt(
+            "Enter the complete one-use confirmation from your saved review"
+        )
+        broker, transport = _production_broker(ctx.obj)
+        typer.echo(
+            submit_review(
+                ledger,
+                action_id,
+                confirmation,
+                broker,
+                enabled=ctx.obj["actions"],
+                transfers_enabled=ctx.obj["transfers"],
+                kill_active=_production_killed,
+            )
+        )
+    except Exception:
+        _production_error()
+    finally:
+        if transport:
+            transport.close()
+
+
+@broker_app.command("reconcile")
+def broker_reconcile(ctx: typer.Context, action_id: str) -> None:
+    """Read authoritative terminal evidence; missing results never release UNKNOWN."""
+    from signalforge.execution.production import reconcile_review
+
+    transport = None
+    try:
+        broker, transport = _production_broker(ctx.obj)
+        typer.echo(reconcile_review(_production_ledger(), action_id, broker))
+    except Exception:
+        _production_error()
+    finally:
+        if transport:
+            transport.close()
+
+
+@broker_app.command("abandon-unsent")
+def broker_abandon_unsent(action_id: str) -> None:
+    """Recover a pre-send crash; never clears SUBMITTING, UNKNOWN, or acknowledged exposure."""
+    import sys
+
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        typer.echo("Recovery requires a trusted local interactive terminal.")
+        raise typer.Exit(1)
+    try:
+        ledger = _production_ledger()
+        action, state, _ = ledger.read(action_id)
+        typer.echo(action.canonical())
+        if state != "RESERVED":
+            raise ValueError("potential send cannot be abandoned")
+        if typer.prompt("Type ABANDON plus the action id") != "ABANDON " + action_id:
+            raise ValueError("confirmation mismatch")
+        ledger.abort_unsent(action_id)
+        typer.echo("Unsent review consumed and hold released. This review can never submit.")
+    except Exception:
+        _production_error()
 
 
 def main() -> None:

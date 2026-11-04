@@ -1,6 +1,22 @@
 # D6 — Execution-layer ADR (draft for approval)
 
-**Status: DRAFT, awaiting operator approval. Nothing here is implemented.**
+> **2026-11-01 production-access amendment (ADR 0006).** The operator explicitly
+> requested implementation of account, trading and transfer access in both apps.
+> The original paper-only scope below remains the specification for the automated
+> strategy execution cycle. ADR 0006 additionally permits separately constructed,
+> default-disabled production account access and human-confirmed operations.
+> Production identity attestation must never satisfy or weaken `is_paper()`.
+> No production adapter may enter the automated strategy registry/cycle. The
+> existing S15 inbound/outbound isolation, deterministic risk logic, paper-ledger
+> immutability and credential-by-name restrictions remain binding. Transfers use
+> a separate review/confirmation protocol, never an order intent. This amendment
+> authorizes implementation, not a particular trade, transfer or runtime arming.
+> It supersedes the blanket prohibition on implementing production endpoints in
+> §§0 and 22 only for that separate operator-controlled surface. Merge requires
+> gatekeeper ALLOW and passing gates for the actual implementation diff.
+
+**Historical specification status at drafting:** DRAFT. Implementation history and
+current scope are recorded in ADR 0003 and ADR 0006; the original text follows.
 No code, config, schema, contract, test, or gate was changed to produce this document. The only
 file written by this workstream is this file.
 
