@@ -47,7 +47,17 @@ def test_raw_data_through_all_books_enforces_eligibility_and_shared_account():
     from signalforge.backtest.actions import Split
     from signalforge.data.calendar import sessions
     from signalforge.data.series import PriceSeries
+    from signalforge.domain import Horizon
     from signalforge.research.action_replay import ActionDataset, compare
+    from signalforge.research.strategies import default_strategies
+
+    # One book per registered non-intraday strategy; derive it from the
+    # registry so adding a strategy does not silently drop a book here.
+    expected_books = {
+        s.spec().versioned_key
+        for s in default_strategies()
+        if s.spec().horizon is not Horizon.INTRADAY
+    }
 
     dates = tuple(sessions(date(2023, 1, 3), date(2024, 3, 1)))
     series = {}
@@ -75,7 +85,7 @@ def test_raw_data_through_all_books_enforces_eligibility_and_shared_account():
             "AAA": {"instrument_type": "stock", "sector": "test"},
         },
     )
-    assert len(report["books"]) == 5
+    assert set(report["books"]) == expected_books
     assert any(
         s["result"]["fills"] for b in report["books"].values() for s in b["scenarios"].values()
     )
