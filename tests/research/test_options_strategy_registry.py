@@ -66,6 +66,8 @@ def test_default_strategies_is_unchanged_by_the_options_family() -> None:
         "tsmom_etf.medium_swing",
         "turn_of_month.short_swing",
         "tsmom_etf.position",
+        "high52_breakout.medium_swing",
+        "trend_pullback.short_swing",
     ]
     assert not any(k.startswith("options") for k in keys)
 
