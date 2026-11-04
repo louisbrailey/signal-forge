@@ -180,6 +180,17 @@ def run_strategy_over_universe(
     bar_size: str = "15m",
     min_bars: int = 60,
 ) -> StrategyBacktestResult:
+    # The frozen per-instrument engine has no funded share quantities and
+    # ignores commission fields. Never label its output net of those fees.
+    # Keep that engine byte-identical for existing studies; reject unsupported
+    # requests at this reporting boundary and direct callers to funded replay.
+    if cost_model is not None and (
+        cost_model.commission_per_share != 0 or cost_model.commission_min_per_order != 0
+    ):
+        raise ValueError(
+            "Nonzero commissions require the funded replay engine with actual share "
+            "quantities; the legacy per-instrument engine models spread/slippage only."
+        )
     proxy = PriceSeries.load(session, proxy_symbol, start, end, source=source)
     regimes = regime_lookup(proxy) if len(proxy) else {}
     fn = signal_fn_for(strategy, regime_by_date=regimes, allow_short=allow_short)

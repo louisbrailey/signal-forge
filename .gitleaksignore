@@ -7,3 +7,9 @@ c11cbeaa2d01be2e136d1a7a4d3b032407b6564c:tests/paper/test_crypto_ledger.py:gener
 # Reviewed: cryptography isinstance key-type guard, not a credential or string literal.
 # Exact historical fingerprint only; no rule/path/value-wide exclusion.
 9354791f924ebbd3373e6b2cf3f89c35f950b53e:src/signalforge/execution/brokers/production.py:generic-api-key:60
+
+# Reviewed 2026-11-04: crypto strategy identifiers in historical paper/research
+# tests (start_book key and long_only.key assertion), not API credentials.
+# Exact commit/rule/file/line fingerprints only; no broad rule exclusion.
+f580498c2c8838b756c87101192caa8ae8177de5:tests/paper/test_crypto_ledger.py:generic-api-key:286
+3253d0dd103bded5761f5ddd111bb876f49d68d4:tests/research/test_universe_program_strategies.py:generic-api-key:232

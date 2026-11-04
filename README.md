@@ -60,6 +60,13 @@ stored Massive bars, baseline comparisons, saved experiments, and JSON export.
 Kronos never changes trade decisions. Legacy paper-accounting limitations are
 explicitly disclosed in the operations guide and dashboard.
 
+The [November 4 cost/accounting audit](reports/COST_ATTRIBUTION_2026-11-04.md)
+separates commission and fill-friction losses, documents corrected instrument
+classifications, and identifies missing historical earnings coverage. The
+offline `scripts/cost_attribution_report.py` reproduces fixed cost comparisons
+with funded quantities and shared cash. These are previously observed research
+results; they do not authorize promotion or establish reliable daily income.
+
 ## Requirements
 
 - macOS / Linux

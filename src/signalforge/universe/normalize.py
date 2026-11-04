@@ -18,7 +18,7 @@ from signalforge.config.research import UniversePipelineConfig
 from signalforge.data.adapters.base import AdapterCapability
 from signalforge.data.ingest import record_feed_success
 from signalforge.data.repository import get_or_create_instrument
-from signalforge.db.models import BulkFile, Instrument, OHLCVDaily, UniverseTicker
+from signalforge.db.models import AuditLog, BulkFile, Instrument, OHLCVDaily, UniverseTicker
 from signalforge.domain import FeedType, LatencyCategory
 from signalforge.observability import get_logger
 from signalforge.universe.bulk import load_bulk_rows
@@ -51,6 +51,7 @@ class NormalizeReport:
     rows_skipped: int = 0
     sessions: int = 0
     seconds: float = 0.0
+    classifications_corrected: int = 0
 
 
 def normalize_symbols(
@@ -71,19 +72,40 @@ def normalize_symbols(
     if not wanted:
         return rep
 
-    types: dict[str, str] = {
-        str(tk): str(st)
-        for tk, st in session.execute(
-            select(UniverseTicker.ticker, UniverseTicker.security_type).where(
-                UniverseTicker.ticker.in_(wanted)
-            )
+    references = {
+        str(tk): (str(st), refreshed)
+        for tk, st, refreshed in session.execute(
+            select(
+                UniverseTicker.ticker, UniverseTicker.security_type, UniverseTicker.refreshed_at
+            ).where(UniverseTicker.ticker.in_(wanted))
         ).all()
     }
     inst_ids: dict[str, int] = {}
     for sym in wanted:
-        inst = get_or_create_instrument(
-            session, sym, instrument_type="etf" if types.get(sym) == "ETF" else "stock"
-        )
+        reference = references.get(sym)
+        kind = {"ETF": "etf", "CS": "stock"}.get(reference[0]) if reference else None
+        inst = get_or_create_instrument(session, sym, instrument_type=kind or "stock")
+        # A bar ingest can create an instrument before reference discovery.
+        # get_or_create intentionally preserves existing rows, so reconcile an
+        # explicit sourced type here, not through an unsourced default setter.
+        if kind is not None and reference is not None and inst.instrument_type != kind:
+            session.add(
+                AuditLog(
+                    ts=datetime.now(UTC),
+                    action="instrument.classification_reconciled",
+                    entity=sym,
+                    before_json={"instrument_type": inst.instrument_type},
+                    after_json={
+                        "instrument_type": kind,
+                        "source_table": "universe_ticker",
+                        "security_type": reference[0],
+                        "refreshed_at": reference[1].isoformat(),
+                        "point_in_time": False,
+                    },
+                )
+            )
+            inst.instrument_type = kind
+            rep.classifications_corrected += 1
         inst_ids[sym] = inst.id
     rep.symbols = len(inst_ids)
 
