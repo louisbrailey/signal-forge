@@ -75,3 +75,51 @@ def test_crypto_h4_is_the_baseline_plus_two_declared_variants() -> None:
         if b is not None:
             n_base += 1
     assert n_base > 0 and n_volx <= n_base
+
+
+def test_crypto_h3_is_two_new_rules_without_the_baseline() -> None:
+    from signalforge.research.fx.hourly import (
+        CRYPTO_H3_STRATEGIES,
+        CRYPTO_H3_VERSION,
+        _atr_over_close_history,
+    )
+
+    assert HOURLY_STRATEGIES[CRYPTO_H3_VERSION] is CRYPTO_H3_STRATEGIES
+    quiet, wide = CRYPTO_H3_STRATEGIES
+    assert [s.key for s in CRYPTO_H3_STRATEGIES] == [
+        "crypto_h_donchian168_trail72_quiet",
+        "crypto_h_donchian336_trail168",
+    ]
+    assert quiet.trail_channel == 72 and wide.trail_channel == 168
+    assert wide.params["channel"] == 336 and wide.params["safety_time"] == 1440
+    base = CRYPTO_H1_STRATEGIES[0]
+    rng = np.random.default_rng(9)
+    closes = 2000 * np.exp(np.cumsum(rng.normal(0, 0.012, 2500)))
+    t0 = datetime(2022, 1, 1, tzinfo=UTC)
+    rows = [
+        (t0 + timedelta(hours=i), c, c * 1.004, c * 0.996, c, 0.0) for i, c in enumerate(closes)
+    ]
+    series = PriceSeries.from_bars("ETHUSD", rows)
+    n_q = n_b = 0
+    for t in range(quiet.warmup, 2490, 5):
+        head = series.head(t)
+        q, b = quiet.signal(head, t), base.signal(head, t)
+        if q is not None:
+            n_q += 1
+            assert b is not None and (q.direction, q.stop_price) == (b.direction, b.stop_price)
+        if b is not None:
+            n_b += 1
+        # the history window never includes the signal bar: shocking it changes nothing
+        hist = _atr_over_close_history(head, 24, 240)
+        shocked = PriceSeries(
+            head.symbol,
+            head.dates,
+            head.open,
+            head.high.copy(),
+            head.low.copy(),
+            head.close.copy(),
+            head.volume,
+        )
+        shocked.high[-1] *= 5
+        assert hist is not None and np.allclose(_atr_over_close_history(shocked, 24, 240), hist)
+    assert 0 < n_q < n_b
