@@ -32,7 +32,7 @@ from signalforge.backtest.costs import CostModel
 from signalforge.backtest.engine import SimTrade
 from signalforge.backtest.metrics import compute_metrics
 from signalforge.db.models import CurrencySealedTest
-from signalforge.research.fx.continuity import missing_intervals
+from signalforge.research.fx.continuity import continuity_breach
 from signalforge.research.fx.harness import (
     CRYPTO2_MARKET,
     CRYPTO3_MARKET,
@@ -210,11 +210,11 @@ def run_sealed_test(
     reasons = []
     if mk.name == "Crypto":
         for pair, series in sorted(series_by_pair.items()):
-            missing = missing_intervals(
+            breach = continuity_breach(
                 series.dates, timedelta(days=1), start=seal_from, end=seal_to
             )
-            if missing:
-                reasons.append(f"sealed data continuity: {pair} missing {missing} daily bars")
+            if breach:
+                reasons.append(f"sealed data continuity: {pair} sealed window {breach}")
     if m.n_trades < SEALED_MIN_TRADES:
         reasons.append(f"sealed trades {m.n_trades} < {SEALED_MIN_TRADES}")
     if m.expectancy_r < SEALED_MIN_EXPECTANCY_R:
