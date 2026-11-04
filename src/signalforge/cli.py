@@ -652,6 +652,104 @@ def crypto_paper_status(
     typer.echo(st["notice"])
 
 
+crypto_hourly_paper_app = typer.Typer(
+    help="SIMULATED HOURLY crypto paper book for a SEALED_PASS hourly strategy (CRYPTO-H4). "
+    "No broker; no order is placed."
+)
+crypto_app.add_typer(crypto_hourly_paper_app, name="paper-hourly")
+
+
+@crypto_hourly_paper_app.command("start")
+def crypto_hourly_paper_start(
+    strategy: Annotated[str, typer.Argument(help="e.g. crypto_h_donchian168_trail72_volx")],
+    confirm: Annotated[bool, typer.Option("--confirm", help="Required.")] = False,
+) -> None:
+    """Create the prospective hourly paper book (start = current hour UTC,
+    180-day observation). Refused unless the hourly version is SEALED_PASS."""
+    from signalforge.db.session import session_scope
+    from signalforge.paper.crypto_hourly_ledger import PaperBookRefused, start_book
+
+    if not confirm:
+        typer.echo("Refusing without --confirm: the start hour is fixed once set.")
+        raise typer.Exit(2)
+    with session_scope(write=True) as session:
+        try:
+            book = start_book(session, strategy)
+        except PaperBookRefused as exc:
+            typer.echo(f"Refused: {exc}")
+            raise typer.Exit(1) from None
+        typer.echo(
+            f"Hourly paper book {book.strategy_key} {book.version}: {', '.join(book.pairs)}; "
+            f"entries from {book.start_at.isoformat()}; observation to "
+            f"{book.observation_end.isoformat()}."
+        )
+    typer.echo("SIMULATED — no order was placed; no broker is connected.")
+
+
+@crypto_hourly_paper_app.command("run")
+def crypto_hourly_paper_run(
+    strategy: Annotated[str, typer.Argument()] = "crypto_h_donchian168_trail72_volx",
+) -> None:
+    """Run one cycle now (the scheduler does this hourly when CRYPTO_PAPER_ENABLED)."""
+    from signalforge.db.session import session_scope
+    from signalforge.paper.crypto_hourly_ledger import PaperBookRefused, run_cycle
+
+    with session_scope(write=True) as session:
+        try:
+            rep = run_cycle(session, strategy)
+        except PaperBookRefused as exc:
+            typer.echo(f"Refused: {exc}")
+            raise typer.Exit(1) from None
+    typer.echo(f"Cycle through {rep.last_bar}:")
+    for label, items in (
+        ("opened", rep.opened),
+        ("closed", rep.closed),
+        ("marked", rep.marked),
+        ("NOT opened (kill switch)", rep.skipped_open_kill_switch),
+        ("NOT opened (data hold)", rep.skipped_open_data_hold),
+        ("DIVERGENCE", rep.divergences),
+    ):
+        for it in items:
+            typer.echo(f"  {label}: {it}")
+    typer.echo("SIMULATED — no order was placed; no broker is connected.")
+
+
+@crypto_hourly_paper_app.command("status")
+def crypto_hourly_paper_status(
+    strategy: Annotated[str, typer.Argument()] = "crypto_h_donchian168_trail72_volx",
+) -> None:
+    """Show the hourly paper book: open trades, closed record vs the sealed result."""
+    from signalforge.db.session import session_scope
+    from signalforge.paper.crypto_hourly_ledger import status as _status
+
+    with session_scope() as session:
+        st = _status(session, strategy)
+    if st.get("book") is None and "start_at" not in st:
+        typer.echo(f"No hourly paper book for {strategy}.")
+        return
+    typer.echo(
+        f"{st['strategy_key']} {st['version']} ({st['paper_version']}): {', '.join(st['pairs'])}; "
+        f"from {st['start_at']} to {st['observation_end']}, bars through {st['last_bar_at']}"
+    )
+    exp = st["expectancy_r"]
+    if st.get("data_hold"):
+        typer.echo(f"  NEW ENTRIES HELD: {st['data_hold']}")
+    typer.echo(
+        f"  closed {st['closed_trades']}, expectancy "
+        f"{'n/a' if exp is None else f'{exp:+.3f}R'} (sealed {st['sealed_expectancy_r']:+.3f}R), "
+        f"total {st['total_r']:+.2f}R (illustrative ${st['illustrative_usd']:+,.0f})"
+    )
+    for o in st["open"]:
+        mark = "n/a" if o["mark_r"] is None else f"{o['mark_r']:+.2f}R"
+        typer.echo(
+            f"  OPEN {o['pair']} {o['direction']} since {o['entry_at']} "
+            f"@ {o['entry_price']} stop {o['stop_price']} mark {mark}"
+        )
+    for d in st["divergences"]:
+        typer.echo(f"  DIVERGENCE {d}")
+    typer.echo(st["notice"])
+
+
 @data_app.command("crypto-hourly-ingest")
 def data_crypto_hourly_ingest(
     since: Annotated[str, typer.Option(help="First UTC day to fetch (YYYY-MM-DD).")] = "2017-01-01",

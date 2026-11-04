@@ -1,4 +1,4 @@
-"""crypto_bar_intraday migration: additive, single head, round-trips."""
+"""crypto_bar_intraday migration: additive, chained, round-trips."""
 
 from __future__ import annotations
 
@@ -12,9 +12,11 @@ REVISION = "e2b9c5d3f7a1"  # pragma: allowlist secret
 PARENT = "d1a8b4c2e6f9"  # pragma: allowlist secret
 
 
-def test_revision_is_the_single_head(db_url: str) -> None:
+def test_revision_chains_to_its_parent_and_the_tree_has_one_head(db_url: str) -> None:
     script = ScriptDirectory.from_config(alembic_config(db_url))
-    assert script.get_heads() == [REVISION]
+    assert (
+        len(script.get_heads()) == 1
+    )  # the head moved on (crypto_hourly_paper_book); still linear
     assert script.get_revision(REVISION).down_revision == PARENT
 
 
@@ -24,4 +26,9 @@ def test_upgrade_creates_the_table_and_downgrade_removes_only_it(db_url: str) ->
     before = set(inspect(create_engine(db_url)).get_table_names())
     command.downgrade(cfg, PARENT)
     after = set(inspect(create_engine(db_url)).get_table_names())
-    assert before - after == {"crypto_bar_intraday"}
+    assert {"crypto_bar_intraday"} <= before - after
+    assert before - after <= {
+        "crypto_bar_intraday",
+        "crypto_hourly_paper_book",
+        "crypto_hourly_paper_trade",
+    }

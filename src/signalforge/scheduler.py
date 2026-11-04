@@ -50,6 +50,7 @@ NO_JOB_LEVEL_LOCK_RETRY: frozenset[str] = frozenset(
         "crypto_ingest",
         # one commit per cycle; idempotent replay, but no blind job-level retry
         "crypto_paper",
+        "crypto_hourly_paper",
         "approved_scope_scan",
         "catchup_scan",
         "catchup_approved_scope_scan",
@@ -557,6 +558,59 @@ def job_crypto_paper() -> None:
                 closed=len(rep.closed),
                 divergences=len(rep.divergences),
                 kill_switch_skipped=len(rep.skipped_open_kill_switch),
+            )
+
+
+def job_crypto_hourly_paper() -> None:
+    """Hourly SIMULATED crypto paper cycle for HOURLY-bar books (CRYPTO-H4).
+    Config-gated OFF (``CRYPTO_PAPER_ENABLED``); needs a book created by the
+    operator. Tops up the book's pairs' completed hourly bars first (Massive,
+    research data) when ``CRYPTO_INGEST_ENABLED``, then replays. No broker, no
+    order path. The kill switch blocks new paper trades, never closes."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
+
+    from signalforge.config import get_settings
+    from signalforge.db.models import CryptoHourlyPaperBook
+    from signalforge.db.session import session_scope
+    from signalforge.paper.crypto_hourly_ledger import run_cycle
+
+    settings = get_settings()
+    if not settings.crypto_paper_enabled:
+        _log.info("crypto.hourly_paper.skipped_disabled")
+        return
+    with session_scope(write=True) as session:
+        books = list(session.scalars(select(CryptoHourlyPaperBook)))
+        pairs = sorted({p.upper() for b in books for p in b.pairs})
+        if not books:
+            return
+        if settings.crypto_ingest_enabled and settings.market_data_provider == "massive":
+            from signalforge.data.crypto_intraday import ingest_crypto_hourly
+
+            try:
+                rep = ingest_crypto_hourly(
+                    session, pairs, start=(datetime.now(UTC) - timedelta(days=2)).date()
+                )
+                _log.info("crypto.hourly_paper.ingest", pairs=pairs, end=str(rep.end))
+            except Exception as exc:  # a feed hiccup must not stop the replay of stored bars
+                session.rollback()
+                _log.error("crypto.hourly_paper.ingest_failed", error=str(exc)[:200])
+        for key in [b.strategy_key for b in books]:
+            try:
+                rep2 = run_cycle(session, key)
+            except Exception as exc:  # one failing book must not stop the others
+                session.rollback()
+                _log.error("crypto.hourly_paper.cycle_failed", strategy=key, error=str(exc)[:200])
+                continue
+            _log.info(
+                "crypto.hourly_paper.cycle",
+                strategy=key,
+                last_bar=rep2.last_bar,
+                opened=len(rep2.opened),
+                closed=len(rep2.closed),
+                divergences=len(rep2.divergences),
+                kill_switch_skipped=len(rep2.skipped_open_kill_switch),
             )
 
 
@@ -1152,6 +1206,13 @@ def default_job_specs() -> list[JobSpec]:
             "SIMULATED crypto paper cycle (config-gated OFF; no broker, no order)",
             cron_hour=20,
             cron_minute=0,
+        ),
+        JobSpec(
+            "crypto_hourly_paper",
+            job_crypto_hourly_paper,
+            60,
+            "SIMULATED hourly crypto paper cycle for CRYPTO-H4 books "
+            "(config-gated OFF; no broker, no order)",
         ),
         JobSpec("daily_briefing", job_daily_briefing, 24 * 60, "Build the daily research briefing"),
         JobSpec(
