@@ -12,8 +12,10 @@ references only. Production shares durable account admission with other apps.
 The kill switch blocks openings and transfers; exact protective close/cancel
 still requires its own confirmation and validated account/order identity.
 
-This package opens no sockets: CLI-injected transports own HTTP. Importing it
-performs no network call, reads no credential, and constructs no adapter.
+Explicit account export may use the official SDK for three allowlisted GETs;
+it cannot place orders, refresh credentials or enter the strategy registry.
+Importing this package performs no network call, reads no credential, and
+constructs no adapter. The dashboard consumes sanitized files, not this package.
 """
 
 from __future__ import annotations

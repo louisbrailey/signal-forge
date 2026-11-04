@@ -8,6 +8,11 @@
 
 ## 0. What this document is
 
+Account visibility amendment: [ADR 0007](docs/decisions/0007-readonly-account-display.md)
+adds an opt-in, isolated Webull account exporter. The app consumes validated local
+snapshots only; it gains no provider or execution access. Existing strategy,
+paper-account, kill-switch and frozen-study boundaries remain intact.
+
 This is the technical design for **Signal Forge**, a local-first, paper-trading-only
 market-research and trade-recommendation platform. It defines the system boundaries,
 component responsibilities, data model, key interfaces, and the safety/security

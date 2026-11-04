@@ -34,7 +34,8 @@ def test_first_run_shows_registration_with_disclaimer(client: TestClient) -> Non
     assert r.status_code == 200
     assert "not financial advice" in r.text.lower()
     assert RESEARCH_ONLY_NOTICE in r.text
-    assert "no order is ever placed" in r.text.lower()
+    assert "connected account views are read-only" in r.text.lower()
+    assert "this dashboard cannot place real orders" in r.text.lower()
 
 
 def test_feeds_endpoint_reports_no_feeds_initially(client: TestClient) -> None:

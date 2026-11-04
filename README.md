@@ -51,6 +51,11 @@ and none alerts.
 
 ## Paper operations and Kronos research
 
+The authenticated [Webull account view](docs/WEBULL-READONLY.md) at
+`/accounts/webull` displays a sanitized snapshot of actual balances and positions.
+Its separately enabled exporter is read-only. Real-money trading remains disabled;
+these values never fund paper books or alter frozen research studies.
+
 See [Paper Operations](docs/PAPER_OPERATIONS.md) for current startup and monitoring,
 and the [October 2 verification report](reports/PAPER_RELEASE_2026-10-02.md) for
 observed trades, Kronos comparisons, checks and remaining limitations.
