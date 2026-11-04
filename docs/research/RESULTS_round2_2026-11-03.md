@@ -122,10 +122,60 @@ Donchian-55 rule the system already has. **Rejected at this parameterisation; no
 
 | Pre-registered | Development | Needs a sealed-look decision |
 |---|---|---|
-| CRYPTO-H4: 3 hourly rules, BTC+ETH | `..._trail72_volx` **PASS**; trail120 fail; baseline fail | **yes** — `crypto_h_donchian168_trail72_volx` (no hourly paper book exists yet) |
+| CRYPTO-H4: 3 hourly rules, BTC+ETH | `..._trail72_volx` **PASS**; trail120 fail; baseline fail | **taken 2026-11-04 (user: "Yes, both") → SEALED_PASS**, see §6 |
 | CRYPTO-H3: 2 hourly rules, 4 pairs | both fail | no |
-| R2-E1 `high52_breakout`, snapshots 3 and 11 | **PASS on 150**; fail on 24 | **yes** — `high52_breakout.medium_swing` on snapshot 11 |
+| R2-E1 `high52_breakout`, snapshots 3 and 11 | **PASS on 150**; fail on 24 | **taken 2026-11-04 (user: "Yes, both") → all 10 gates PASS on the live DB, PAPER_APPROVED**, see §6 |
 | R2-E2 `trend_pullback`, snapshots 3 and 11 | fail on both | no |
 | CRYPTO-4 `crypto_high252_u9`, 9 daily pairs | fail (37 trades, CI low −0.227R) | no |
 
 No sealed year was consumed in this round. Nothing is armed. BNB is in no universe.
+
+
+## 6. Sealed looks taken 2026-11-04 (operator authorisation: "Yes, both")
+
+### 6.1 `high52_breakout.medium_swing` v0.1.0 on snapshot 11 — PAPER_APPROVED (live evaluation 51, sealed test 23)
+
+`evaluate-promotion --strategy high52_breakout --symbols <150 of snapshot 11> --snapshot-key
+research_150_massive_10y_presealed_sel --since 2016-10-17 --until 2026-09-08` on the LIVE
+database (development span identical to the scratch run; sealed window 2025-09-08 →
+2026-09-08, never read before; config hash fe365720c0b6 = live scan hash).
+
+| Gate | Result |
+|---|---|
+| 1 walk-forward | 4/4 folds clear the floor with positive expectancy |
+| 2 trades | 525 OOS |
+| 3 expectancy | +0.227R after costs |
+| 4 bootstrap CI | low +0.098R |
+| 5 sensitivity | 9/9 grid positive, 100% neighbours |
+| 6 regimes | bull 1,427 / bear 12 / range 58 |
+| 7 benchmark | Sharpe 1.18 (CAGR 11.7%, vol 9.8%, maxDD 31.9%, 169 trades/yr) vs SPY 0.72 |
+| 8 data quality | pass, leakage self-check clean |
+| **9 sealed year** | **201 trades, +0.263R** (730-day indicator warm-up, entries inside the window only) |
+| 10 probation | active once it books paper trades |
+
+The strategy is now `PAPER_APPROVED` with its scope locked to snapshot 11's 150 symbols and
+the live config hash; the approved-scope scan picks it up at the next session. Honest
+caveats: 12 bear-regime trades is the minimum the gate allows; the 150-symbol universe is
+survivorship-biased (disclosed in the snapshot); gate 7's Sharpe is computed on the fixed-risk
+ladder, not a capital-constrained book.
+
+### 6.2 `crypto_h_donchian168_trail72_volx` (CRYPTO-H4, hourly, BTC+ETH) — SEALED_PASS (`currency_sealed_test` id 4)
+
+Run through the new hourly sealed-test path (`research/fx/sealed.py`, market key
+`crypto_hourly`, row market "Crypto (hourly)"). Sealed window 2025-11-03 → 2026-11-02 on
+hourly bars; development gates recomputed and passed first; the look is consumed.
+
+| Metric | Sealed year |
+|---|---|
+| Trades | 79 (BTC 41, ETH 38) |
+| Expectancy | **+0.373R** (BTC +0.296R, ETH +0.456R) |
+| At 2× costs | +0.206R (BTC +0.130R, ETH +0.288R) |
+| Win rate / avg win / avg loss | 21.5% / +5.50R / −1.03R |
+| Profit factor | 1.46 |
+| Max drawdown | 13.2R; longest losing streak 12 |
+| Total | +29.5R over the year |
+
+A pass, with the shape of a trend rule: one win in five, paid for by large winners, and a
+twelve-trade losing streak inside the year. There is no hourly paper book yet; the daily
+crypto ledger replays daily bars only, so a prospective record needs an hourly replay path
+before this rule can be observed in paper.
