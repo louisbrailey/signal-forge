@@ -73,6 +73,11 @@ periods and three cost cases. Six improved the mean stress-validation return,
 but none cleared every predeclared replacement criterion. The isolated runner
 records failures, preserves checkpoints, and never activates a strategy.
 
+The [R2 fractional share comparison](reports/FRACTIONAL_STUDY_2026-11-06.md)
+reproduces the 441 whole-share controls and measures how 0.001-share sizing
+affects each book. Fractional sizing restored SPY entries under the original
+5% cap. All ten refinements failed validation.
+
 ## Requirements
 
 - macOS / Linux
