@@ -1,0 +1,236 @@
+--- a/funded.py
++++ b/funded.py
+@@ -14,6 +14,8 @@
+ from datetime import date
+ from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+ from typing import Any
++
++from fractional_lots import ZERO, commission, settle, size_fractional, stop_risk
+
+ from signalforge.backtest.actions import Dividend, Split, TickerChange, decision_series
+ from signalforge.backtest.costs import CostModel
+@@ -22,7 +24,6 @@
+ from signalforge.data.calendar import sessions
+ from signalforge.data.series import PriceSeries
+ from signalforge.domain import Direction
+-from signalforge.risk.engine import OpenExposure, SizingRequest, size_position
+
+
+ def money(value: float | Decimal) -> Decimal:
+@@ -35,7 +36,7 @@
+
+ @dataclass
+ class Position:
+-    shares: int
++    shares: Decimal
+     entry: Decimal
+     signal: EntrySignal
+     entry_index: int
+@@ -61,7 +62,7 @@
+     symbol: str
+     day: date
+     signal_day: date
+-    shares: int
++    shares: Decimal
+     notional: Decimal
+     round_trip_cost: Decimal
+     reference_open: Decimal
+@@ -188,9 +189,10 @@
+         nonlocal cash
+         p = positions.pop(symbol)
+         fill = Decimal(str(raw * (1 - penalty))).quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+-        fee = money(cm.commission(p.shares))
+-        cash += fill * p.shares - fee
+-        cost = money(abs(raw - float(fill)) * p.shares) + fee
++        fee = commission(cm, p.shares)
++        proceeds = settle(fill, p.shares, buy=False)
++        cash += proceeds - fee
++        cost = money(Decimal(str(raw)) * p.shares - proceeds) + fee
+         result.costs += cost
+         result.fills.append(
+             {
+@@ -203,7 +205,7 @@
+                 "commission": str(fee),
+                 "modeled_cost_usd": str(cost),
+                 "reason": reason,
+-                "realized_pnl_usd": str(fill * p.shares - p.cost_basis - fee - p.entry_fee),
++                "realized_pnl_usd": str(proceeds - p.cost_basis - fee - p.entry_fee),
+             }
+         )
+
+@@ -237,10 +239,7 @@
+             split_today[symbol] = ratio
+             if symbol in positions:
+                 p = positions[symbol]
+-                split_shares = Decimal(p.shares) * ratio
+-                if split_shares != split_shares.to_integral_value():
+-                    raise ValueError("Fractional split requires verified cash-in-lieu terms")
+-                p.shares = int(split_shares)
++                p.shares *= ratio
+                 p.entry /= ratio
+                 p.signal = replace(
+                     p.signal,
+@@ -303,8 +302,10 @@
+             + due
+             + sum(
+                 (
+-                    sell_price(float(series[s].open[local(s, i)]), penalty) * p.shares
+-                    - money(cm.commission(p.shares))
++                    settle(
++                        sell_price(float(series[s].open[local(s, i)]), penalty), p.shares, buy=False
++                    )
++                    - commission(cm, p.shares)
+                     for s, p in positions.items()
+                 ),
+                 Decimal(0),
+@@ -327,8 +328,12 @@
+                 + due
+                 + sum(
+                     (
+-                        sell_price(float(series[s].open[local(s, i)]), penalty) * p.shares
+-                        - money(cm.commission(p.shares))
++                        settle(
++                            sell_price(float(series[s].open[local(s, i)]), penalty),
++                            p.shares,
++                            buy=False,
++                        )
++                        - commission(cm, p.shares)
+                         for s, p in positions.items()
+                     ),
+                     Decimal(0),
+@@ -373,51 +378,41 @@
+                     }
+                 )
+                 continue
+-            marks = {s: float(series[s].open[local(s, i)]) for s in positions}
+-            gross = sum(positions[s].shares * marks[s] for s in positions)
+-            equity = float(cash + due) + gross
+-            sector_totals: dict[str, float] = {}
+-            risk = 0.0
++            marks = {s: Decimal(str(float(series[s].open[local(s, i)]))) for s in positions}
++            gross = sum((positions[s].shares * marks[s] for s in positions), ZERO)
++            equity = cash + due + gross
++            sector_totals: dict[str, Decimal] = {}
++            risk = ZERO
+             for s, p in positions.items():
+-                sector_totals[sectors[s]] = sector_totals.get(sectors[s], 0) + p.shares * marks[s]
+-                risk += (
+-                    p.shares
+-                    * max(
+-                        0.0,
+-                        max(float(p.entry), marks[s])
+-                        - float(sell_price(p.signal.stop_price, penalty)),
+-                    )
+-                    + float(p.entry_fee)
+-                    + cm.commission(p.shares)
+-                )
+-            sized = size_position(
+-                SizingRequest(symbol, sectors[symbol], float(fill), sig.stop_price, equity),
+-                limits,
+-                OpenExposure(gross, risk, sector_totals, len(positions)),
+-            )
+-            shares = min(
+-                sized.shares,
+-                math.floor(
+-                    float(series[symbol].volume[local(symbol, i) - 1])
+-                    * float(split_today.get(symbol, Decimal(1)))
+-                    * max_volume_participation
+-                ),
+-            )
+-            if sized.rejected:
+-                reason = reason or sized.rejected_reason
+-            # Includes commissions in both affordability and total open risk.
+-            while shares > 0 and (
+-                fill * shares + money(cm.commission(shares)) > cash
+-                or (float(fill) - float(sell_price(sig.stop_price, penalty))) * shares
+-                + 2 * cm.commission(shares)
+-                > min(
+-                    equity * limits.per_trade_risk_pct / 100,
+-                    equity * limits.max_daily_portfolio_risk_pct / 100 - risk,
+-                )
+-            ):
+-                shares -= 1
+-            if shares < 1:
+-                reason = reason or "cash_or_open_risk"
++                sector_totals[sectors[s]] = (
++                    sector_totals.get(sectors[s], ZERO) + p.shares * marks[s]
++                )
++                risk += stop_risk(
++                    max(p.entry, marks[s]),
++                    sell_price(p.signal.stop_price, penalty),
++                    p.shares,
++                    p.entry_fee + commission(cm, p.shares),
++                )
++            volume_cap = (
++                Decimal(str(float(series[symbol].volume[local(symbol, i) - 1])))
++                * split_today.get(symbol, Decimal(1))
++                * Decimal(str(max_volume_participation))
++            )
++            shares, reason = size_fractional(
++                fill=fill,
++                stop=Decimal(str(sig.stop_price)),
++                stop_fill=sell_price(sig.stop_price, penalty),
++                equity=equity,
++                cash=cash,
++                gross=gross,
++                sector=sector_totals.get(sectors[symbol], ZERO),
++                open_risk=risk,
++                volume_cap=volume_cap,
++                limits=limits,
++                costs=cm,
++            )
++            debit = settle(fill, shares, buy=True)
++            fee = commission(cm, shares) if shares else ZERO
+             admission_evidence: dict[str, Any] = {}
+             if reason is None and entry_admission is not None:
+                 proposal = EntryProposal(
+@@ -425,8 +420,8 @@
+                     day,
+                     dates[i - 1],
+                     shares,
+-                    fill * shares,
+-                    (fill - sell_price(raw, penalty)) * shares + 2 * money(cm.commission(shares)),
++                    debit,
++                    debit - settle(sell_price(raw, penalty), shares, buy=False) + 2 * fee,
+                     Decimal(str(raw)),
+                 )
+                 verdict = entry_admission(proposal)
+@@ -442,15 +437,16 @@
+                     "shares": 0 if reason else shares,
+                     "signal_day": str(dates[i - 1]),
+                     "entry_admission": admission_evidence,
++                    "pre_entry_equity_usd": str(equity),
++                    "entry_notional_usd": str(debit) if reason is None else None,
+                 }
+             )
+             if reason:
+                 continue
+-            fee = money(cm.commission(shares))
+-            cash -= fill * shares + fee
+-            cost = money(abs(float(fill) - raw) * shares) + fee
++            cash -= debit + fee
++            cost = money(debit - Decimal(str(raw)) * shares) + fee
+             result.costs += cost
+-            positions[symbol] = Position(shares, fill, sig, i, fee, fill * shares)
++            positions[symbol] = Position(shares, fill, sig, i, fee, debit)
+             result.fills.append(
+                 {
+                     "day": str(day),
+@@ -487,13 +483,15 @@
+         for symbol, p in positions.items():
+             raw = float(series[symbol].close[local(symbol, i)])
+             gross_close += money(raw) * p.shares
+-            liquidation += sell_price(raw, penalty) * p.shares - money(cm.commission(p.shares))
++            liquidation += settle(sell_price(raw, penalty), p.shares, buy=False) - commission(
++                cm, p.shares
++            )
+         check_drawdown(liquidation)
+         result.marks.append(
+             {
+                 "day": str(day),
+                 "cash_usd": str(cash),
+-                "gross_exposure_usd": str(gross_close),
++                "gross_exposure_usd": str(money(gross_close)),
+                 "net_liquidation_usd": str(liquidation),
+                 "open_positions": len(positions),
+                 "dividend_receivable_usd": str(due),

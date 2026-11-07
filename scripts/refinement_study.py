@@ -155,7 +155,7 @@ def period_result(replay, start):
     )
 
 
-def run_case(job):
+def run_case(job, *, replay_engine=run_funded_replay, study="R1"):
     key, period, label = job
     start = date(2017, 1, 1) if period == "development" else date(int(period), 1, 1)
     end = min(date(2020 if period == "development" else int(period), 12, 31), _CTX["dataset"].end)
@@ -186,7 +186,7 @@ def run_case(job):
         def dated_signal(bars, t, underlying=fn):
             return underlying(bars, t) if bars.dates[t] >= start else None
 
-        replay = run_funded_replay(
+        replay = replay_engine(
             dataset.series,
             dict.fromkeys(dataset.series, dated_signal),
             {s: metadata[s]["sector"] or "unknown" for s in dataset.series},
@@ -216,7 +216,7 @@ def run_case(job):
             end=end,
             initial_cash=Decimal(10000),
             source_reference=dataset.manifest_hash,
-            strategy_version=key + ":R1:" + arm,
+            strategy_version=f"{key}:{study}:{arm}",
             cost_model_reference=str(asdict(costs)),
         )
         metrics = {
