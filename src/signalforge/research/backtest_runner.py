@@ -56,12 +56,14 @@ def _data_provenance(
     *,
     intraday: bool,
     source: SourceFilter = None,
+    bar_size: str = "15m",
 ) -> DataProvenance:
     """Reports what data actually backed the run — so this MUST apply the same
     ``source`` filter the backtest itself used (``PriceSeries.load``), or the
     persisted record can claim a source (e.g. a symbol-continuity bridge tag)
     contributed bars that were never actually loaded into any trade."""
     tbl: Any = OHLCVIntraday if intraday else OHLCVDaily
+    symbols = [symbol.strip().upper() for symbol in symbols]
     date_col = tbl.bar_start if intraday else tbl.session_date
     lo: object = datetime(start.year, start.month, start.day, tzinfo=UTC) if intraday else start
     hi: object = datetime(end.year, end.month, end.day, tzinfo=UTC) if intraday else end
@@ -85,15 +87,19 @@ def _data_provenance(
     )
     if clause is not None:
         bars_stmt = bars_stmt.where(clause)
+    if intraday:
+        bars_stmt = bars_stmt.where(tbl.bar_size == bar_size, tbl.session == "rth")
     bars, first, last, sim = session.execute(bars_stmt).one()
 
     sources_stmt = (
         select(src_col)
         .join(Instrument, inst_col == Instrument.id)
-        .where(Instrument.symbol.in_(symbols))
+        .where(Instrument.symbol.in_(symbols), date_col >= lo, date_col <= hi)
     )
     if clause is not None:
         sources_stmt = sources_stmt.where(clause)
+    if intraday:
+        sources_stmt = sources_stmt.where(tbl.bar_size == bar_size, tbl.session == "rth")
     sources = tuple(sorted(row[0] for row in session.execute(sources_stmt.distinct())))
 
     first_d = first.date() if hasattr(first, "date") else first
@@ -230,7 +236,9 @@ def run_strategy_over_universe(
         per_symbol_trades=per_symbol,
         trades=all_trades,
         config_hash=config_hash,
-        data=_data_provenance(session, list(symbols), start, end, intraday=intraday, source=source),
+        data=_data_provenance(
+            session, list(symbols), start, end, intraday=intraday, source=source, bar_size=bar_size
+        ),
         costs={
             "commission_per_share": (cost_model or CostModel()).commission_per_share,
             "commission_min_per_order": (cost_model or CostModel()).commission_min_per_order,

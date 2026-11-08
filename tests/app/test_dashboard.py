@@ -119,6 +119,17 @@ PAGES = [
 ]
 
 
+def test_strategy_lab_discloses_evidence_scope_and_unknown_legacy_inputs(seeded):
+    response = seeded.get("/strategies")
+    assert response.status_code == 200
+    assert "current equity strategies" in response.text
+    assert "Negative OOS point estimate" in response.text
+    assert "input type: unknown" in response.text
+    assert "real-data status is unverified" in response.text
+    assert "No recorded OOS backtest" not in response.text  # seeded for every current version
+    assert "Research signal only — no order was placed." in response.text
+
+
 @pytest.mark.parametrize("path", PAGES)
 def test_pages_render_for_a_signed_in_user(seeded: TestClient, path: str) -> None:
     r = seeded.get(path)
