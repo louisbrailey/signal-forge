@@ -3,7 +3,8 @@
 The evidence pipeline had defects. This repair does **not** make losing strategies
 profitable. Strategy rules, thresholds, sizing, costs, registrations, operating
 settings, frozen Kronos/forward studies and their recorded outcomes are unchanged.
-No promotion, provider request, sealed evaluation or paper trade was run.
+No operating promotion, provider request, real-data sealed evaluation or operating
+paper trade was run. Software tests use isolated test databases and synthetic data.
 
 ## Verified inventory
 
@@ -55,6 +56,15 @@ cannot retroactively establish exactly what an older run loaded.
 4. The new offline inventory command reads published aggregate evidence only;
    it never reads sealed metrics or runs a study. Current and superseded versions
    have separate totals.
+5. The scanner previously skipped its CI check when the interval was absent;
+   NaN could also bypass comparisons. A deterministic regression reproduces a
+   `PASSED` draft with missing confidence evidence on pre-fix code and
+   `NO_TRADE` after the repair. Missing, malformed, non-finite or reversed
+   intervals and invalid trade counts/expectancies now fail closed. Numeric
+   thresholds are unchanged. Read-only comparison against the four current
+   recorded positive-OOS strategies confirmed identical outcomes for their
+   existing valid numeric evidence. The pinned frozen collectors are separate
+   checkouts and were not modified.
 
 ## Economic findings remain unresolved
 
