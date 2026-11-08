@@ -3520,6 +3520,142 @@ def evaluate_promotion_cmd(
     typer.echo("Research signal only — no order was placed.")
 
 
+@app.command("record-oos-backtest")
+def record_oos_backtest_cmd(
+    strategy: Annotated[
+        str, typer.Option(help="Exact strategy key, e.g. 'high52_breakout.medium_swing'.")
+    ],
+    snapshot_id: Annotated[
+        int, typer.Option(help="DataSnapshot id the version's promotion was evaluated on.")
+    ],
+    until: Annotated[
+        str,
+        typer.Option(
+            help="YYYY-MM-DD last development day; must be before the snapshot's sealed window."
+        ),
+    ],
+    since: Annotated[
+        str, typer.Option(help="YYYY-MM-DD; default: the promotion evaluation's window start.")
+    ] = "",
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Compute and print only; write nothing.")
+    ] = False,
+    allow_mismatch: Annotated[
+        bool,
+        typer.Option(
+            "--allow-mismatch",
+            help="Record even if inputs differ from the evaluation (noted in provenance/audit).",
+        ),
+    ] = False,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Record even if an identical run is already on record."),
+    ] = False,
+) -> None:
+    """Record the development-window out-of-sample backtest for one strategy
+    version on one dataset snapshot.
+
+    Re-runs exactly the pre-sealed backtest that ``evaluate-promotion`` gates
+    1-8 measured (the snapshot's symbols, the evaluation's window start and
+    data source, the promotion cost model) and persists it as a BacktestRun,
+    giving the scan's out-of-sample gate and the health monitor a comparison
+    value. Refuses an --until on or after the sealed window, a run whose
+    inputs differ from the evaluation's (unless --allow-mismatch) and a repeat
+    of a run already on record (unless --force). Changes no strategy status,
+    takes no sealed look, and places no order.
+    """
+    ensure_not_engaged()
+    from datetime import date as _date
+
+    from signalforge.db.session import session_scope
+    from signalforge.research.promotion import (
+        matching_development_oos_runs,
+        persist_development_oos_record,
+        record_development_oos_backtest,
+    )
+    from signalforge.research.strategies import default_strategies
+
+    matches = [s for s in default_strategies() if s.key == strategy]
+    if not matches:
+        typer.secho(f"no default strategy has key {strategy!r}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    try:
+        until_d = _date.fromisoformat(until)
+        since_d = _date.fromisoformat(since) if since else None
+    except ValueError as exc:
+        typer.secho(f"--since/--until must be YYYY-MM-DD: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from None
+
+    # The backtest runs in a read-only session; the write lock is taken only
+    # for the short insert afterwards (the sealed boundary is re-checked there).
+    with session_scope() as session:
+        try:
+            rec = record_development_oos_backtest(
+                session,
+                matches[0],
+                dataset_snapshot_id=snapshot_id,
+                until=until_d,
+                since=since_d,
+                persist=False,
+            )
+        except ValueError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(code=1) from None
+        existing = matching_development_oos_runs(session, rec)
+
+    res = rec.result
+    oos = res.out_of_sample
+    ci = res.oos_ci.get("expectancy_r", {})
+    typer.echo(
+        f"{rec.strategy_key} v{rec.version} (strategy_version {rec.strategy_version_id})  "
+        f"snapshot {rec.dataset_snapshot_key!r} (id {rec.dataset_snapshot_id}, "
+        f"{len(res.symbols)} symbols)"
+    )
+    typer.echo(
+        f"  development window {rec.start}..{rec.until} (sealed window starts "
+        f"{rec.sealed_boundary})  source {rec.provenance['source']}  costs {res.costs_label}"
+    )
+    typer.echo(
+        f"  OOS: {oos.n_trades} trades  expectancy {oos.expectancy_r:+.4f}R  "
+        f"95% CI [{float(ci.get('low', 0.0)):+.4f}, {float(ci.get('high', 0.0)):+.4f}]R  "
+        f"(IS {res.in_sample.n_trades} trades, {res.in_sample.expectancy_r:+.4f}R)"
+    )
+    ev = rec.evaluation_oos
+    ev_exp = ev.get("expectancy_r")
+    typer.echo(
+        f"  evaluation {rec.evaluation_id} recorded: {ev.get('n_trades')} OOS trades, "
+        + (f"expectancy {float(ev_exp):+.4f}R" if ev_exp is not None else "no expectancy")
+    )
+    mismatched = [k for k, ok in rec.reproduces_evaluation.items() if not ok]
+    if mismatched:
+        typer.secho(
+            f"  WARNING: inputs differ from evaluation {rec.evaluation_id}: "
+            f"{', '.join(mismatched)} — this is not the evaluated development backtest"
+            + ("" if allow_mismatch else "; a write is refused without --allow-mismatch"),
+            fg=typer.colors.YELLOW,
+        )
+    if existing:
+        typer.secho(
+            f"  already on record as backtest_run {', '.join(map(str, existing))}"
+            + ("" if force else "; a write is refused without --force"),
+            fg=typer.colors.YELLOW,
+        )
+    if dry_run:
+        typer.secho("dry run — nothing written", fg=typer.colors.CYAN)
+        return
+
+    with session_scope(write=True) as session:
+        try:
+            rec = persist_development_oos_record(
+                session, rec, allow_mismatch=allow_mismatch, allow_duplicate=force
+            )
+        except ValueError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(code=1) from None
+    typer.secho(f"recorded backtest_run {rec.backtest_run_id}", fg=typer.colors.GREEN)
+    typer.echo("Research record only — no status changed, no order placed.")
+
+
 @app.command("symbol-continuity-backfill")
 def symbol_continuity_backfill_cmd(
     old_symbol: Annotated[str, typer.Option(help="Predecessor symbol, e.g. FB.")],

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import asdict
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -97,10 +99,19 @@ def persist_backtest_result(
     session: Session,
     version: StrategyVersion,
     result: StrategyBacktestResult,
+    *,
+    provenance: Mapping[str, Any] | None = None,
 ) -> BacktestRun:
+    """Persist one backtest as a ``BacktestRun`` plus its metric rows.
+
+    ``provenance`` is merged into ``params_json`` beside the symbol list so a
+    run recorded for a specific purpose (e.g. the development-window OOS
+    backtest of ``research.promotion.record_development_oos_backtest``) states
+    which dataset snapshot and window it measured. It never overrides
+    ``symbols``."""
     run = BacktestRun(
         strategy_version_id=version.id,
-        params_json={"symbols": result.symbols},
+        params_json={**dict(provenance or {}), "symbols": result.symbols},
         date_start=result.start,
         date_end=result.end,
         oos_start=result.start,  # coarse; IS/OOS split is by fraction in the runner
