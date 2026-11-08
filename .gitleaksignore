@@ -6,6 +6,8 @@ c11cbeaa2d01be2e136d1a7a4d3b032407b6564c:tests/paper/test_crypto_ledger.py:gener
 # Reviewed 2026-11-03: pre-registered strategy keys (crypto_donchian_55_u10, crypto_mom_21_long_u10) in tests, not credentials.
 f580498c2c8838b756c87101192caa8ae8177de5:tests/paper/test_crypto_ledger.py:generic-api-key:286
 3253d0dd103bded5761f5ddd111bb876f49d68d4:tests/research/test_universe_program_strategies.py:generic-api-key:232
+# Reviewed 2026-11-08: strategy key constant (crypto_h_donchian168_trail72_volx) in a test, not a credential.
+800558f80e4b083b39c9d9cce6a9e3b418af84c2:tests/paper/test_crypto_paper_lock_scope.py:generic-api-key:40
 
 # Reviewed: cryptography isinstance key-type guard, not a credential or string literal.
 # Exact historical fingerprint only; no rule/path/value-wide exclusion.
