@@ -70,16 +70,20 @@ NO_JOB_LEVEL_LOCK_RETRY: frozenset[str] = frozenset(
 
 def _record_job_failure(name: str, error: str) -> None:
     """Persist a job failure so the alert policy (DATA_ISSUE/SYSTEM_HEALTH) can
-    see it. Best-effort: a DB problem here must never mask the original error."""
+    see it. Best-effort: a DB problem here must never mask the original error.
+    A write lost to lock contention is deferred and retried later
+    (:func:`flush_pending_job_records`) instead of being dropped."""
     try:
         from signalforge.db.models import AuditLog
         from signalforge.db.session import session_scope
+
+        ts = datetime.now(UTC)
 
         def _write() -> None:
             with session_scope(write=True) as session:
                 session.add(
                     AuditLog(
-                        ts=datetime.now(UTC),
+                        ts=ts,
                         actor="scheduler",
                         action="job.failed",
                         entity=name,
@@ -88,7 +92,12 @@ def _record_job_failure(name: str, error: str) -> None:
                     )
                 )
 
-        retry_on_lock(_write, attempts=4, backoff_s=(0.2, 0.5, 1.0), label="job.failed")
+        try:
+            retry_on_lock(_write, attempts=4, backoff_s=(0.2, 0.5, 1.0), label="job.failed")
+        except Exception as exc:
+            if not _is_lock_failure(exc):
+                raise
+            _defer_record(f"job.failed {name}", _write)
     except Exception as exc:
         _log.warning("job.failure_record_failed", job=name, error=repr(exc)[:160])
 
@@ -136,6 +145,95 @@ INTERRUPTED_REASON = "worker restarted"
 JOB_RUN_NOT_EVIDENCE = (JOB_RUN_RUNNING, JOB_RUN_INTERRUPTED)
 
 
+#: A ``running`` row with no finish recorded after this long is closed as
+#: ``interrupted`` by the in-process sweep. Generous on purpose: the longest
+#: legitimate runs (EOD update, a catch-up spanning a laptop sleep) take hours,
+#: and a false close is self-correcting — the job's own finish write updates
+#: the same row to its real outcome. Rows this process still owns (in flight,
+#: or with a finish write waiting to be retried) are never touched.
+STALE_RUNNING_AFTER = timedelta(hours=12)
+STALE_SWEEP_EVERY_S = 900.0
+ABANDONED_REASON = (
+    "abandoned: still running after {hours}h with no finish recorded "
+    "(finish write lost to lock contention, or the worker stopped)"
+)
+#: Bound on deferred bookkeeping writes held in memory; oldest dropped first.
+MAX_PENDING_RECORDS = 500
+
+
+class _PendingRecord:
+    """One bookkeeping write that lost to SQLite lock contention."""
+
+    __slots__ = ("label", "row_id", "write")
+
+    def __init__(self, label: str, write: Callable[[], None], row_id: int | None) -> None:
+        self.label = label
+        self.write = write
+        self.row_id = row_id
+
+
+_BOOKKEEPING_LOCK = threading.Lock()
+#: ``JobRun`` ids this process started and has not yet durably finished.
+_OWNED_RUN_IDS: set[int] = set()
+_PENDING_RECORDS: list[_PendingRecord] = []
+_last_stale_sweep: float | None = None
+#: The stale sweep runs only in the WORKER process (armed by
+#: :func:`run_catch_up`, which runs after the single-worker lock is held). A
+#: one-shot ``signalforge job run`` process knows only its own owned ids, so
+#: sweeping from it would close the worker's legitimately long in-flight rows.
+_stale_sweep_enabled = False
+
+
+def _is_lock_failure(exc: BaseException) -> bool:
+    return isinstance(exc, LockRetryExhausted) or is_lock_error(exc)
+
+
+def _defer_record(label: str, write: Callable[[], None], row_id: int | None = None) -> None:
+    """Keep a bookkeeping write that lost to lock contention, so it is retried
+    once the lock holder's transaction is released (incident 2026-11-07: the
+    failure record of ``options_paper_eod`` was dropped and 12 rows stayed
+    ``running``)."""
+    with _BOOKKEEPING_LOCK:
+        _PENDING_RECORDS.append(_PendingRecord(label, write, row_id))
+        while len(_PENDING_RECORDS) > MAX_PENDING_RECORDS:
+            dropped = _PENDING_RECORDS.pop(0)
+            if dropped.row_id is not None:
+                _OWNED_RUN_IDS.discard(dropped.row_id)  # the sweep closes it later
+            _log.warning("job.record_dropped", label=dropped.label)
+    _log.warning("job.record_deferred", label=label)
+
+
+def flush_pending_job_records() -> int:
+    """Retry deferred bookkeeping writes, oldest first; returns how many landed.
+    One attempt each (the busy timeout still applies) and it stops at the
+    first lock failure, so a still-held lock delays the calling job by at most
+    one busy timeout. Best-effort; never raises."""
+    with _BOOKKEEPING_LOCK:
+        pending = list(_PENDING_RECORDS)
+        _PENDING_RECORDS.clear()
+    done = 0
+    for i, rec in enumerate(pending):
+        try:
+            rec.write()
+        except Exception as exc:
+            if _is_lock_failure(exc):
+                with _BOOKKEEPING_LOCK:
+                    _PENDING_RECORDS[:0] = pending[i:]  # keep order; retry next time
+                break
+            _log.warning("job.record_failed", label=rec.label, error=repr(exc)[:160])
+            if rec.row_id is not None:
+                with _BOOKKEEPING_LOCK:
+                    _OWNED_RUN_IDS.discard(rec.row_id)
+            continue
+        done += 1
+        if rec.row_id is not None:
+            with _BOOKKEEPING_LOCK:
+                _OWNED_RUN_IDS.discard(rec.row_id)
+    if done:
+        _log.info("job.records_flushed", count=done)
+    return done
+
+
 def _record_job_run(name: str, started: datetime, status: str, detail: str = "") -> None:
     """Persist one finished ``JobRun`` row (ok / failed / skipped) for the
     Operational Status page. Best-effort: never masks the job's own outcome."""
@@ -161,7 +259,10 @@ def _start_job_run(name: str, started: datetime) -> int | None:
                 session.flush()
                 return int(row.id)
 
-        return retry_on_lock(_write, attempts=4, backoff_s=(0.2, 0.5, 1.0), label="job_run")
+        row_id = retry_on_lock(_write, attempts=4, backoff_s=(0.2, 0.5, 1.0), label="job_run")
+        with _BOOKKEEPING_LOCK:
+            _OWNED_RUN_IDS.add(row_id)
+        return row_id
     except Exception as exc:
         _log.warning("job.run_start_record_failed", job=name, error=repr(exc)[:160])
         return None
@@ -171,10 +272,15 @@ def _finish_job_run(
     row_id: int | None, name: str, started: datetime, status: str, detail: str = ""
 ) -> None:
     """Update the ``running`` row written by ``_start_job_run`` to its final
-    status (same row, same id); insert a finished row when there is none."""
+    status (same row, same id); insert a finished row when there is none.
+    A write lost to lock contention is deferred, with the real finish time,
+    and retried by :func:`flush_pending_job_records`."""
     try:
         from signalforge.db.models import JobRun
         from signalforge.db.session import session_scope
+
+        finished_at = datetime.now(UTC)
+        scrubbed = _scrub_detail(detail)[:300]
 
         def _write() -> None:
             with session_scope(write=True) as session:
@@ -182,13 +288,109 @@ def _finish_job_run(
                 if row is None:
                     row = JobRun(name=name, started_at=started)
                     session.add(row)
-                row.finished_at = datetime.now(UTC)
+                row.finished_at = finished_at
                 row.status = status
-                row.detail = _scrub_detail(detail)[:300]
+                row.detail = scrubbed
 
-        retry_on_lock(_write, attempts=4, backoff_s=(0.2, 0.5, 1.0), label="job_run")
+        try:
+            retry_on_lock(_write, attempts=4, backoff_s=(0.2, 0.5, 1.0), label="job_run")
+        except Exception as exc:
+            if not _is_lock_failure(exc):
+                raise
+            _defer_record(f"job_run {name} {status}", _write, row_id)
+            return
+        if row_id is not None:
+            with _BOOKKEEPING_LOCK:
+                _OWNED_RUN_IDS.discard(row_id)
     except Exception as exc:
+        if row_id is not None:
+            with _BOOKKEEPING_LOCK:
+                _OWNED_RUN_IDS.discard(row_id)  # orphaned: the stale sweep closes it
         _log.warning("job.run_record_failed", job=name, status=status, error=repr(exc)[:160])
+
+
+def close_stale_job_runs(
+    now: datetime | None = None, *, stale_after: timedelta = STALE_RUNNING_AFTER
+) -> int:
+    """Close ``running`` ``JobRun`` rows older than ``stale_after`` that this
+    process does not own: status ``interrupted`` with an explicit
+    ``abandoned`` reason. Catches what the start-up
+    :func:`mark_interrupted_job_runs` cannot — a finish write lost while the
+    SAME worker kept running (incident 2026-11-07, 12 rows left ``running``).
+    Best-effort; returns the count."""
+    now = now or datetime.now(UTC)
+    cutoff = now - stale_after
+    reason = ABANDONED_REASON.format(hours=round(stale_after.total_seconds() / 3600, 1))
+    try:
+        from sqlalchemy import select
+
+        from signalforge.db.models import JobRun
+        from signalforge.db.session import session_scope
+
+        with _BOOKKEEPING_LOCK:
+            owned = set(_OWNED_RUN_IDS)
+
+        def _write() -> int:
+            with session_scope(write=True) as session:
+                rows = [
+                    r
+                    for r in session.scalars(
+                        select(JobRun).where(
+                            JobRun.status == JOB_RUN_RUNNING, JobRun.started_at < cutoff
+                        )
+                    )
+                    if r.id not in owned
+                ]
+                for row in rows:
+                    row.status = JOB_RUN_INTERRUPTED
+                    row.finished_at = now
+                    row.detail = reason
+                return len(rows)
+
+        n = retry_on_lock(_write, attempts=2, backoff_s=(0.5,), label="job_run")
+        if n:
+            _log.warning("job.stale_runs_closed", count=n, older_than=str(stale_after))
+        return int(n)
+    except Exception as exc:
+        _log.warning("job.stale_runs_close_failed", error=repr(exc)[:160])
+        return 0
+
+
+def reset_job_bookkeeping() -> None:
+    """Forget deferred records, owned run ids and the sweep clock (tests: each
+    test has its own database, and a deferred write must never land in the
+    next one)."""
+    global _last_stale_sweep, _stale_sweep_enabled
+    with _BOOKKEEPING_LOCK:
+        _PENDING_RECORDS.clear()
+        _OWNED_RUN_IDS.clear()
+        _last_stale_sweep = None
+        _stale_sweep_enabled = False
+
+
+def enable_stale_job_sweep() -> None:
+    """Arm the periodic stale-row sweep in this process: call only from the
+    worker, which owns the scheduled jobs' ``running`` rows."""
+    global _stale_sweep_enabled
+    with _BOOKKEEPING_LOCK:
+        _stale_sweep_enabled = True
+
+
+def _bookkeeping_tick() -> None:
+    """Run at every guarded job start: retry deferred records, and (worker
+    process only) at most every ``STALE_SWEEP_EVERY_S`` close stale
+    ``running`` rows."""
+    global _last_stale_sweep
+    flush_pending_job_records()
+    now = time.monotonic()
+    with _BOOKKEEPING_LOCK:
+        due = _stale_sweep_enabled and (
+            _last_stale_sweep is None or now - _last_stale_sweep >= STALE_SWEEP_EVERY_S
+        )
+        if due:
+            _last_stale_sweep = now
+    if due:
+        close_stale_job_runs()
 
 
 def mark_interrupted_job_runs(process_started: datetime | None = None) -> int:
@@ -241,6 +443,8 @@ def guarded(name: str, fn: JobFn) -> JobFn:
             _record_job_run(name, started, "skipped", f"kill switch engaged: {exc.state.reason}")
             return
         _log.info("job.start", job=name)
+        # Deferred records and stale ``running`` rows first (incident 2026-11-07).
+        _bookkeeping_tick()
         # In-flight trace (incident 2026-10-05): the row exists from the first
         # moment, so a job the OS kills leaves ``running`` + its start time.
         row_id = _start_job_run(name, started)
@@ -264,6 +468,10 @@ def guarded(name: str, fn: JobFn) -> JobFn:
             _finish_job_run(row_id, name, started, "failed", reason)
             _record_job_failure(name, reason)
             raise
+        finally:
+            # The job's own transactions are closed now: retry anything that
+            # lost to lock contention while it (or another job) held the lock.
+            flush_pending_job_records()
 
     return _run
 
@@ -393,8 +601,7 @@ def job_ingest() -> None:
         elif resume_id is not None:
             provenance["resumed_after_deadline"] = {"carried_over": len(carried_set)}
             note = (
-                f"{note} (resumed after a deadline stop; "
-                f"{len(carried_set)} symbols carried over)"
+                f"{note} (resumed after a deadline stop; {len(carried_set)} symbols carried over)"
             )
         row = session.get(IngestionRun, resume_id) if resume_id is not None else None
         if row is None:
@@ -535,30 +742,33 @@ def job_crypto_paper() -> None:
     if not get_settings().crypto_paper_enabled:
         _log.info("crypto.paper.skipped_disabled")
         return
-    with session_scope(write=True) as session:
-        from sqlalchemy import select
+    # Plain reader scopes: run_cycle replays as a reader and arms write intent
+    # only for its own short write transaction, so the SQLite write lock is
+    # never held across a replay (incident 2026-11-07).
+    from sqlalchemy import select
 
-        from signalforge.db.models import CryptoPaperBook
+    from signalforge.db.models import CryptoPaperBook
 
+    with session_scope() as session:
         keys = [b.strategy_key for b in session.scalars(select(CryptoPaperBook))]
-        for key in keys:
-            if get_book(session, key) is None:
-                continue
-            try:
+    for key in keys:
+        try:
+            with session_scope() as session:
+                if get_book(session, key) is None:
+                    continue
                 rep = run_cycle(session, key)
-            except Exception as exc:  # one failing book must not stop the others
-                session.rollback()
-                _log.error("crypto.paper.cycle_failed", strategy=key, error=str(exc)[:200])
-                continue
-            _log.info(
-                "crypto.paper.cycle",
-                strategy=key,
-                last_bar=rep.last_bar,
-                opened=len(rep.opened),
-                closed=len(rep.closed),
-                divergences=len(rep.divergences),
-                kill_switch_skipped=len(rep.skipped_open_kill_switch),
-            )
+        except Exception as exc:  # one failing book must not stop the others
+            _log.error("crypto.paper.cycle_failed", strategy=key, error=str(exc)[:200])
+            continue
+        _log.info(
+            "crypto.paper.cycle",
+            strategy=key,
+            last_bar=rep.last_bar,
+            opened=len(rep.opened),
+            closed=len(rep.closed),
+            divergences=len(rep.divergences),
+            kill_switch_skipped=len(rep.skipped_open_kill_switch),
+        )
 
 
 def job_crypto_hourly_paper() -> None:
@@ -580,38 +790,44 @@ def job_crypto_hourly_paper() -> None:
     if not settings.crypto_hourly_paper_enabled:
         _log.info("crypto.hourly_paper.skipped_disabled")
         return
-    with session_scope(write=True) as session:
+    # Incident 2026-11-07: this job held ONE write transaction for its whole
+    # 77-minute catch-up run and six other jobs failed ``database is locked``.
+    # Now: list the books as a reader; the ingest commits before every network
+    # call (short write transactions only); each book's cycle replays as a
+    # reader and writes in one short transaction of its own (``run_cycle``).
+    with session_scope() as session:
         books = list(session.scalars(select(CryptoHourlyPaperBook)))
+        keys = [b.strategy_key for b in books]
         pairs = sorted({p.upper() for b in books for p in b.pairs})
-        if not books:
-            return
-        if settings.crypto_ingest_enabled and settings.market_data_provider == "massive":
-            from signalforge.data.crypto_intraday import ingest_crypto_hourly
+    if not keys:
+        return
+    if settings.crypto_ingest_enabled and settings.market_data_provider == "massive":
+        from signalforge.data.crypto_intraday import ingest_crypto_hourly
 
-            try:
+        try:
+            with session_scope(write=True) as session:
                 rep = ingest_crypto_hourly(
                     session, pairs, start=(datetime.now(UTC) - timedelta(days=2)).date()
                 )
-                _log.info("crypto.hourly_paper.ingest", pairs=pairs, end=str(rep.end))
-            except Exception as exc:  # a feed hiccup must not stop the replay of stored bars
-                session.rollback()
-                _log.error("crypto.hourly_paper.ingest_failed", error=str(exc)[:200])
-        for key in [b.strategy_key for b in books]:
-            try:
+            _log.info("crypto.hourly_paper.ingest", pairs=pairs, end=str(rep.end))
+        except Exception as exc:  # a feed hiccup must not stop the replay of stored bars
+            _log.error("crypto.hourly_paper.ingest_failed", error=str(exc)[:200])
+    for key in keys:
+        try:
+            with session_scope() as session:
                 rep2 = run_cycle(session, key)
-            except Exception as exc:  # one failing book must not stop the others
-                session.rollback()
-                _log.error("crypto.hourly_paper.cycle_failed", strategy=key, error=str(exc)[:200])
-                continue
-            _log.info(
-                "crypto.hourly_paper.cycle",
-                strategy=key,
-                last_bar=rep2.last_bar,
-                opened=len(rep2.opened),
-                closed=len(rep2.closed),
-                divergences=len(rep2.divergences),
-                kill_switch_skipped=len(rep2.skipped_open_kill_switch),
-            )
+        except Exception as exc:  # one failing book must not stop the others
+            _log.error("crypto.hourly_paper.cycle_failed", strategy=key, error=str(exc)[:200])
+            continue
+        _log.info(
+            "crypto.hourly_paper.cycle",
+            strategy=key,
+            last_bar=rep2.last_bar,
+            opened=len(rep2.opened),
+            closed=len(rep2.closed),
+            divergences=len(rep2.divergences),
+            kill_switch_skipped=len(rep2.skipped_open_kill_switch),
+        )
 
 
 def job_daily_briefing() -> None:
@@ -1846,6 +2062,9 @@ def run_catch_up(stale_after_hours: int = 18) -> None:
     # Any ``running`` job_run row at this point was left by a previous worker
     # process that never finished the job (incident 2026-10-05).
     mark_interrupted_job_runs()
+    # This is the worker: from now on its guarded jobs also close rows that go
+    # stale while it keeps running (incident 2026-11-07).
+    enable_stale_job_sweep()
     age = _last_scan_age()
     if age is None or age > timedelta(hours=stale_after_hours):
         _log.info(

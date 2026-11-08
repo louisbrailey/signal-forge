@@ -51,11 +51,14 @@ def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
     import signalforge.killswitch as ks
     from signalforge.config.settings import get_settings
     from signalforge.db.session import reset_engine_cache
+    from signalforge.scheduler import reset_job_bookkeeping
 
     monkeypatch.setattr(ks, "_default", None)
     get_settings.cache_clear()
     reset_engine_cache()
+    reset_job_bookkeeping()
     yield tmp_path
+    reset_job_bookkeeping()  # a deferred job record must never reach the next test's DB
     reset_engine_cache()
     get_settings.cache_clear()
     # structlog caches bound loggers; a test that configured logging under capsys

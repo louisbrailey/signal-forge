@@ -148,6 +148,17 @@ def set_write_intent(session: Session, write: bool) -> None:
     session.bind = bind.execution_options(sqlite_write=write)
 
 
+def has_write_intent(session: Session) -> bool:
+    """Whether the session's NEXT transaction begins ``IMMEDIATE`` (see
+    :func:`set_write_intent`). A helper that splits a caller's session into
+    read and short write phases uses it to hand the session back with the
+    intent it arrived with."""
+    bind = session.get_bind()
+    return isinstance(bind, Engine) and bool(
+        bind.get_execution_options().get("sqlite_write", False)
+    )
+
+
 @contextmanager
 def external_session_scope(path: str | Path, *, write: bool = False) -> Iterator[Session]:
     """A transactional scope against a SQLite file OTHER than the configured one.
