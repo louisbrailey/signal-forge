@@ -772,6 +772,24 @@ def job_crypto_paper() -> None:
 
 
 def job_crypto_hourly_paper() -> None:
+    """Self-guarded: durable refusals and stored-bar closes run under kill.
+    Preserve job bookkeeping without the generic wrapper's early return."""
+    name = "crypto_hourly_paper"
+    started = datetime.now(UTC)
+    _bookkeeping_tick()
+    row_id = _start_job_run(name, started)
+    try:
+        _run_crypto_hourly_paper()
+        _finish_job_run(row_id, name, started, "ok")
+    except Exception as exc:
+        _finish_job_run(row_id, name, started, "failed", repr(exc))
+        _record_job_failure(name, repr(exc))
+        raise
+    finally:
+        flush_pending_job_records()
+
+
+def _run_crypto_hourly_paper() -> None:
     """Hourly SIMULATED crypto paper cycle for HOURLY-bar books (CRYPTO-H4).
     Config-gated OFF (``CRYPTO_HOURLY_PAPER_ENABLED``); needs a book created by the
     operator. Tops up the book's pairs' completed hourly bars first (Massive,
@@ -784,7 +802,8 @@ def job_crypto_hourly_paper() -> None:
     from signalforge.config import get_settings
     from signalforge.db.models import CryptoHourlyPaperBook
     from signalforge.db.session import session_scope
-    from signalforge.paper.crypto_hourly_ledger import run_cycle
+    from signalforge.killswitch import get_kill_switch
+    from signalforge.paper.crypto_hourly_ledger import record_admission_state, run_cycle
 
     settings = get_settings()
     if not settings.crypto_hourly_paper_enabled:
@@ -801,7 +820,16 @@ def job_crypto_hourly_paper() -> None:
         pairs = sorted({p.upper() for b in books for p in b.pairs})
     if not keys:
         return
-    if settings.crypto_ingest_enabled and settings.market_data_provider == "massive":
+    # Commit inhibition before provider/replay failures, including the first
+    # clear tick after a pause. A failure here refuses the entire job's ingest.
+    for key in keys:
+        with session_scope() as session:
+            record_admission_state(session, key)
+    if (
+        settings.crypto_ingest_enabled
+        and settings.market_data_provider == "massive"
+        and not get_kill_switch().state().active
+    ):
         from signalforge.data.crypto_intraday import ingest_crypto_hourly
 
         try:
@@ -1429,6 +1457,7 @@ def default_job_specs() -> list[JobSpec]:
             60,
             "SIMULATED hourly crypto paper cycle for CRYPTO-H4 books "
             "(config-gated OFF; no broker, no order)",
+            self_guarded=True,
         ),
         JobSpec("daily_briefing", job_daily_briefing, 24 * 60, "Build the daily research briefing"),
         JobSpec(

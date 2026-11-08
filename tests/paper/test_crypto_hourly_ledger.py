@@ -88,10 +88,10 @@ def test_a_book_needs_an_hourly_sealed_pass_and_a_daily_key_is_refused(session: 
         hl.start_book(session, "crypto_donchian_55", now=NOW)  # daily key, not an hourly rule
 
 
-def test_book_start_is_the_floored_hour_and_unique(session: Session) -> None:
+def test_book_start_is_the_next_hour_and_unique(session: Session) -> None:
     _sealed(session)
     book = hl.start_book(session, KEY, now=datetime(2026, 1, 1, 13, 37, tzinfo=UTC))
-    assert book.start_at == datetime(2026, 1, 1, 13, 0, tzinfo=UTC)
+    assert book.start_at == datetime(2026, 1, 1, 14, 0, tzinfo=UTC)
     assert book.observation_end == book.start_at + timedelta(days=hl.OBSERVATION_DAYS)
     assert book.pairs == ["BTCUSD"] and book.version == "CRYPTO-H4"
     with pytest.raises(hl.PaperBookRefused):
