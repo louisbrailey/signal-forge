@@ -25,19 +25,21 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
+from dataclasses import replace as _replace
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from signalforge.backtest.costs import CostModel
-from signalforge.backtest.engine import SimTrade, run_backtest
+from signalforge.backtest.engine import _DOLLAR_RISK_PER_TRADE, SimTrade, run_backtest
 from signalforge.backtest.metrics import compute_metrics
 from signalforge.backtest.montecarlo import bootstrap_ci
 from signalforge.backtest.walkforward import run_walkforward
 from signalforge.data.series import PriceSeries
 from signalforge.db.models import CryptoBarDaily, FxBarDaily
+from signalforge.domain import Direction
 from signalforge.research.fx.continuity import continuity_breach
 from signalforge.research.fx.strategies import (
     CRYPTO2_STRATEGIES,
@@ -46,6 +48,8 @@ from signalforge.research.fx.strategies import (
     CRYPTO3_STRATEGY_VERSION,
     CRYPTO4_STRATEGIES,
     CRYPTO4_STRATEGY_VERSION,
+    CRYPTO5_STRATEGIES,
+    CRYPTO5_STRATEGY_VERSION,
     CRYPTO_STRATEGIES,
     CRYPTO_STRATEGY_VERSION,
     FX2_STRATEGIES,
@@ -56,6 +60,9 @@ from signalforge.research.fx.strategies import (
     FX_STRATEGY_VERSION,
     FxStrategy,
 )
+
+if TYPE_CHECKING:
+    from signalforge.research.fx.venues import VenueCost
 
 FX_SOURCE = "massive_fx"
 
@@ -181,6 +188,27 @@ CRYPTO2_MARKET = ResearchMarket(
     ),
 )
 
+# CRYPTO-5 (2026-11-08): EXPERIMENTAL long-only variants, unsealed. Same costs as
+# CRYPTO-2; ``venue=`` on the evaluation costs them at a named venue instead.
+CRYPTO5_MARKET = ResearchMarket(
+    name="Crypto",
+    version=CRYPTO5_STRATEGY_VERSION,
+    model=CryptoBarDaily,
+    source=CRYPTO_SOURCE,
+    spreads=CRYPTO_SPREAD_BPS,
+    default_spread_bps=CRYPTO_DEFAULT_SPREAD_BPS,
+    ingest_hint="run crypto-ingest",
+    caveat=(
+        "EXPERIMENTAL long-only variants, unsealed. Development window cut at "
+        "CRYPTO-1's recorded sealed start (2025-10-26), before every parent sealed year. "
+        "Perpetual funding and exchange counterparty risk not modelled unless a venue says so; "
+        "pairs without a listed spread use the 50 bps/side default."
+    ),
+)
+# The parents' sealed years were seen (CRYPTO-1 from 2025-10-26, CRYPTO-2 from
+# 2025-11-03), so a CRYPTO-5 development read never runs past the earliest of them.
+CRYPTO5_DEV_CUT = date(2025, 10, 26)
+
 
 @dataclass(frozen=True, slots=True)
 class FxGates:
@@ -292,6 +320,44 @@ def sealed_start(series_by_pair: dict[str, PriceSeries], sealed_days: int) -> da
     return last - timedelta(days=sealed_days - 1)
 
 
+def _charge_funding(
+    trades: list[SimTrade], venue: VenueCost | None, bar_days: float
+) -> list[SimTrade]:
+    """Charge a venue's funding to each trade (no-op at 0 or no venue).
+
+    The charge is taken from ``pnl_r`` and, at the trade's own risk fraction,
+    from ``pnl_pct`` and ``pnl_dollars`` too, so ``pnl_pct / pnl_r`` (the risk
+    fraction :func:`holding_cost_r` reads) is unchanged."""
+    if venue is None or venue.funding_bps_per_year <= 0 or not trades:
+        return trades
+    from signalforge.research.fx.venues import funding_cost_r
+
+    fracs = sorted(abs(t.pnl_pct / t.pnl_r) for t in trades if t.pnl_r)
+    fallback = fracs[len(fracs) // 2] if fracs else 0.0
+    out = []
+    for t in trades:
+        frac = abs(t.pnl_pct / t.pnl_r) if t.pnl_r else fallback
+        if frac <= 0:
+            out.append(t)
+            continue
+        charge = funding_cost_r(
+            bars_held=t.bars_held,
+            bar_days=bar_days,
+            bps_per_year=venue.funding_bps_per_year,
+            entry_over_risk=1.0 / frac,
+        )
+        pnl_r = t.pnl_r - charge
+        out.append(
+            _replace(
+                t,
+                pnl_r=pnl_r,
+                pnl_pct=t.pnl_pct - charge * frac,
+                pnl_dollars=pnl_r * _DOLLAR_RISK_PER_TRADE,
+            )
+        )
+    return out
+
+
 def evaluate_strategy(
     strat: FxStrategy,
     series_by_pair: dict[str, PriceSeries],
@@ -299,25 +365,37 @@ def evaluate_strategy(
     seal_from: date,
     gates: FxGates,
     market: ResearchMarket | None = None,
+    venue: VenueCost | None = None,
 ) -> StrategyResult:
+    """Development-window evaluation. ``venue`` (crypto only) replaces the
+    market's per-pair spread with that venue's all-in taker cost and charges its
+    funding; ``None`` is ``harness_default``, the market's own spreads,
+    unchanged. A venue that cannot short (spot) fails a rule that takes SHORT
+    trades: its shorts are costed for reference but are not executable there."""
     mk = market or FX_MARKET
     res = StrategyResult(key=strat.key, description=strat.description, params=dict(strat.params))
     oos: list[SimTrade] = []
     stress_oos: list[SimTrade] = []
     fold_trades: list[list[SimTrade]] = [[] for _ in range(gates.n_folds)]
     cm = CostModel(slippage_bps=gates.slippage_bps)
+    bar_days = 1.0 / 24.0 if isinstance(seal_from, datetime) else 1.0
+    n_short = 0
     for pair, full in sorted(series_by_pair.items()):
         dev = _cut(full, seal_from)
         if len(dev) < strat.warmup + 50:
             continue
-        spread = mk.spread(pair)
+        spread = mk.spread(pair) if venue is None else venue.engine_spread_bps(pair)
         base = backtest(strat, dev, cost_model=cm, spread_bps=spread)
+        base.trades = _charge_funding(base.trades, venue, bar_days)
         wf = run_walkforward(
             dev, strat.signal, n_folds=gates.n_folds, train_frac=gates.train_frac, outcome=base
         )
         stress = backtest(
             strat, dev, cost_model=cm, spread_bps=spread * gates.stress_spread_multiplier
         )
+        stress.trades = _charge_funding(stress.trades, venue, bar_days)
+        if venue is not None:
+            n_short += sum(1 for t in base.trades if t.direction is Direction.SHORT)
         pair_oos = [t for t in base.trades if wf.oos_start <= t.entry_date <= wf.oos_end]
         pair_stress = [t for t in stress.trades if wf.oos_start <= t.entry_date <= wf.oos_end]
         oos += pair_oos
@@ -357,6 +435,10 @@ def evaluate_strategy(
             breach = continuity_breach(dev.dates, step)
             if breach:
                 reasons.append(f"data continuity: {pair} development window {breach}")
+    if venue is not None and not venue.can_short and n_short:
+        reasons.append(
+            f"venue {venue.name} cannot short: {n_short} SHORT trades in the development window"
+        )
     if pooled.n_trades < gates.min_oos_trades:
         reasons.append(f"OOS trades {pooled.n_trades} < {gates.min_oos_trades}")
     if pooled.expectancy_r < gates.min_oos_expectancy_r:
@@ -469,6 +551,28 @@ def run_crypto2_research(
     return run_research(session, pairs, market=CRYPTO2_MARKET, gates=gates, strategies=strategies)
 
 
+def run_crypto5_research(
+    session: Session,
+    pairs: Sequence[str],
+    *,
+    gates: FxGates | None = None,
+    strategies: Sequence[FxStrategy] = CRYPTO5_STRATEGIES,
+    venue: VenueCost | None = None,
+) -> dict[str, Any]:
+    """The development window is cut at :data:`CRYPTO5_DEV_CUT` (or earlier,
+    if the data's own sealed start is earlier), so it never reads a bar of the
+    parents' already-seen sealed years."""
+    return run_research(
+        session,
+        pairs,
+        market=CRYPTO5_MARKET,
+        gates=gates,
+        strategies=strategies,
+        venue=venue,
+        seal_cap=CRYPTO5_DEV_CUT,
+    )
+
+
 def run_research(
     session: Session,
     pairs: Sequence[str],
@@ -476,15 +580,23 @@ def run_research(
     market: ResearchMarket,
     gates: FxGates | None = None,
     strategies: Sequence[FxStrategy],
+    venue: VenueCost | None = None,
+    seal_cap: date | None = None,
 ) -> dict[str, Any]:
+    """``seal_cap`` (optional) moves the development cut no later than that
+    day; ``None`` keeps the final ``gates.sealed_days`` of the data sealed."""
     gates = gates or FxGates()
     series_by_pair = {p: load_series(session, p, market) for p in pairs}
     series_by_pair = {p: s for p, s in series_by_pair.items() if len(s)}
     if not series_by_pair:
         raise ValueError(f"no {market.name} history for the requested pairs; {market.ingest_hint}")
     seal_from = sealed_start(series_by_pair, gates.sealed_days)
+    if seal_cap is not None:
+        seal_from = min(seal_from, seal_cap)
     results = [
-        evaluate_strategy(s, series_by_pair, seal_from=seal_from, gates=gates, market=market)
+        evaluate_strategy(
+            s, series_by_pair, seal_from=seal_from, gates=gates, market=market, venue=venue
+        )
         for s in strategies
     ]
     absent = sorted(set(pairs) - set(series_by_pair))
@@ -495,8 +607,12 @@ def run_research(
     return {
         "market": market.name,
         "version": market.version,
+        **({} if venue is None else {"venue": asdict(venue)}),
         "gates": asdict(gates),
-        "spread_bps": {p: market.spread(p) for p in series_by_pair},
+        "spread_bps": {
+            p: market.spread(p) if venue is None else venue.engine_spread_bps(p)
+            for p in series_by_pair
+        },
         "history": {
             p: {"first": s.dates[0].isoformat(), "last": s.dates[-1].isoformat(), "bars": len(s)}
             for p, s in sorted(series_by_pair.items())

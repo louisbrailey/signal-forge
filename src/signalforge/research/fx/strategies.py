@@ -350,3 +350,72 @@ CRYPTO4_STRATEGIES: tuple[FxStrategy, ...] = (
         signal=_high252,
     ),
 )
+
+
+# --------------------------------------------------------------------------- #
+# Long-only variants (2026-11-08, RESULTS_crypto_executability_2026-11-08.md).
+# ``long_only`` is a declared parameter, after CRYPTO-3's ``crypto_mom_21_long_u10``:
+# the parent rule runs unchanged and a SHORT signal is dropped (no position is
+# taken, so a later LONG signal can enter where the parent would have been
+# short). A long-only rule is a NEW rule definition with its own key; it
+# inherits nothing from its parent's sealed test or paper book.
+# --------------------------------------------------------------------------- #
+def long_only_signal(
+    signal: Callable[[PriceSeries, int], EntrySignal | None],
+) -> Callable[[PriceSeries, int], EntrySignal | None]:
+    """``signal`` with every SHORT entry dropped."""
+
+    def _long(series: PriceSeries, t: int) -> EntrySignal | None:
+        sig = signal(series, t)
+        return sig if sig is not None and sig.direction is Direction.LONG else None
+
+    return _long
+
+
+def long_only_variant(parent: FxStrategy, key: str, description: str) -> FxStrategy:
+    """The parent rule with ``long_only = 1``; every other parameter, the
+    warm-up and the trailing exit are the parent's."""
+    return FxStrategy(
+        key,
+        description,
+        {**parent.params, "long_only": 1},
+        warmup=parent.warmup,
+        signal=long_only_signal(parent.signal),
+        trail_channel=parent.trail_channel,
+    )
+
+
+# CRYPTO-5: EXPERIMENTAL, unsealed. Daily Donchian-55 long only, on each parent's
+# pairs (CRYPTO-1: BTC/ETH/SOL; CRYPTO-2: the nine continuous pairs, BNB removed
+# by the operator decision of 2026-11-03).
+CRYPTO5_STRATEGY_VERSION = "CRYPTO-5"
+CRYPTO5_PAIRS: dict[str, tuple[str, ...]] = {
+    "crypto_donchian_55_long": ("BTCUSD", "ETHUSD", "SOLUSD"),
+    "crypto_donchian_55_u10_long": (
+        "ADAUSD",
+        "AVAXUSD",
+        "BTCUSD",
+        "DOGEUSD",
+        "ETHUSD",
+        "LINKUSD",
+        "LTCUSD",
+        "SOLUSD",
+        "XRPUSD",
+    ),
+}
+_D55 = next(s for s in CRYPTO_STRATEGIES if s.key == "crypto_donchian_55")
+_D55_U10 = next(s for s in CRYPTO2_STRATEGIES if s.key == "crypto_donchian_55_u10")
+CRYPTO5_STRATEGIES: tuple[FxStrategy, ...] = (
+    long_only_variant(
+        _D55,
+        "crypto_donchian_55_long",
+        "LONG on a close above the prior 55-day high (crypto_donchian_55, long only); "
+        "2xATR(20) stop; 40-bar time stop. EXPERIMENTAL, unsealed.",
+    ),
+    long_only_variant(
+        _D55_U10,
+        "crypto_donchian_55_u10_long",
+        "LONG on a close above the prior 55-day high (crypto_donchian_55_u10, long only; "
+        "nine continuous pairs); 2xATR(20) stop; 40-bar time stop. EXPERIMENTAL, unsealed.",
+    ),
+)

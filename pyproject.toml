@@ -238,7 +238,11 @@ forbidden_modules = [
 [[tool.importlinter.contracts]]
 name = "S18: the crypto paper book is a simulation — no execution, broker, alerts, LLM or other paper books"
 type = "forbidden"
-source_modules = ["signalforge.paper.crypto_ledger", "signalforge.paper.crypto_hourly_ledger"]
+source_modules = [
+    "signalforge.paper.crypto_ledger",
+    "signalforge.paper.crypto_hourly_ledger",
+    "signalforge.paper.crypto_venue_report",
+]
 forbidden_modules = [
     "signalforge.execution",
     "signalforge.alerts",
