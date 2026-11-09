@@ -108,10 +108,32 @@ def persist_backtest_result(
     run recorded for a specific purpose (e.g. the development-window OOS
     backtest of ``research.promotion.record_development_oos_backtest``) states
     which dataset snapshot and window it measured. It never overrides
-    ``symbols``."""
+    ``symbols``, measured data provenance, or the executable spec hash.
+
+    Legacy runs remain untouched. Missing provenance on an old row means
+    unknown, never evidence that its inputs were real."""
+    strategy = session.get(Strategy, version.strategy_id)
+    if (
+        strategy is None
+        or strategy.name != result.spec.name
+        or version.version != result.spec.version
+    ):
+        raise ValueError("Backtest result does not match the strategy version being recorded")
     run = BacktestRun(
         strategy_version_id=version.id,
-        params_json={**dict(provenance or {}), "symbols": result.symbols},
+        params_json={
+            **dict(provenance or {}),
+            "symbols": result.symbols,
+            "spec_json_hash": spec_json_hash(result.spec),
+            "data_provenance": {
+                "schema_version": 1,
+                "sources": list(result.data.sources),
+                "simulated": result.data.simulated,
+                "bars": result.data.bars,
+                "first": result.data.first.isoformat() if result.data.first else None,
+                "last": result.data.last.isoformat() if result.data.last else None,
+            },
+        },
         date_start=result.start,
         date_end=result.end,
         oos_start=result.start,  # coarse; IS/OOS split is by fraction in the runner

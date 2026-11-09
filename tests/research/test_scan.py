@@ -89,6 +89,44 @@ def test_scan_accounting_reconciles(session: Session) -> None:
         assert any("OOS expectancy" in g for g in c.failed_gates)
 
 
+def test_missing_ci_cannot_pass_the_scan_quality_gate(session: Session) -> None:
+    from signalforge.backtest.engine import EntrySignal
+    from signalforge.config.research import ResearchConfig
+    from signalforge.db.models import Instrument
+    from signalforge.domain import Direction
+    from signalforge.research.scan import _build_draft
+    from signalforge.research.strategies import TrendContinuation
+
+    _seed(session, oos_expectancy_r=0.5)
+    for metric in session.scalars(select(BacktestMetric)):
+        if metric.phase == "out_of_sample":
+            metric.ci_json = {}
+    session.flush()
+    # Exercise the real evidence/risk gate with a deterministic qualified entry;
+    # a random-walk fixture need not trigger any strategy on its final bar.
+    spec = TrendContinuation().spec()
+    version = upsert_strategy_version(session, spec)
+    instrument = session.scalar(select(Instrument).where(Instrument.symbol == "SPY"))
+    draft = _build_draft(
+        session=session,
+        sym="SPY",
+        inst=instrument,
+        version_id=version.id,
+        spec=spec,
+        horizon=Horizon.SHORT_SWING,
+        sig=EntrySignal(Direction.LONG, stop_price=95, time_stop_bars=10, target_price=110),
+        close=100,
+        atr_val=2,
+        addv=1e9,
+        earnings=[],
+        fresh={},
+        cfg=ResearchConfig(),
+        equity=10_000,
+    )
+    assert draft.quality_gate_status is QualityGate.NO_TRADE
+    assert draft.failed_gates == ["OOS expectancy CI missing or invalid"]
+
+
 def test_oos_regime_coverage_helper_counts_distinct_regimes(session: Session) -> None:
     from signalforge.config.research import QualityThresholds
     from signalforge.research.scan import _oos_regime_coverage
