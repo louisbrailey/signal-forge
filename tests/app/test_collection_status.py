@@ -117,9 +117,11 @@ def active_registry(tmp_path):
                 "first_observation_session": "2026-10-27",
             }
         )
-    old = tmp_path / "old-status.json"
+    old = tmp_path / "legacy-state" / "status.json"
+    old.parent.mkdir()
     old.write_text(json.dumps(metadata()))
-    active_status = tmp_path / "active-status.json"
+    active_status = tmp_path / "active-state" / "status.json"
+    active_status.parent.mkdir()
     data = {
         "schema": registry.SCHEMA,
         "generation": 2,

@@ -88,6 +88,13 @@ transitions and evidence are not copied into v2. Numbers increase and native
 identities cannot overlap archived ones. This implementation creates v2 names;
 another rollover requires new native versioned identities.
 
+Before creating a directory or opening a lock, activation validates the entire
+registry/heartbeat/collector-lock namespace, including symlink aliases. Registry
+and state paths must be disjoint from study/control directories and each other;
+active/archive heartbeat and lock paths cannot collide. The same layout check
+runs on registry reads, and activation rechecks under its fence. A refused
+layout creates or overwrites no registry, heartbeat, lock or state directory.
+
 Both collectors require `--registry --expected-generation` for versioned
 studies. They pin registry hash/generation, exact directories and native
 metadata/lineage checksums before polling. Before heartbeat publication they

@@ -587,12 +587,25 @@ def activate(
     if len(commits) != 1 or len(entries) != 3:
         raise RefreshError("Activate exactly three started studies from one release")
     path, state_dir = path.absolute(), state_dir.absolute()
+    controls = [d.resolve() for d in directories]
+    forward_entry = next(e for e in entries if e["kind"] == "forward")
+    forward_status = Path(forward_entry["directory"]) / "status.json"
     for _, request in snapshots:
         for protected in (request["parent"]["directory"], request["parent"]["checkout"]):
             disjoint(path.resolve(), Path(protected).resolve())
             disjoint(state_dir.resolve(), Path(protected).resolve())
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with registry.registry_lock(path):
+    # Validate namespaces before mkdir or opening the registry lock. A rejected
+    # layout must not create state, overwrite a heartbeat or lock a study file.
+    registry.validate_publication_paths(
+        path,
+        state_dir / "status.json",
+        forward_status,
+        [Path(e["directory"]) for e in entries],
+        controls=controls,
+        archives=[legacy_status] if legacy_status is not None else [],
+    )
+
+    def candidate() -> dict[str, Any]:
         previous = registry.load_registry(path) if path.exists() else None
         actual = previous["generation"] if previous else 0
         if actual != expected_generation or generation <= max(actual, 1):
@@ -632,23 +645,31 @@ def activate(
             )
         if state_dir.exists():
             raise RefreshError("Active generation requires a new state directory")
-        forward_entry = next(e for e in entries if e["kind"] == "forward")
-        if (Path(forward_entry["directory"]) / "status.json").exists():
+        if forward_status.exists():
             raise RefreshError("Forward active study must have new heartbeat state")
         data = {
             "schema": registry.SCHEMA,
             "generation": generation,
             "activated_at": datetime.now(UTC).isoformat(),
-            "release_sha": commits.pop(),
+            "release_sha": next(iter(commits)),
             "active": entries,
             "status_path": str(state_dir / "status.json"),
-            "forward_status_path": str(Path(forward_entry["directory"]) / "status.json"),
+            "forward_status_path": str(forward_status),
             "archive": archives,
         }
         data["hash"] = registry.digest(data)
-        registry.validate_registry(data)
+        return registry.validate_registry(data, registry_path=path, controls=controls)
+
+    candidate()  # All predictable refusals happen before creating any publication path.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with registry.registry_lock(path):
+        data = candidate()  # Recheck CAS/layout under the same fence as collectors.
         state_dir.mkdir(parents=True, mode=0o700)
-        registry.atomic_json(path, data)
+        try:
+            registry.atomic_json(path, data)
+        except Exception:
+            state_dir.rmdir()  # Only the empty directory created by this attempt.
+            raise
     return {
         "status": "ACTIVE_GENERATION_PUBLISHED",
         "generation": generation,

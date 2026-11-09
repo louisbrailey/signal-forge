@@ -10,6 +10,7 @@ from scripts import kronos_comparison_collect as collector
 from scripts import study_refresh as refresh
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from tests.experiments.test_study_activation_paths import tree
 from tests.experiments.test_study_refresh import staged_input as staged_input
 
 from signalforge import study_registry as registry
@@ -200,3 +201,15 @@ def test_duplicate_or_missing_collector_paths_and_mutated_child_are_refused(roll
     with pytest.raises(ValueError, match="manifest checksum"):
         collector.run_poll(directories, state, collect=False, registry_path=path, generation=2)
     assert not (state / "status.json").exists()
+
+
+def test_real_native_studies_refuse_registry_at_forward_heartbeat(rollover, tmp_path):
+    _, snapshot, controls, _ = rollover
+    forward = Path(next(e["directory"] for e in snapshot["active"] if e["kind"] == "forward"))
+    pointer = forward / "status.json"
+    state = tmp_path / "never-created-activation" / "state"
+    before = tree(tmp_path)
+    with pytest.raises(ValueError, match="disjoint"):
+        refresh.activate(pointer, controls, 2, 0, state, tmp_path / "legacy-heartbeat.json")
+    assert tree(tmp_path) == before
+    assert not pointer.exists() and not state.exists()

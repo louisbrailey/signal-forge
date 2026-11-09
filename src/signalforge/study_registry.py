@@ -60,7 +60,61 @@ def hash_value(value: Any, length: int = 64) -> None:
         raise ValueError("Invalid registry checksum")
 
 
-def validate_registry(data: dict[str, Any]) -> dict[str, Any]:
+def lock_path(path: Path) -> Path:
+    return path.parent / f".{path.name}.lock"
+
+
+def related(first: Path, second: Path) -> bool:
+    return first == second or first.is_relative_to(second) or second.is_relative_to(first)
+
+
+def validate_publication_paths(
+    path: Path,
+    status: Path,
+    forward: Path,
+    studies: list[Path],
+    *,
+    controls: list[Path] | None = None,
+    archives: list[Path] | None = None,
+) -> None:
+    """Read-only preflight of every file/lock namespace, including symlink aliases."""
+    if path.is_symlink() or lock_path(path).is_symlink():
+        raise ValueError("Registry and registry lock must not be symlinks")
+    registry_files = [path.resolve(), lock_path(path).resolve()]
+    state = status.parent.resolve()
+    native = [p.resolve() for p in studies]
+    control_roots = [p.resolve() for p in controls or []]
+    for roots in (native, control_roots):
+        for index, first in enumerate(roots):
+            if any(related(first, second) for second in roots[index + 1 :]):
+                raise ValueError("Active study/control directories must be disjoint")
+    for protected in [*native, *control_roots]:
+        if related(state, protected) or any(related(p, protected) for p in registry_files):
+            raise ValueError("Registry/state directories must be disjoint from study directories")
+    if any(related(p, state) for p in registry_files):
+        raise ValueError("Registry and collector state directory must be disjoint")
+    files = [
+        *registry_files,
+        status.resolve(),
+        (status.parent / "collector.lock").resolve(),
+        forward.resolve(),
+        (forward.parent / "collector.lock").resolve(),
+    ]
+    for old in archives or []:
+        files.extend([old.resolve(), (old.parent / "collector.lock").resolve()])
+    for index, first in enumerate(files):
+        if any(related(first, second) for second in files[index + 1 :]):
+            raise ValueError("Registry, heartbeat and lock publication paths must be disjoint")
+
+
+def validate_registry(
+    data: dict[str, Any],
+    *,
+    registry_path: Path | None = None,
+    controls: list[Path] | None = None,
+) -> dict[str, Any]:
+    if len(json.dumps(data, sort_keys=True, indent=2).encode()) > MAX_BYTES:
+        raise ValueError("Oversized registry publication")
     body = {k: v for k, v in data.items() if k != "hash"}
     if data.get("schema") != SCHEMA or digest(body) != data.get("hash"):
         raise ValueError("Registry checksum/schema mismatch")
@@ -122,16 +176,26 @@ def validate_registry(data: dict[str, Any]) -> dict[str, Any]:
             not isinstance(n, str) or not NAME.fullmatch(n) or n in names for n in old_names
         ):
             raise ValueError("Archive and active identities must be distinct")
+    if registry_path is not None:
+        validate_publication_paths(
+            registry_path,
+            absolute_path(data["status_path"]),
+            absolute_path(data["forward_status_path"]),
+            [absolute_path(e["directory"]) for e in entries],
+            controls=controls,
+            archives=[absolute_path(a["status_path"]) for a in archives],
+        )
     return data
 
 
 def load_registry(path: Path) -> dict[str, Any]:
-    return validate_registry(read_json(path))
+    return validate_registry(read_json(path), registry_path=path)
 
 
 @contextmanager
 def registry_lock(path: Path) -> Iterator[None]:
-    with (path.parent / f".{path.name}.lock").open("a") as stream:
+    fd = os.open(lock_path(path), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a") as stream:
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
 
@@ -159,6 +223,7 @@ def assert_current(path: Path, snapshot: dict[str, Any]) -> None:
 
 
 def publish_current(path: Path, snapshot: dict[str, Any], publish: Callable[[], None]) -> None:
+    assert_current(path, snapshot)  # Refuse invalid layouts before even opening a lock.
     with registry_lock(path):
         assert_current(path, snapshot)
         publish()
