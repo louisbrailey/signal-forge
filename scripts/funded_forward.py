@@ -4,12 +4,16 @@ import argparse
 import fcntl
 import json
 import os
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
-from action_replay_report import read_metadata
+if __package__:
+    from .action_replay_report import read_metadata
+else:
+    from action_replay_report import read_metadata
 from dotenv import dotenv_values
 
+from signalforge import study_registry as registry
 from signalforge.backtest.actions import TickerChange
 from signalforge.data.accounting_snapshot import fetch_accounting_snapshot
 from signalforge.data.adapters.massive import MassiveAdapter, completed_session_cutoff
@@ -27,12 +31,14 @@ from signalforge.research.prospective_funded import (
     validate_plan,
     write_once,
 )
+from signalforge.research.strategy_scope import resolve_strategy_scope
 
 
-def _collect(root, env_file):
+def _collect(root, env_file, *, check_only=False):
     from signalforge.data.calendar import sessions
 
     plan = validate_plan(root)
+    resolve_strategy_scope(plan["strategies"])
     cutoff = completed_session_cutoff()
     available = sessions(cutoff - timedelta(days=10), cutoff)
     through = available[-1]
@@ -45,6 +51,8 @@ def _collect(root, env_file):
         return {"status": "ALREADY_COLLECTED", "through": str(through)}
     # Missed sessions are recorded and blocked from entries, never backfilled.
     state = collection_state(root, through)
+    if check_only:
+        return {"status": "READY_FOR_COLLECTION", "through": str(through)}
     if sum(p.stat().st_size for p in root.rglob("*") if p.is_file()) > plan["cache_cap_bytes"]:
         raise ValueError("Study storage cap reached")
     values = dotenv_values(env_file)
@@ -111,11 +119,48 @@ def previous_collector_sources(tree):
     }
 
 
-def collect(root, env_file):
+def collect(root, env_file, *, check_only=False):
     root.mkdir(parents=True, exist_ok=True)
     with (root / "collector.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return _collect(root, env_file)
+        return _collect(root, env_file, check_only=check_only)
+
+
+def run_collection(root, env_file, *, registry_path=None, generation=None, check_only=False):
+    snapshot = None
+    if registry_path is not None:
+        if generation is None:
+            raise ValueError("Active collector requires --expected-generation")
+        snapshot = registry.pin_collector(registry_path, generation, "forward", [root])
+    elif (root / "refresh-lineage.json").exists():
+        raise ValueError("Versioned forward study requires an active registry")
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / "collector.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if snapshot and (root / "status.json").exists():
+            previous = registry.read_json(root / "status.json")
+            if (
+                previous.get("generation") != generation
+                or previous.get("registry_hash") != snapshot["hash"]
+            ):
+                raise ValueError("Forward collector state belongs to another generation")
+        error = None
+        try:
+            status = _collect(root, env_file, check_only=check_only)
+        except Exception as exc:
+            error = exc
+            status = {"status": "BLOCKED", "error_category": type(exc).__name__}
+        status.update(checked_at=datetime.now(UTC).isoformat(), study_name=root.name)
+        if snapshot:
+            status.update(generation=generation, registry_hash=snapshot["hash"])
+            registry.publish_current(
+                registry_path, snapshot, lambda: registry.atomic_json(root / "status.json", status)
+            )
+        else:
+            registry.atomic_json(root / "status.json", status)
+        if error:
+            raise error
+        return status
 
 
 if __name__ == "__main__":
@@ -129,6 +174,9 @@ if __name__ == "__main__":
     p.add_argument("--listing-evidence", type=Path)
     p.add_argument("--previous-tree", type=Path, help="checkout of the accepted frozen code")
     p.add_argument("--reason")
+    p.add_argument("--registry", type=Path)
+    p.add_argument("--expected-generation", type=int)
+    p.add_argument("--check-only", action="store_true")
     a = p.parse_args()
     if a.command == "freeze":
         if not a.database or not a.symbols:
@@ -152,12 +200,14 @@ if __name__ == "__main__":
         if not a.env_file:
             p.error("collect requires --env-file")
         try:
-            status = collect(a.root, a.env_file)
+            status = run_collection(
+                a.root,
+                a.env_file,
+                registry_path=a.registry,
+                generation=a.expected_generation,
+                check_only=a.check_only,
+            )
             print(json.dumps(status))
-            a.root.mkdir(parents=True, exist_ok=True)
-            tmp = a.root / "status.tmp"
-            tmp.write_text(json.dumps(status))
-            tmp.replace(a.root / "status.json")
         except Exception as exc:
             # Never log exception bodies/provider responses, keys or request headers.
             # Only fixed, locally defined categories; never provider exception text.
@@ -177,8 +227,4 @@ if __name__ == "__main__":
             )
             status = {"status": "BLOCKED", "error_category": category}
             print(json.dumps(status))
-            a.root.mkdir(parents=True, exist_ok=True)
-            tmp = a.root / "status.tmp"
-            tmp.write_text(json.dumps(status))
-            tmp.replace(a.root / "status.json")
             raise SystemExit(1) from None

@@ -48,6 +48,7 @@ class Settings(BaseSettings):
 
     # Operational metadata only; never read private comparison performance.
     kronos_comparison_status_path: str = ""
+    study_active_registry_path: str = ""  # One generation snapshot for collectors and UI.
 
     # --- Market data ---
     market_data_provider: str = "fixture"

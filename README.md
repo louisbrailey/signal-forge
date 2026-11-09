@@ -51,6 +51,13 @@ and none alerts.
 
 ## Paper operations and Kronos research
 
+The [November 8 evidence audit](reports/STRATEGY_EVIDENCE_AUDIT_2026-11-08.md)
+distinguishes current strategies from superseded versions and missing tests.
+Strategy Lab shows saved source, window, cost assumptions and confidence limits;
+unknown legacy provenance stays unknown. To inspect an existing SQLite database
+without modifying it, use
+`PYTHONPATH=src uv run python scripts/strategy_evidence_audit.py /path/to/signalforge.sqlite`.
+
 See [Paper Operations](docs/PAPER_OPERATIONS.md) for current startup and monitoring,
 and the [October 2 verification report](reports/PAPER_RELEASE_2026-10-02.md) for
 observed trades, Kronos comparisons, checks and remaining limitations.

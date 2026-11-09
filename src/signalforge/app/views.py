@@ -600,8 +600,11 @@ def journal_context(session: Session) -> dict[str, Any]:
 
 
 def strategies_context(session: Session) -> dict[str, Any]:
+    from signalforge.research.evidence import evidence_inventory
     from signalforge.research.health_monitor import latest_health_by_strategy
 
+    inventory = evidence_inventory(session)
+    evidence = {(r["name"], r["version"]): r for r in inventory["current"]}
     health = latest_health_by_strategy(session)
     hm_cfg = effective_research_config(session).health_monitor
     out: list[dict[str, Any]] = []
@@ -623,6 +626,7 @@ def strategies_context(session: Session) -> dict[str, Any]:
                 "known_failure_modes": list(spec.known_failure_modes),
                 "report_ref": spec.walkforward_result_ref,
                 "oos": metric.metrics_json if metric else None,
+                "evidence": evidence[(spec.name, spec.version)],
                 "health": (
                     {
                         "window": h.window_label,
@@ -651,6 +655,7 @@ def strategies_context(session: Session) -> dict[str, Any]:
         )
     return {
         "strategies": out,
+        "evidence_inventory": inventory,
         "health_rules": {
             "enabled": hm_cfg.enabled,
             "min_paper_trades": hm_cfg.min_paper_trades,

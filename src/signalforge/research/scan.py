@@ -9,6 +9,7 @@ Every scan records three separate populations (ARCHITECTURE.md §7.1):
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -18,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from signalforge.backtest.engine import EntrySignal
 from signalforge.config import Settings, get_settings
-from signalforge.config.research import EventFilters, ResearchConfig
+from signalforge.config.research import EventFilters, QualityThresholds, ResearchConfig
 from signalforge.data.adapters.base import FeedType
 from signalforge.data.freshness import gate_for_horizon
 from signalforge.data.series import PriceSeries
@@ -27,7 +28,11 @@ from signalforge.db.session import set_write_intent
 from signalforge.db.types import utcnow
 from signalforge.domain import Direction, Horizon, QualityGate
 from signalforge.research.features.daily import atr, sma
-from signalforge.research.persistence import latest_oos_metric, upsert_strategy_version
+from signalforge.research.persistence import (
+    latest_oos_metric,
+    oos_provenance_failures,
+    upsert_strategy_version,
+)
 from signalforge.research.regime import RegimeState, regime_from_proxy
 from signalforge.research.registry import StrategySpec
 from signalforge.research.strategies import default_strategies
@@ -399,6 +404,46 @@ def _regime_at_lag(proxy: PriceSeries, as_of: date, lag: int) -> RegimeState | N
     return regime_from_proxy(proxy, idx)
 
 
+def _oos_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _oos_metric_failures(
+    metrics: object, intervals: object, thresholds: QualityThresholds
+) -> list[str]:
+    """Missing/invalid evidence cannot bypass numeric comparisons (NaN fails open).
+
+    This validates the existing gates' inputs; configured thresholds and valid
+    metrics retain their previous comparisons. No probability is inferred.
+    """
+    m = metrics if isinstance(metrics, dict) else {}
+    intervals = intervals if isinstance(intervals, dict) else {}
+    raw_ci = intervals.get("expectancy_r")
+    ci = raw_ci if isinstance(raw_ci, dict) else {}
+    n, expectancy = _oos_number(m.get("n_trades")), _oos_number(m.get("expectancy_r"))
+    low, high = _oos_number(ci.get("low")), _oos_number(ci.get("high"))
+    failed = []
+    if n is None or n < 0 or not n.is_integer():
+        failed.append("OOS trades missing or invalid")
+    elif n < thresholds.min_oos_trades:
+        failed.append(f"OOS trades {m['n_trades']} < {thresholds.min_oos_trades}")
+    if expectancy is None:
+        failed.append("OOS expectancy missing or invalid")
+    elif expectancy <= thresholds.min_oos_expectancy_r:
+        failed.append(f"OOS expectancy {expectancy:+.3f}R <= {thresholds.min_oos_expectancy_r}")
+    if low is None or high is None or low > high:
+        failed.append("OOS expectancy CI missing or invalid")
+    elif low < thresholds.min_oos_ci_low_r:
+        failed.append(f"OOS expectancy CI low {low:+.3f}R < {thresholds.min_oos_ci_low_r}")
+    return failed
+
+
 def _build_draft(
     *,
     session: Session,
@@ -439,19 +484,8 @@ def _build_draft(
         if q.require_backtest:
             failed.append("no out-of-sample backtest on record")
     else:
-        m = metric.metrics_json
-        ci = (metric.ci_json or {}).get("expectancy_r", {})
-        if float(m.get("n_trades", 0)) < q.min_oos_trades:
-            failed.append(f"OOS trades {m.get('n_trades', 0)} < {q.min_oos_trades}")
-        if float(m.get("expectancy_r", -1.0)) <= q.min_oos_expectancy_r:
-            failed.append(
-                f"OOS expectancy {float(m.get('expectancy_r', 0)):+.3f}R "
-                f"<= {q.min_oos_expectancy_r}"
-            )
-        if ci and float(ci.get("low", -1.0)) < q.min_oos_ci_low_r:
-            failed.append(
-                f"OOS expectancy CI low {float(ci.get('low', 0)):+.3f}R < {q.min_oos_ci_low_r}"
-            )
+        failed.extend(oos_provenance_failures(metric.run.params_json))
+        failed.extend(_oos_metric_failures(metric.metrics_json, metric.ci_json, q))
         n_regimes, regime_labels = _oos_regime_coverage(
             session, metric.run_id, q.min_trades_per_regime
         )
