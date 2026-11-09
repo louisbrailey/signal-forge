@@ -345,3 +345,33 @@ def test_writer_rechecks_lost_linked_metadata_before_bars(session, setup_case, m
     finally:
         stop()
     assert writes == [] and not any("ohlcv_daily" in sql for sql, _ in statements)
+
+
+@pytest.mark.parametrize("damage", ["absent", "null", "malformed"])
+@pytest.mark.parametrize("new_lock", [False, True])
+def test_writer_cannot_attest_a_missing_original_calendar(
+    session, setup_case, monkeypatch, damage, new_lock
+):
+    case = setup_case()
+    calculated = record(session, case)
+    provenance = dict(calculated.provenance)
+    if damage == "absent":
+        provenance.pop("development_calendar")
+    elif damage == "null":
+        provenance["development_calendar"] = None
+    else:
+        provenance["development_calendar"] = {"policy": "DAILY-EOD-XNYS-1"}
+    calculated = replace(calculated, provenance=provenance)
+    if new_lock:
+        third = upsert_strategy_version(
+            session, replace(case.strategy.spec(), name="intervening_lock")
+        )
+        case.lock(third.id, date(2025, 9, 6))
+        session.commit()
+    writes = []
+    monkeypatch.setattr(p, "persist_backtest_result", lambda *a, **k: writes.append(True))
+    with pytest.raises(ValueError, match="calendar boundary provenance changed"):
+        p.persist_development_oos_record(
+            session, calculated, allow_mismatch=True, allow_duplicate=True
+        )
+    assert writes == [] and session.scalar(select(BacktestRun.id)) is None

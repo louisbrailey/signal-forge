@@ -2290,7 +2290,10 @@ def persist_development_oos_record(
         record.until,
         str(record.provenance.get("proxy_symbol", "SPY")),
     )
-    if provenance.get("development_calendar") not in (None, calendar):
+    if (
+        not isinstance(provenance.get("development_calendar"), dict)
+        or provenance["development_calendar"] != calendar
+    ):
         raise ValueError("daily calendar boundary provenance changed; recompute before recording")
     provenance["development_calendar"] = calendar
     version = session.get(StrategyVersion, record.strategy_version_id)
