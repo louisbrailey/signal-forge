@@ -407,7 +407,7 @@ def test_wal_lineage_reads_only_immutable_metadata_during_writer(staged_input):
 
 
 @pytest.mark.parametrize("staged_input", ["forward"], indirect=True)
-def test_native_forward_api_cannot_silently_expand_parent_strategy_scope(staged_input):
+def test_native_forward_api_preserves_parent_five_strategy_scope(staged_input):
     args, _ = staged_input
     path = args["parent"] / "plan.json"
     _, parent = refresh.read_metadata(path)
@@ -416,9 +416,10 @@ def test_native_forward_api_cannot_silently_expand_parent_strategy_scope(staged_
     path.write_bytes(refresh.encode(parent))
     before = file_bytes(args["parent"])
     refresh.stage(**args)
-    with pytest.raises(ValueError, match="Inherited metadata changed: strategies"):
-        refresh.prepare(args["destination"], True, publish=True)
-    assert not study_root(args).exists()
+    refresh.prepare(args["destination"], True, publish=True)
+    child = forward.validate_plan(study_root(args))
+    assert len(child["strategies"]) == 5
+    assert refresh.inherited(child, "forward") == refresh.inherited(parent, "forward")
     assert file_bytes(args["parent"]) == before
 
 
@@ -445,3 +446,82 @@ def test_source_execution_enablement_blocks_native_freeze(staged_input):
     with pytest.raises(ValueError, match="Source execution must remain disabled"):
         refresh.prepare(args["destination"], True, publish=True)
     assert not study_root(args).exists()
+
+
+@pytest.mark.parametrize("staged_input", ["kronos"], indirect=True)
+@pytest.mark.parametrize("fault", ["reason", "threshold", "unstaged_scope"])
+def test_kronos_optin_does_not_authorize_thresholds_or_later_scope_drift(staged_input, fault):
+    args, source = staged_input
+    args = dict(
+        args, accept_scope_change=True, scope_change_reason="Reviewed current approved scope"
+    )
+    before = file_bytes(args["parent"])
+    if fault == "reason":
+        with pytest.raises(ValueError, match="reason"):
+            refresh.stage(**dict(args, scope_change_reason=" "))
+    elif fault == "threshold":
+        engine = create_engine("sqlite:///" + str(source))
+        with Session(engine) as session, session.begin():
+            set_setting(session, "research_overrides", {"slippage_bps": 8}, actor="test")
+        engine.dispose()
+        with pytest.raises(ValueError, match="cannot change settings"):
+            refresh.stage(**args)
+    else:
+        refresh.stage(**args)
+        engine = create_engine("sqlite:///" + str(source))
+        with Session(engine) as session, session.begin():
+            strategy = Strategy(
+                name="later-approval",
+                horizon=Horizon.SHORT_SWING,
+                status=StrategyStatus.PAPER_APPROVED,
+            )
+            session.add(strategy)
+            session.flush()
+            session.add(
+                StrategyVersion(
+                    strategy_id=strategy.id,
+                    version="1",
+                    git_sha="test",
+                    spec_json={},
+                    status=StrategyStatus.PAPER_APPROVED,
+                )
+            )
+        engine.dispose()
+        with pytest.raises(ValueError, match="Inherited metadata changed"):
+            refresh.prepare(args["destination"], True, publish=True)
+    assert not study_root(args).exists()
+    assert file_bytes(args["parent"]) == before
+
+
+def test_actual_cli_masks_env_validation_exception_and_url(tmp_path):
+    import json
+    import subprocess
+    import sys
+
+    marker = "https://synthetic.invalid/private-token"
+    env_file = tmp_path / "private.env"
+    env_file.write_text("RESEARCH='" + json.dumps({"execution": {"enabled": marker}}) + "'\n")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(refresh.ROOT / "scripts/study_refresh.py"),
+            "validate-parent",
+            "--kind",
+            "forward",
+            "--parent",
+            str(tmp_path / "absent"),
+            "--parent-checkout",
+            str(refresh.ROOT),
+            "--paper-only",
+            "--env-file",
+            str(env_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["status"] == "BLOCKED"
+    assert marker not in result.stdout + result.stderr
+    assert str(env_file) not in result.stdout + result.stderr
+    assert "Traceback" not in result.stdout + result.stderr

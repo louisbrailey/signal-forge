@@ -12,8 +12,7 @@ from typing import Any, cast
 
 from signalforge.backtest.actions import TickerChange
 from signalforge.data.calendar import sessions
-from signalforge.domain import Horizon
-from signalforge.research.strategies import default_strategies
+from signalforge.research.strategy_scope import resolve_strategy_scope
 
 
 def code_digest() -> str:
@@ -67,10 +66,12 @@ def freeze(
     start: date,
     *,
     now: datetime | None = None,
+    strategy_specs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     from dataclasses import asdict
     from zoneinfo import ZoneInfo
 
+    selected = resolve_strategy_scope(strategy_specs)
     now = now or datetime.now(UTC)
     today = now.astimezone(ZoneInfo("America/New_York")).date()
     future = sessions(today + timedelta(days=1), today + timedelta(days=10))
@@ -89,11 +90,7 @@ def freeze(
         "metadata": metadata,
         "symbols": symbols,
         "ticker_changes": [asdict(c) for c in changes],
-        "strategies": [
-            asdict(s.spec())
-            for s in default_strategies()
-            if s.spec().horizon is not Horizon.INTRADAY
-        ],
+        "strategies": [asdict(s.spec()) for s in selected],
         "capital_per_book_usd": "10000",
         "minimum_sessions_before_review": 126,
         "minimum_closed_trades_per_book": 30,

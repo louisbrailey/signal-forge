@@ -1,281 +1,210 @@
-# Versioned paper study refresh
+# Versioned paper study rollover
 
-`scripts/study_refresh.py` stages a new v2 generation and invokes the existing
-`experiments.comparison.freeze` or `research.prospective_funded.freeze` API. It
-does not run collectors, providers, inference, backtests, strategy selection or
-promotion. It does not change launchd, operating settings, arming or kill state.
-It reads manifest/configuration metadata only, never interim performance.
+`scripts/study_refresh.py` validates parent metadata, stages, freezes and
+activates a separate generation. Collectors and dashboard use one atomic active
+registry. Refresh commands never fetch data, run inference, inspect interim
+performance, promote strategies, submit orders, change kill state or install
+launchd. Main performs actual creation and service cutover after merged CI.
 
-The version belongs to the refresh envelope and folder identity. Native
-`kronos-comparison-v1` / `funded-forward-v1` **file schemas remain unchanged** so
-the existing collectors can open their new private studies.
+The v2 envelope and versioned directories contain unchanged native
+`kronos-comparison-v1` / `funded-forward-v1` file schemas. Evidence stays
+independent; no v1 collections, positions, decisions or scores are copied.
 
-## Lifecycle and invariants
+## Freeze and lineage
 
-1. `validate-parent` runs the pinned checkout's `open_books` / `validate_plan`
-   in a separate Python process with bytecode writes disabled. For Kronos it
-   cross-checks the JSON sidecar with the embedded SQLite manifest, verifies
-   its digest/code hash and all existing model artifacts. Forward checks the
-   frozen code digest. A forward v1 plan has no original self-checksum; the
-   refresh attests its current bytes, not an unverifiable historical checksum.
-2. `stage` requires a different, clean, detached release checkout at an exact
-   full Git SHA. The script and package imports must resolve to that checkout;
-   installed copies with a different repository `ROOT` are refused. Supply
-   explicit future observation/entry sessions and `--paper-only`.
-3. The new control folder contains `refresh.json` and a byte-exact archived
-   `manifest.json` or `plan.json`. Lineage includes parent path/commit/native
-   code digest, metadata checksum, config hash and model artifact inventory
-   hash. No credentials, environment contents or secret hashes are stored.
-4. `check` freezes a temporary candidate using the native API and removes it.
-   It compares **all** inherited fields, including scopes, approved versions,
-   model roots/weights/tokenizer/implementation, cash, costs and review
-   thresholds. Forward retains symbols, metadata, ticker bridges, history
-   warmup and strategy definitions. Only native creation dates/code digest,
-   future study dates, and strategy `git_sha` provenance may differ.
-5. `start` performs the same checks, verifies exact requested dates, rechecks
-   parent/release/execution, then atomically publishes one new native folder:
-   `kronos-comparison-v2-short`, `kronos-comparison-v2-medium` or
-   `funded-validation-v2`. It adds a separate `refresh-lineage.json` recording
-   the child native manifest checksum, release SHA, native code/config/model
-   hashes and parent lineage. It never edits the native frozen metadata.
+`validate-parent` runs the pinned checkout's `open_books` / `validate_plan`
+with bytecode writes disabled. Kronos cross-checks the sidecar and embedded
+SQLite manifest, code hash and pinned artifacts. Forward validates its code
+digest; its v1 plan has no original self-checksum, so the refresh attests its
+current bytes rather than claiming an unverifiable historical checksum.
 
-The forward config hash covers native plan policies/specs, including thresholds
-and metadata. Its engine's hard-coded risk/cost defaults are covered by the
-native code digest; they are not falsely represented as environment settings.
-Forward has no model weights, so `modelweights_sha256` is null. Kronos hashes
-the native config and the complete per-file model artifact hash inventory.
+`stage` requires a different, clean, detached checkout at a full Git SHA.
+Script and package `ROOT` must resolve there. It archives exact parent metadata
+and records parent/release/native code SHA, config/model hashes and explicit
+future dates. No environment contents, credentials or secret hashes are saved.
+`check` uses the native freeze API in a private temporary directory and removes
+it. `start` repeats validation and atomically publishes one new native study,
+with a separate `refresh-lineage.json` attesting child and parent metadata.
 
-Both parent and runtime execution must be disabled with `paper_reference`;
-Kronos also checks the source DB's effective execution configuration. Staging
-does not submit openings or close positions. Existing kill-switch behavior,
-including allowed maintenance closes, remains with the existing runners.
+All inherited settings, cash, costs, thresholds, review floors, model
+weights/tokenizer/implementation and duration must match. Only creation dates,
+native code digests, strategy `git_sha` provenance and the explicitly authorized
+Kronos version/scope exception below may differ. Forward config hash covers its
+native plan policies/specs; engine defaults are covered by the code digest.
+Forward's model hash is null. Kronos hashes its native config and complete
+per-file model artifact inventory. Parent, runtime and Kronos source effective
+execution must remain disabled with `paper_reference`.
 
-## Future date window
+## Explicit scope APIs: forward blocker resolved
+
+The real forward v1 plan freezes **five** strategies while the current default
+registry has ten daily strategies. `prospective_funded.freeze` and
+`action_replay.compare` now accept optional `strategy_specs=None`. Supplied
+definitions must match current registered `(name, version)` specs in every
+field except `git_sha`. Unknown, duplicate, empty, intraday or changed
+definitions are refused. The forward collector validates and executes **only**
+the plan's listed definitions. `None` preserves existing API behavior. Production
+code never monkeypatches the registry. Tests use actual v1 metadata to freeze
+five definitions and execute a real offline replay with exactly those five.
+
+Kronos preserves parent versions/scopes by default. To include **current
+PAPER_APPROVED versions**, including high52 where approved, staging requires
+`--accept-scope-change --scope-change-reason '...'`. A native metadata-only
+freeze captures the exact new versions and approval-scope hashes. The old/new
+maps and reason are immutable request/child lineage metadata. Every other field
+must match; `start` refuses further scope drift since staging. The flag never
+promotes a strategy or permits threshold/model-parameter changes. Forward
+retains its parent's five-strategy scope.
+
+## Strict future dates
 
 Observation must be a trading session **strictly after the New York calendar
-date at staging and at publication**, within 90 days. Forward's explicit entry
-must be the trading session immediately following observation. Thus even a
-creation before today's opening bar cannot claim today's session.
+date at staging and publication**, within 90 days. Forward entry must explicitly
+be the next trading session. Even a creation before today's opening bar cannot
+claim today's session. Weekend, NY midnight and exchange-calendar boundaries
+are tested. Historical warmup retains its inherited history start.
 
-Native APIs do not accept arbitrary future start dates. Kronos chooses the
-first session whose close is after freeze time; forward chooses the next NY
-session and entry one session later. `start` never patches dates or supplies a
-fictional `now`. For a Monday start, run Kronos after Friday's exchange close
-(including its real early-close calendar), during the weekend, or before NY
-midnight ending Sunday. Forward may freeze on Friday through Sunday. All
-studies must publish before observation's NY calendar date begins. `check`
-returns `WAITING_FOR_FREEZE_WINDOW` when native dates differ; `start` refuses.
-If a release arrives too late, stage a new unused control folder with later
-dates; never reset or rewrite the earlier request or any observed study.
+Native APIs use real creation time; dates/clocks are never patched. For a
+Monday observation, run Kronos after Friday's real exchange close (including
+early closes), during the weekend or before NY midnight ending Sunday.
+Forward can freeze Friday through Sunday. `check` reports
+`WAITING_FOR_FREEZE_WINDOW` when native dates differ; `start` refuses. If the
+release arrives late, stage another unused control folder with later dates.
 
-New generations contain no parent collections, positions, decisions or scores.
-Historical bars used for warmup retain the inherited history start; observation
-and entry windows remain future-only. Crypto ledger performance is never
-imported. Nothing here declares Kronos v1 invalid or validates its performance.
+## Atomic registry, collector fencing and UI
 
-## Atomicity, concurrency and archive scope
+Staging/publication use nonblocking sibling `flock`, private temporary builds
+and same-filesystem rename. Existing requests/studies are never overwritten
+or refrozen; failed generation can retry. Hard termination may leave
+`.refresh-stage-*`, `.scope-check-*` or `.refresh-build-*` orphans. Remove only
+after confirming no publisher holds the lock. This is atomic publication,
+not a power-loss durability guarantee.
 
-Staging and publication use a nonblocking sibling `flock`, a private temporary
-directory on the same filesystem and directory rename. Cooperating publishers
-cannot race or overwrite a destination. A completed study is never refrozen;
-the existing collectors retain their per-study locks/deduplication. Failed
-generation cleans its temporary directory and can retry from the same request.
-A hard process termination can leave `.refresh-stage-*` / `.refresh-build-*`
-orphans; these are never treated as started studies and can be removed after
-confirming no publisher holds the lock. The sibling lock files intentionally
-remain. This is atomic publication, not a power-loss durability guarantee.
+`activate` validates all three started studies and atomically replaces one
+checksummed registry using compare-and-swap `--expected-generation`. It requires
+a **new** Kronos state directory and fresh forward heartbeat path. Archives
+retain old operational identities/status paths separately. Success counters,
+transitions and evidence are not copied into v2. Numbers increase and native
+identities cannot overlap archived ones. This implementation creates v2 names;
+another rollover requires new native versioned identities.
 
-The archive is **frozen manifest metadata only**. Embedded Kronos metadata is
-read with the pinned API in a read-only SQLite snapshot (a single SELECT),
-including when unrelated records are being appended in WAL mode. The sidecar
-is cross-checked and reread after validation. No raw DB checksum/copy is taken
-against a concurrent writer. Parent metadata must remain immutable; any later
-byte change, including whitespace, blocks check/start rather than rebasing.
-An immutable checksum does not expire with age.
+Both collectors require `--registry --expected-generation` for versioned
+studies. They pin registry hash/generation, exact directories and native
+metadata/lineage checksums before polling. Before heartbeat publication they
+recheck under the **same lock used by activation**. A mid-poll cutover fences
+the old publisher. Per-study locks and daily deduplication remain. Old polls
+may finish appending to their own private study, but cannot publish active
+health for a different generation. No kill-all-writes policy is introduced;
+allowed maintenance closes remain governed by existing runners.
 
-Keep full v1 evidence and its original checkout in place. If the operator wants
-a full archive after cutover, first stop that v1 collector, wait for its lock to
-be free, and use SQLite's online backup API/read-only transaction for a
-consistent snapshot. Do not copy/hash a live main DB file while ignoring WAL.
-Do not force finalization or rewrite outcomes. Stop/archive v1 only after v2
-creation, collector checks and the visible active-status switch succeed.
+Set `STUDY_ACTIVE_REGISTRY_PATH` in the app/service environment. `/kronos` and
+authenticated `GET /kronos/collection-status` expose bounded operational
+projections: generation, release/lineage identity, future start date, known
+statuses and times. Missing/mismatched/stale v2 never falls back to healthy v1.
+Archived generations have a separate details section containing operational
+metadata only. Forward has an independent fenced heartbeat and visible status.
+Without a registry configured the old setting remains compatible, explicitly
+labelled **Legacy configuration**. Registry replacement during projection
+invalidates the mixed snapshot rather than displaying stale active health.
 
-Metadata is capped at 2 MiB, each pinned subprocess at 60 seconds, and Kronos
-artifact inventory at 256 roots, 20,000 files and 4 GiB. Refreshing fails closed
-if inherited assets are missing or revised. Existing provider entitlement,
-model runtime readiness and source scan availability are separate checks.
+Heartbeat freshness: Kronos 180 seconds; forward 3900 seconds. Immutable hashes
+do not age. Bounds: registry 60 KiB/16 archived generations, native metadata
+2 MiB, Kronos heartbeat 256 KiB, artifact validation 256 roots/20,000 files/4 GiB,
+pinned subprocess 60 seconds. No arbitrary text, local paths, P&L or model output
+is projected to the UI.
 
-## Verified forward API blocker at base bc37836
+Only frozen manifest metadata is archived. Embedded Kronos metadata is read in
+a read-only SQLite snapshot, including with unrelated WAL appends; the sidecar
+is cross-checked and reread. No concurrent raw DB copy/hash is taken. Parent
+byte mutation blocks rather than rebasing. For full archival, stop v1, wait for
+its collector lock and use SQLite online backup/read-only transaction; never
+copy/hash the main DB while ignoring WAL. Retain v1 plans/outcomes/checkouts,
+do not force finalization and do not label v1 invalid without evidence. No crypto
+old-period performance is inherited or compared.
 
-Metadata-only inspection of the existing `funded-validation-v1/plan.json`
-found **five** frozen strategies. At this base, `default_strategies()` returns
-**ten** non-intraday strategies. The first five definitions match the parent
-apart from code provenance, but expanding the scope is not an authorized
-refresh. `check` / `start` therefore block on `strategies` for this real parent.
-No v2 forward study has been created or declared runnable from that parent.
+## Exact operator commands after merged CI
 
-Preserving the five-strategy scope requires coordinated changes outside this
-patch's ownership:
-
-* `src/signalforge/research/prospective_funded.py::freeze`: accept and validate
-  an explicit immutable strategy scope rather than always freezing the whole
-  default registry. Keep the parent's review thresholds and policies exact.
-* `src/signalforge/research/action_replay.py::compare`: accept the same scope;
-  currently it independently loops over all defaults, ignoring the plan's
-  `strategies` field. Merely changing the frozen JSON would be unsafe.
-* `scripts/funded_forward.py::_collect`: pass the frozen validated scope into
-  the replay and refuse definition mismatches. Add focused tests proving only
-  the parent scope is executed and extra defaults cannot silently enter it.
-* `scripts/study_refresh.py::native_freeze`: after that explicit scope API is
-  agreed and implemented, pass the parent's frozen strategy scope into it.
-  The current call deliberately uses the existing API and fails closed when
-  its default registry would expand the parent plan.
-
-Main should coordinate these API repairs before making a release intended to
-start this forward v2. The CLI intentionally reports the blocker rather than
-patching native manifests or monkeypatching registry functions. Kronos does
-not share this forward runner; this finding says nothing about Kronos v1
-validity. Its updated source approvals/settings still need a post-release
-`check` before publication; they were not inferred from interim outcomes.
-
-## Operator commands after a merged release exists
-
-These commands are for the main orchestrator, not a deployment performed by
-this change. `RELEASE_SHA` must include this implementation **and** any
-coordinated status-reader changes. Use a new release checkout and data folders;
-leave the canonical checkout and both pinned v1 code checkouts untouched.
-Replace the full SHA and local env path; never paste credential values.
+Main owns actual creation, environment changes, service scheduling and cutover.
+The release helper agent owns `deploy/run_release.py`. This implementation does
+not edit that file, `app/views.py`, scheduler/hourly ledgers, canonical dirty
+code or pinned v1 files. Replace the full release SHA. Never print/copy env
+contents or credentials. Configure the app/service with the same registry path
+and restart through the coordinated release procedure; the export below also
+configures this operator shell.
 
 ```sh
+set -e
 RELEASE_SHA='<full merged release SHA>'
 STUDY_RELEASE=/Users/louisbrailey/.codex/worktrees/study-release-v2/signal-forge
-STUDY_CONTROL="$STUDY_RELEASE/data/study-refresh-v2"
+STUDY_CONTROL=/Users/louisbrailey/Projects/signal-forge/data/study-refresh-v2
 STUDY_ENV=/Users/louisbrailey/Projects/signal-forge/.env
 KRONOS_V1=/Users/louisbrailey/.codex/worktrees/kronos-shadow-research/signal-forge
 FORWARD_V1=/Users/louisbrailey/.codex/worktrees/profit-target-assessment/signal-forge
-
+ACTIVE_REGISTRY="$STUDY_CONTROL/active.json"
+export STUDY_ACTIVE_REGISTRY_PATH="$ACTIVE_REGISTRY"
 git worktree add --detach "$STUDY_RELEASE" "$RELEASE_SHA"
 cd "$STUDY_RELEASE"
 uv sync --frozen --extra llm
 ```
 
-Explicit example dates below work only for creation on November 8, 2026 (or an
-eligible preceding freeze window). If the release lands later, select later
-future sessions from the exchange calendar and change **both** variables.
+The explicit example dates below are valid for creation on November 8, 2026.
+Choose later future trading sessions if the release arrives later. Publication
+must finish before the observation NY calendar date begins.
 
 ```sh
 OBS=2026-11-09
 ENTRY=2026-11-10
-
 for HORIZON in short medium; do
-  .venv/bin/python scripts/study_refresh.py validate-parent \
-    --kind kronos --parent "$KRONOS_V1/data/kronos-comparison-v1-$HORIZON" \
-    --parent-checkout "$KRONOS_V1" --paper-only --env-file "$STUDY_ENV"
-  .venv/bin/python scripts/study_refresh.py stage \
-    --kind kronos --parent "$KRONOS_V1/data/kronos-comparison-v1-$HORIZON" \
+  .venv/bin/python scripts/study_refresh.py stage --kind kronos \
+    --parent "$KRONOS_V1/data/kronos-comparison-v1-$HORIZON" \
     --parent-checkout "$KRONOS_V1" --checkout "$STUDY_RELEASE" \
     --release "$RELEASE_SHA" --destination "$STUDY_CONTROL/$HORIZON" \
-    --first-observation "$OBS" --paper-only --env-file "$STUDY_ENV"
+    --first-observation "$OBS" --paper-only --env-file "$STUDY_ENV" \
+    --accept-scope-change --scope-change-reason 'Current PAPER_APPROVED scope, including high52 where approved'
 done
-
 .venv/bin/python scripts/study_refresh.py stage --kind forward \
   --parent /Users/louisbrailey/Projects/signal-forge/data/funded-validation-v1 \
   --parent-checkout "$FORWARD_V1" --checkout "$STUDY_RELEASE" \
   --release "$RELEASE_SHA" --destination "$STUDY_CONTROL/forward" \
-  --first-observation "$OBS" --first-entry "$ENTRY" \
-  --paper-only --env-file "$STUDY_ENV"
-
+  --first-observation "$OBS" --first-entry "$ENTRY" --paper-only --env-file "$STUDY_ENV"
 for STUDY in short medium forward; do
-  .venv/bin/python scripts/study_refresh.py check "$STUDY_CONTROL/$STUDY" \
-    --paper-only --env-file "$STUDY_ENV" || break
-  .venv/bin/python scripts/study_refresh.py start "$STUDY_CONTROL/$STUDY" \
-    --paper-only --env-file "$STUDY_ENV" || break
+  .venv/bin/python scripts/study_refresh.py check "$STUDY_CONTROL/$STUDY" --paper-only --env-file "$STUDY_ENV"
+  .venv/bin/python scripts/study_refresh.py start "$STUDY_CONTROL/$STUDY" --paper-only --env-file "$STUDY_ENV"
 done
 ```
 
-Check each exit code; this is per-study atomicity, not an all-three transaction.
-`Inherited metadata changed: <field paths>` is a blocker, not a request to tune
-or edit the v1 record. A merged release that changes config schema, scopes,
-caps, definitions or review policy may need a separately reviewed future study
-protocol. This tool deliberately does not auto-migrate those semantics.
+Review staged scope old/new maps and reason before start. Publication is atomic
+per study, not across all three. A settings/definition mismatch blocks rather
+than changing parameters. Provider entitlement, model runtime and source scan
+availability remain separate operational checks.
 
-After all three start successfully, run these bounded collector checks from
-the immutable checkout. Kronos `--check-only` never invokes inference or
-advances books. Before `OBS`, forward `collect` must return
-`WAITING_FOR_FIRST_FUTURE_SESSION` before reading credentials or making a
-provider call. At/after `OBS`, that forward command is an actual authorized
-collection and can fetch data; it is not an offline check.
+After all starts succeed, activate once. Supply the actual v1 operational
+heartbeat path; the known default is shown. Preconfiguring the app to the new
+registry is safe: until it exists, status is unavailable, not v1 success.
 
 ```sh
-.venv/bin/python scripts/kronos_comparison_collect.py \
-  --checkout "$STUDY_RELEASE" \
+.venv/bin/python scripts/study_refresh.py activate --paper-only --env-file "$STUDY_ENV" \
+  --registry "$ACTIVE_REGISTRY" --generation 2 --expected-generation 0 \
+  --study "$STUDY_CONTROL/short" --study "$STUDY_CONTROL/medium" --study "$STUDY_CONTROL/forward" \
+  --state-dir "$STUDY_CONTROL/collector-state-g2" \
+  --legacy-kronos-status "$KRONOS_V1/data/comparison-collector/status.json"
+.venv/bin/python scripts/kronos_comparison_collect.py --checkout "$STUDY_RELEASE" \
   --experiment "$STUDY_CONTROL/short/kronos-comparison-v2-short" \
   --experiment "$STUDY_CONTROL/medium/kronos-comparison-v2-medium" \
-  --state-dir "$STUDY_CONTROL/collector-state" --env-file "$STUDY_ENV" --check-only
-
-.venv/bin/python scripts/funded_forward.py collect \
-  "$STUDY_CONTROL/forward/funded-validation-v2" --env-file "$STUDY_ENV"
+  --state-dir "$STUDY_CONTROL/collector-state-g2" --env-file "$STUDY_ENV" \
+  --registry "$ACTIVE_REGISTRY" --expected-generation 2 --check-only
+.venv/bin/python scripts/funded_forward.py collect "$STUDY_CONTROL/forward/funded-validation-v2" \
+  --env-file "$STUDY_ENV" --registry "$ACTIVE_REGISTRY" --expected-generation 2 --check-only
 ```
 
-Kronos' ongoing command is identical with `--check-only` removed; it can perform
-local model inference after an approved scan. Forward's ongoing command is the
-same `collect`. No commands here install or reload launchd. The release helper
-agent owns `deploy/run_release.py` and its tests; main owns scheduling/cutover.
+Both checks are offline, including after observation begins. Forward validates
+the plan/scope and returns waiting, already collected or ready before reading
+credentials or fetching data. Remove `--check-only` for scheduled collection:
+forward may fetch licensed data and Kronos may invoke local inference after an
+approved scan. Neither is activated or scheduled by the refresh command.
 
-## Required active-status integration: main orchestrator ownership
-
-The existing reader at `src/signalforge/kronos/collection_status.py` hard-codes
-`BOOKS` to the two v1 basenames. Merely changing
-`KRONOS_COMPARISON_STATUS_PATH` to a v2 heartbeat will show invalid metadata.
-Leaving the path unchanged can silently keep displaying a healthy v1 collector.
-The collector identifies experiments by `directory.name`, which is why the
-native v2 directories above have distinct, versioned names.
-
-Minimal coordinated integration proposal (not implemented in this patch):
-
-* `src/signalforge/config/settings.py`: add an optional active-study registry
-  path (for example `STUDY_ACTIVE_REGISTRY_PATH`); keep the existing heartbeat
-  setting only as an explicitly labelled legacy fallback.
-* `src/signalforge/kronos/collection_status.py`: resolve the expected active
-  names **and heartbeat path from one bounded registry snapshot**, rather
-  than a hard-coded `BOOKS` tuple plus a separately switched environment path.
-  Validate exact generation, unique names, known statuses, freshness and
-  timestamps. Missing/mismatched active metadata must be visibly unavailable;
-  never fall back to v1 success as evidence of active v2 health.
-* `scripts/kronos_comparison_collect.py`: pin the active registry identity for
-  the poll, and refuse to publish active health if its generation/expected
-  names change before publication. Preserve existing per-study collector
-  locks and day deduplication. Use a **new v2 state directory**; do not mix v1
-  transitions/last-success history into v2. The release helper must serialize
-  collector stop/start and registry cutover so only the intended active poll
-  publishes; the refresh lock alone does not own daemon scheduling.
-* `src/signalforge/app/routers/kronos.py` and
-  `src/signalforge/app/templates/kronos.html`: surface active generation,
-  start date and lineage identity from the sanitized status projection; put
-  archived v1 operational metadata in an explicitly separate section. Do not
-  open book DBs or expose interim performance. No `app/views.py` edits are
-  required by the reader inspected at base `bc37836`; coordinate any newer
-  canonical changes with main before editing that shared file.
-* `tests/app/test_collection_status.py` and
-  `tests/experiments/test_collector.py`: add active-v2/archived-v1 separation,
-  registry mismatch/missing/stale heartbeat, mid-poll cutover race and duplicate
-  poll tests. These integration tests belong with main's reader changes.
-* `deploy/launchd/com.signalforge.kronos-comparison.plist` and
-  `deploy/launchd/templates/com.signalforge.funded-validation.plist`: main
-  points interpreter, scripts, `PYTHONPATH`, working directory and study roots
-  to the same immutable release; use the new v2 heartbeat directory. Do not
-  reuse the old pinned package imports with the new script.
-
-A registry can hold `{schema, generation, activated_at, release_sha, active,
-archive}`. `active.kronos` contains the two names, control/native directories,
-request hashes and common heartbeat path. `active.forward` contains its native
-directory, request hash and operational `status.json` path. `archive` references
-v1 metadata separately. Main atomically replaces the registry **after** every
-new study/check succeeds and coordinates old collector retirement. Never
-copy prior success counters into the new generation. No general forward-study
-dashboard reader exists in the inspected base; main must add a bounded
-operational projection if forward status is to be displayed.
-
-No active-pointer switch is performed by this implementation. Treat visible
-status integration and scheduling as outstanding release work, not as already
-working merely because the staging CLI passes its tests.
+Main points interpreter, script, `PYTHONPATH`, working directory, roots,
+registry and expected generation together to the immutable release, using
+existing launchd definitions/release helper. Verify generation 2 and separate
+archive status on `/kronos` and `/kronos/collection-status`. Stop/archive v1 only
+after v2 checks, collectors and visible status are verified; never rewrite it.

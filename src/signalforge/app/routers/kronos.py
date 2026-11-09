@@ -70,6 +70,12 @@ def kronos_page(
     )
 
 
+@router.get("/kronos/collection-status")
+def collection_status_json(user: UserDep) -> JSONResponse:
+    """Authenticated operational projection; never opens private study outcomes."""
+    return JSONResponse(collection_status())
+
+
 @router.post("/kronos/replay", dependencies=Guard, response_class=HTMLResponse)
 def kronos_replay(
     request: Request,
