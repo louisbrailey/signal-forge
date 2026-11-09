@@ -12,10 +12,23 @@ What it is not: not an order path. No adapter, account, credential or network
 call lives here (import contract S18H). ``SEALED_PASS`` plus a positive paper
 record is evidence for a later operator decision; nothing here arms anything.
 
-Safety rules, identical to the daily book: SEALED_PASS required (re-checked every
+Safety rules: SEALED_PASS required (re-checked every
 cycle); the kill switch and audited data holds block OPENING only, never closing
 or marking; declined entries are stored as ``SKIPPED`` so a later cycle can never
 open them late; CLOSED rows are immutable and disagreements go to ``divergence``.
+
+Admission audit (H2): append-only ``AppSettingHistory`` rows under
+``crypto_hourly_admission:<book_id>`` record exact enrollment and conservative
+no-admission cutoffs. An inhibition refuses ALL unseen fills through its last
+observation, extended through the first clear observation, even if bars arrived
+late or replay failed. Already stored positions still reconcile normally.
+
+Legacy H1 books lack this exact-enrollment attestation: their start, trades and
+results stay intact, but all unseen entries are held as ``enrollment_hold``.
+There is NO automatic migration using the floored start or DB insertion time.
+Resumption requires a separately reviewed provenance migration or a new versioned
+book; clearing the ordinary data hold cannot grant enrollment. Historical results
+are never recertified by this code.
 """
 
 from __future__ import annotations
@@ -30,8 +43,14 @@ from sqlalchemy.orm import Session
 
 from signalforge.backtest.costs import CostModel
 from signalforge.backtest.engine import SimTrade
+from signalforge.config import paths
 from signalforge.data.series import PriceSeries
-from signalforge.db.models import CryptoHourlyPaperBook, CryptoHourlyPaperTrade, CurrencySealedTest
+from signalforge.db.models import (
+    AppSettingHistory,
+    CryptoHourlyPaperBook,
+    CryptoHourlyPaperTrade,
+    CurrencySealedTest,
+)
 from signalforge.db.session import has_write_intent, set_write_intent
 from signalforge.killswitch import get_kill_switch
 from signalforge.research.fx.harness import FxGates, ResearchMarket, backtest
@@ -42,6 +61,7 @@ from signalforge.research.fx.strategies import FxStrategy
 from signalforge.settings_store import get_setting
 
 PAPER_VERSION = "CRYPTO-PAPER-H1"
+ADMISSION_VERSION = "CRYPTO-PAPER-H2"
 OBSERVATION_DAYS = 180
 DEFAULT_RISK_USD = 100.0  # illustration only: results are recorded in R
 _PRICE_TOL = 1e-6
@@ -65,7 +85,7 @@ def _utc(stamp: date | datetime) -> datetime:
 
 
 def _open_block_reason(session: Session, key: str) -> str:
-    holds = get_setting(session, HOLDS_SETTING, {}) or {}
+    holds = get_setting(session, HOLDS_SETTING, {})
     if not isinstance(holds, dict):
         return "invalid crypto paper data-hold configuration"
     return str(holds.get(key, ""))
@@ -108,6 +128,175 @@ def get_book(session: Session, key: str) -> CryptoHourlyPaperBook | None:
     )
 
 
+def _audit_key(book: CryptoHourlyPaperBook) -> str:
+    return f"crypto_hourly_admission:{book.id}"
+
+
+def _audit_time(value: Any) -> datetime:
+    stamp = datetime.fromisoformat(value)
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        raise ValueError("admission audit requires an exact, timezone-aware timestamp")
+    return _utc(stamp)
+
+
+def _append_admission(session: Session, book: CryptoHourlyPaperBook, event: dict[str, Any]) -> None:
+    session.add(
+        AppSettingHistory(
+            key=_audit_key(book),
+            old_value_json=None,
+            new_value_json={"version": ADMISSION_VERSION, **event},
+            changed_by="crypto-hourly-paper",
+        )
+    )
+
+
+@dataclass(slots=True)
+class _AdmissionState:
+    enrolled_at: datetime | None = None
+    cutoffs: list[tuple[datetime, str]] = field(default_factory=list)
+    pending_reason: str = ""
+    kill_seen_at: datetime | None = None
+    hold_seen_id: int = 0
+    hold: str = "exact enrollment unavailable; legacy book needs reviewed migration"
+
+    def block_reason(self, entry_at: datetime) -> str:
+        if self.hold:
+            return "enrollment_hold"
+        return next((reason for through, reason in self.cutoffs if entry_at <= through), "")
+
+
+def _admission_state(session: Session, book: CryptoHourlyPaperBook) -> _AdmissionState:
+    """Read immutable events, never infer enrollment from legacy timestamps."""
+    state = _AdmissionState()
+    events = session.scalars(
+        select(AppSettingHistory.new_value_json)
+        .where(AppSettingHistory.key == _audit_key(book))
+        .order_by(AppSettingHistory.id)
+    )
+    try:
+        for i, event in enumerate(events):
+            if event["version"] != ADMISSION_VERSION:
+                raise ValueError("unknown admission version")
+            kind = event["kind"]
+            if kind == "enrolled" and i == 0:
+                enrolled = _audit_time(event["at"])
+                first_fill = enrolled.replace(minute=0, second=0, microsecond=0) + timedelta(
+                    hours=1
+                )
+                if first_fill != _utc(book.start_at):
+                    raise ValueError("enrollment boundary disagrees with book")
+                state.enrolled_at, state.hold = enrolled, ""
+            elif kind in ("blocked", "resumed") and event["reason"] in ("kill_switch", "data_hold"):
+                through = _audit_time(event["at"])
+                state.cutoffs.append((through, event["reason"]))
+                state.pending_reason = event["reason"] if kind == "blocked" else ""
+                if event.get("kill_seen_at"):
+                    acknowledged = _audit_time(event["kill_seen_at"])
+                    if acknowledged > through:
+                        raise ValueError("acknowledged transition has no covering refusal cutoff")
+                    state.kill_seen_at = max(state.kill_seen_at or acknowledged, acknowledged)
+                state.hold_seen_id = max(state.hold_seen_id, int(event.get("hold_seen_id", 0)))
+            else:
+                raise ValueError("invalid admission event")
+    except (KeyError, TypeError, ValueError):
+        state.hold = "invalid admission audit; new entries held pending reviewed repair"
+    return state
+
+
+def _inhibition_event(
+    session: Session, book: CryptoHourlyPaperBook, at: datetime, forced_reason: str = ""
+) -> dict[str, Any] | None:
+    """Also catch a full engage/release or audited hold between job ticks.
+    Latest release is enough: refuse ALL unseen fills through this observation,
+    without guessing the missing onset. A pending event survives process death.
+    """
+    state = _admission_state(session, book)
+    kill = get_kill_switch().state()
+    # Missing state is the kill switch's documented fresh-install state; its
+    # synthetic changed_at is not a release. Corrupt state reads as active.
+    kill_at = _utc(kill.changed_at) if paths.kill_switch_state_path().exists() else None
+    # Completion is NOT an observation: a kill can engage and release after
+    # the last switch read but before last_cycle_at is stamped. A transition
+    # is acknowledged only by a durable admission event carrying its cutoff.
+    # Existing H2 histories already have this field; no history is rewritten.
+    since = state.kill_seen_at or state.enrolled_at
+    unseen_release = bool(kill_at and (since is None or kill_at > since) and not kill.active)
+    unseen_hold = False
+    hold_seen_id = state.hold_seen_id
+    for h in session.scalars(
+        select(AppSettingHistory).where(
+            AppSettingHistory.key == HOLDS_SETTING,
+            AppSettingHistory.id > state.hold_seen_id,
+            AppSettingHistory.created_at >= (state.enrolled_at or _utc(book.start_at)),
+        )
+    ):
+        hold_seen_id = max(hold_seen_id, h.id)
+        for value in (h.old_value_json, h.new_value_json):
+            if value is not None and (not isinstance(value, dict) or value.get(book.strategy_key)):
+                unseen_hold = True
+    reason = forced_reason or (
+        "kill_switch"
+        if kill.active
+        else "data_hold" if _open_block_reason(session, book.strategy_key) else ""
+    )
+    pending = bool(reason)
+    reason = (
+        reason
+        or state.pending_reason
+        or ("kill_switch" if unseen_release else "data_hold" if unseen_hold else "")
+    )
+    if not reason:
+        return None
+    return {
+        "kind": "blocked" if pending else "resumed",
+        # The state read can occur after the caller sampled `at`. Never
+        # acknowledge a transition newer than the cutoff protecting it.
+        "at": max(at, kill_at or at).isoformat(),
+        "reason": reason,
+        "kill_seen_at": kill_at.isoformat() if kill_at else None,
+        "hold_seen_id": hold_seen_id,
+    }
+
+
+def _note_inhibition(
+    session: Session, book: CryptoHourlyPaperBook, at: datetime, reason: str = ""
+) -> None:
+    """WRITE phase only. Never replace or remove an earlier refusal."""
+    if event := _inhibition_event(session, book, at, reason):
+        _append_admission(session, book, event)
+
+
+def record_admission_state(session: Session, key: str, *, now: datetime | None = None) -> None:
+    """Durably refuse inhibited history BEFORE ingestion/replay can fail.
+
+    Uses a short writer only when needed, then restores the caller's intent.
+    The first clear observation extends a pending cutoff through that instant.
+    Ordinary clear cycles add no event and acquire no write lock here.
+    """
+    restore = has_write_intent(session)
+    if session.in_transaction():
+        session.commit()
+    try:
+        set_write_intent(session, False)
+        book = get_book(session, key)
+        if book is None:
+            raise PaperBookRefused(f"no hourly paper book for {key}")
+        at = _utc(now or datetime.now(UTC))
+        event = _inhibition_event(session, book, at)
+        session.commit()
+        if event:
+            set_write_intent(session, True)
+            _note_inhibition(
+                session, book, at, event["reason"] if event["kind"] == "blocked" else ""
+            )
+            session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        set_write_intent(session, restore)
+
+
 def start_book(
     session: Session,
     key: str,
@@ -115,15 +304,16 @@ def start_book(
     now: datetime | None = None,
     risk_usd: float = DEFAULT_RISK_USD,
 ) -> CryptoHourlyPaperBook:
-    """Create the book. ``start_at`` is the current hour (UTC, floored): only
-    entries on bars completed from that hour onward can produce a trade."""
+    """Enroll at the exact instant; first fill is STRICTLY after enrollment,
+    including creation exactly on an hour. Persist the attestation atomically."""
     market, _ = _resolve(key)
     sealed = _sealed_pass(session, key)
     if reason := _open_block_reason(session, key):
         raise PaperBookRefused(f"{key}: data hold: {reason}")
     if get_book(session, key) is not None:
         raise PaperBookRefused(f"an hourly paper book for {key} {market.version} already exists")
-    start_at = _utc(now or datetime.now(UTC)).replace(minute=0, second=0, microsecond=0)
+    enrolled_at = _utc(now or datetime.now(UTC))
+    start_at = enrolled_at.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     book = CryptoHourlyPaperBook(
         strategy_key=key,
         version=market.version,
@@ -134,6 +324,8 @@ def start_book(
         risk_usd_per_trade=risk_usd,
     )
     session.add(book)
+    session.flush()
+    _append_admission(session, book, {"kind": "enrolled", "at": enrolled_at.isoformat()})
     session.commit()
     return book
 
@@ -261,6 +453,7 @@ def _apply_pair(
     rep: CycleReport,
     *,
     engaged: bool,
+    admission: _AdmissionState,
 ) -> None:
     """Reconcile one pair's replay with its stored rows (WRITE phase). The
     stored rows are re-read here, inside the write transaction, so a row
@@ -293,7 +486,9 @@ def _apply_pair(
         if row is not None and row.status == "SKIPPED":
             continue  # declined under the kill switch or a hold — never opened later
         if row is None:
-            if engaged or rep.data_hold:
+            blocked = "kill_switch" if engaged else "data_hold" if rep.data_hold else ""
+            blocked = blocked or admission.block_reason(entry_at)
+            if blocked:
                 session.add(
                     CryptoHourlyPaperTrade(
                         book_id=book.id,
@@ -303,13 +498,13 @@ def _apply_pair(
                         entry_price=t.entry_price,
                         stop_price=stop_for(entry_at),
                         status="SKIPPED",
-                        exit_reason="kill_switch" if engaged else "data_hold",
+                        exit_reason=blocked,
                         costs_bps=t.costs_bps,
                         reason=t.reason[:64],
                         divergence="",
                     )
                 )
-                if engaged:
+                if blocked == "kill_switch":
                     rep.skipped_open_kill_switch.append(tag)
                 else:
                     rep.skipped_open_data_hold.append(tag)
@@ -393,6 +588,7 @@ def run_cycle(session: Session, key: str, *, now: datetime | None = None) -> Cyc
     if session.in_transaction():
         session.commit()
     try:
+        record_admission_state(session, key, now=now)
         for attempt in range(_MAX_CYCLE_ATTEMPTS):
             set_write_intent(session, False)
             book = get_book(session, key)
@@ -425,8 +621,12 @@ def run_cycle(session: Session, key: str, *, now: datetime | None = None) -> Cyc
                 raise PaperBookRefused(f"hourly paper book for {key} vanished mid-cycle")
             engaged = engaged or get_kill_switch().state().active
             rep.data_hold = rep.data_hold or _open_block_reason(session, key)
+            reason = "kill_switch" if engaged else "data_hold" if rep.data_hold else ""
+            _note_inhibition(session, book, _utc(now or datetime.now(UTC)), reason)
+            session.flush()  # own new cutoff must be visible with autoflush=False
+            admission = _admission_state(session, book)
             for pr in replays:
-                _apply_pair(session, book, strat, pr, rep, engaged=engaged)
+                _apply_pair(session, book, strat, pr, rep, engaged=engaged, admission=admission)
             book.last_cycle_at = _utc(now or datetime.now(UTC))
             last_bars = [pr.last_bar for pr in replays if pr.last_bar is not None]
             if last_bars:
@@ -459,11 +659,23 @@ def status(session: Session, key: str) -> dict[str, Any]:
     closed = [r for r in rows if r.status == "CLOSED" and r.pnl_r is not None]
     pnl = [float(r.pnl_r) for r in closed if r.pnl_r is not None]
     sealed = session.get(CurrencySealedTest, book.sealed_test_id)
+    admission = _admission_state(session, book)
     return {
         "strategy_key": key,
         "version": book.version,
-        "data_hold": _open_block_reason(session, key),
+        "data_hold": _open_block_reason(session, key) or admission.hold,
         "paper_version": PAPER_VERSION,
+        "admission_version": ADMISSION_VERSION,
+        "admission_hold": admission.hold,
+        "prospective_performance_eligible": not bool(admission.hold),
+        "performance_notice": (
+            "Quarantined legacy/invalid enrollment: retained results are historical only; "
+            "exclude from prospective performance. No historical outcome was rewritten."
+            if admission.hold
+            else "H2 admission policy; simulated only."
+        ),
+        "enrolled_at": admission.enrolled_at.isoformat() if admission.enrolled_at else None,
+        "admission_audit_key": _audit_key(book),
         "start_at": _utc(book.start_at).isoformat(),
         "observation_end": _utc(book.observation_end).isoformat(),
         "last_bar_at": _utc(book.last_bar_at).isoformat() if book.last_bar_at else None,
@@ -488,6 +700,7 @@ def status(session: Session, key: str) -> dict[str, Any]:
             1 for r in rows if r.status == "SKIPPED" and r.exit_reason == "data_hold"
         ),
         "expectancy_r": (sum(pnl) / len(pnl)) if pnl else None,
+        "prospective_expectancy_r": (sum(pnl) / len(pnl)) if pnl and not admission.hold else None,
         "total_r": sum(pnl),
         "illustrative_usd": sum(pnl) * book.risk_usd_per_trade,
         "sealed_expectancy_r": (
@@ -496,7 +709,13 @@ def status(session: Session, key: str) -> dict[str, Any]:
         "divergences": [
             f"{r.pair} {_utc(r.entry_at).isoformat()}: {r.divergence}" for r in rows if r.divergence
         ],
-        "notice": "SIMULATED hourly paper book. No order was placed; no broker is connected.",
+        "notice": "SIMULATED hourly paper book. No order was placed; no broker is connected."
+        + (
+            " QUARANTINED: retained results are historical only; "
+            "exclude from prospective performance."
+            if admission.hold
+            else ""
+        ),
     }
 
 
@@ -505,6 +724,7 @@ __all__ = [
     "PAPER_VERSION",
     "PaperBookRefused",
     "get_book",
+    "record_admission_state",
     "run_cycle",
     "start_book",
     "status",

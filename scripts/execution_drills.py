@@ -2343,9 +2343,13 @@ def drill_v18(session: Any, now: datetime) -> DrillOutcome:
 
 
 def drill_v19(session: Any, now: datetime) -> DrillOutcome:
-    """V19 — the app process never carries the execution job."""
+    """V19 — no app execution job; only reviewed hourly paper maintenance self-guards.
+
+    Its durable kill cutoffs and protective closes must run under kill. This
+    exception grants no execution import or job to the app's default scheduler.
+    """
     from signalforge.execution.cycle import EXECUTION_CYCLE_JOB, execution_job_specs
-    from signalforge.scheduler import default_job_specs
+    from signalforge.scheduler import default_job_specs, job_crypto_hourly_paper
     from signalforge.settings_store import effective_research_config
 
     out = DrillOutcome()
@@ -2353,13 +2357,21 @@ def drill_v19(session: Any, now: datetime) -> DrillOutcome:
     out.check("execution.enabled ships False", cfg.execution.enabled is False)
     out.check("execution_job_specs() is empty while disabled", execution_job_specs() == [])
 
-    names = [s.name for s in default_job_specs()]
+    specs = default_job_specs()
+    names = [s.name for s in specs]
     out.check(
         f"{EXECUTION_CYCLE_JOB} is not in the default job list", EXECUTION_CYCLE_JOB not in names
     )
+    unexpected = [
+        s.name
+        for s in specs
+        if s.self_guarded
+        and not (s.name == "crypto_hourly_paper" and s.fn is job_crypto_hourly_paper)
+    ]
     out.check(
-        "no default spec is self_guarded — the execution cycle is the only one that may be",
-        not any(s.self_guarded for s in default_job_specs()),
+        "only the reviewed hourly paper maintenance name/callable may self-guard by default",
+        not unexpected,
+        str(unexpected),
     )
 
     pkg = REPO_ROOT / "src" / "signalforge"

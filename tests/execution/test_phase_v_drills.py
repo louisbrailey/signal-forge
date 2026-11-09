@@ -16,6 +16,7 @@ document states the row the code actually uses — is checked here.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,64 @@ def test_phase_v_drill(drill: Drill, session: Session) -> None:
     assert result.outcome.checks, f"{drill.name} asserted nothing"
     failures = [f"{c.label}: {c.detail}" for c in result.outcome.checks if not c.passed]
     assert not failures, f"{drill.name} — {drill.title}\n" + "\n".join(failures)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "unrelated_self_guard",
+        "hourly_impostor",
+        "renamed_hourly",
+        "app_execution",
+        "self_guarded_app_execution",
+    ],
+)
+def test_v19_rejects_unreviewed_default_jobs(
+    session: Session, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    """The paper-maintenance exception is an exact identity, not a general bypass."""
+    from signalforge import scheduler
+    from signalforge.execution.cycle import EXECUTION_CYCLE_JOB
+    from signalforge.jobspec import JobSpec
+
+    specs = scheduler.default_job_specs()
+    hourly = next(i for i, spec in enumerate(specs) if spec.name == "crypto_hourly_paper")
+
+    def impostor() -> None:
+        raise AssertionError("V19 must inspect job specs without running their bodies")
+
+    # Spoof the reviewed function's name: a string-based callable check is unsafe.
+    impostor.__name__ = scheduler.job_crypto_hourly_paper.__name__
+    if mutation == "unrelated_self_guard":
+        ordinary = next(i for i, spec in enumerate(specs) if not spec.self_guarded)
+        specs[ordinary] = replace(specs[ordinary], self_guarded=True)
+    elif mutation == "hourly_impostor":
+        specs[hourly] = replace(specs[hourly], fn=impostor)
+    elif mutation == "renamed_hourly":
+        specs[hourly] = replace(specs[hourly], name="unreviewed_hourly_maintenance")
+    else:
+        specs.append(
+            JobSpec(
+                EXECUTION_CYCLE_JOB,
+                scheduler.job_crypto_hourly_paper,
+                1,
+                "Forbidden execution job in app defaults",
+                self_guarded=mutation == "self_guarded_app_execution",
+            )
+        )
+    monkeypatch.setattr(scheduler, "default_job_specs", lambda: specs)
+
+    drill = next(drill for drill in DRILLS if drill.name == "V19")
+    result = run_drill(drill, session, DRILL_NOW)
+    assert not result.error
+    assert not result.passed
+    failures = [check.label for check in result.outcome.checks if not check.passed]
+    if mutation in {"app_execution", "self_guarded_app_execution"}:
+        assert f"{EXECUTION_CYCLE_JOB} is not in the default job list" in failures
+    if mutation != "app_execution":
+        assert (
+            "only the reviewed hourly paper maintenance name/callable may self-guard by default"
+        ) in failures
 
 
 def test_every_adr_drill_is_implemented() -> None:
