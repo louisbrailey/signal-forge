@@ -118,3 +118,25 @@ both-side cost arithmetic using Decimal reference fixtures (never Qwen), cash,
 allocation/theme/gross/trade/open-risk limits, DD entry halt and leakage guards.
 Run focused tests and lint before the one fixed study. Main owns merge,
 deployment and CI integration. Only the four assigned new files are owned here.
+
+## Gatekeeper provenance repair — no economic parameter changes
+
+Original registration remains commit `bb8c27e`, before the first evaluation.
+This amendment changes publication/source checks only; strategy, windows, SQL
+bounds, costs, sizing and all risk limits remain the original fixed experiment.
+
+Require the entire Git checkout to be committed and clean (staged, unstaged and
+untracked changes refuse admission; ignored research outputs are allowed).
+Ignored untracked Python sources under `src`/`scripts` also refuse admission.
+Hash every tracked file and bind HEAD before importing project decision code.
+Before reading data, recheck that pin and hash every loaded module source/cache
+file, compiled module and Python executable. Project imports must resolve to
+this checkout's tracked source. Verify both pins after evaluation and again
+after report rendering, before any evidence/report write. Changed source, HEAD,
+loaded runtime files or newly loaded file modules refuse publication.
+Record full file-hash manifests, their SHA256 digests, the original registration,
+current protocol revision and execution commit in the evidence. A coherent
+read-only database transaction and bounded-row hashes remain separately required.
+Report outcome counts, benchmark comparisons and parent-account equivalence from
+the supplied results; never hardcode successful conclusions. Regression tests
+must include contrary outcomes and an imported helper modified during evaluation.

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import copy
+import importlib.util
 import json
 import sqlite3
+import subprocess
+import sys
 from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal as D
@@ -364,3 +368,221 @@ def test_benchmark_costs_cash_sleeves_and_exposure_matching():
     assert matched["metrics"]["mean_exposure_pct"] == pytest.approx(10)
     assert matched["metrics"]["total_costs"] < full["metrics"]["total_costs"]
     assert study.block_interval(full["equity"], full["equity"]) == [0, 0]
+
+
+def report_fixture():
+    portfolio = study.replay([trade()], {"BTCUSD": series()}, START, END)
+    full = study.hold_scaled(study.hold_components({"BTCUSD": series()}, 2, START, END, 1), 1)
+    row = {
+        "window": "followup_SEEN",
+        "strategy": "crypto_donchian_55_long",
+        "stress": 1,
+        "schedule": "variant",
+        "portfolio": portfolio,
+        "buy_hold": copy.deepcopy(full),
+        "exposure_matched": copy.deepcopy(full),
+        "excess_annual_mean_90pct_block_interval_pp": [-1, 1],
+    }
+    parent = copy.deepcopy(row)
+    parent["schedule"] = "parent_long_legs"
+    return {
+        "protocol_commit": "protocol",
+        "source_commit": "source",
+        "data": {
+            "bounded_data_sha256": "data",
+            "quality_status": "UNKNOWN",
+            "simulation_status": "UNKNOWN",
+            "pairs": {},
+        },
+        "coverage": {},
+        "runs": [parent, row],
+        "comparisons": [
+            {
+                "window": row["window"],
+                "strategy": row["strategy"],
+                "stress": 1,
+                "parent_long_candidates": 1,
+                "variant_candidates": 1,
+                "same_schedule": True,
+                "long_signal_filter_parity": True,
+            }
+        ],
+    }
+
+
+def test_report_derives_contrary_benchmark_and_parent_outcomes_from_values(tmp_path):
+    result = report_fixture()
+    parent, variant = result["runs"]
+    parent["portfolio"]["metrics"]["net_return_pct"] = 3
+    variant["portfolio"]["metrics"]["net_return_pct"] = -2
+    variant["portfolio"]["metrics"]["max_drawdown_pct"] = 5
+    variant["buy_hold"]["metrics"].update(net_return_pct=-10, max_drawdown_pct=1)
+    variant["exposure_matched"]["metrics"]["net_return_pct"] = -1
+    variant["excess_annual_mean_90pct_block_interval_pp"] = [-4, -1]
+    result["comparisons"][0]["long_signal_filter_parity"] = False
+    report = study.render(result, tmp_path / "evidence.json", "hash")
+    assert "Outcome: 0/1" in report
+    assert "net returns; 0/1 exceeded" in report
+    assert "0/1 followup excess-return intervals include zero" in report
+    assert "Parent/variant full-account equality: 0/1 paired comparisons" in report
+    assert "2 runs contain 2 distinct full accounts" in report
+    assert "higher absolute returns in 0/1" in report
+    assert "larger close drawdowns in 0/1" in report
+    assert "filter-before-scheduling parity: 0/1" in report
+    assert "Every parent LONG-leg" not in report
+    assert "higher absolute returns in every comparison" not in report
+
+
+def test_report_derives_success_counts_without_counting_duplicate_accounts_twice(tmp_path):
+    result = report_fixture()
+    report = study.render(result, tmp_path / "evidence.json", "hash")
+    assert "Parent/variant full-account equality: 1/1 paired comparisons" in report
+    assert "2 runs contain 1 distinct full accounts" in report
+    assert "filter-before-scheduling parity: 1/1" in report
+
+
+@pytest.fixture
+def source_repo(tmp_path, monkeypatch):
+    repo = tmp_path / "source"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    helper = repo / "src/helper.py"
+    helper.write_text("def value():\n    return 1\n")
+    (repo / study.PROTOCOL).parent.mkdir(parents=True)
+    (repo / study.PROTOCOL).write_text("fixed protocol\n")
+    (repo / study.REPORT).parent.mkdir(parents=True)
+    (repo / study.REPORT).write_text("existing report must survive refusal\n")
+    (repo / ".gitignore").write_text(".toolkit-runs/\n__pycache__/\n")
+
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.name", "Source pin fixture")
+    git("config", "user.email", "source-pin@example.invalid")
+    git("add", ".")
+    git("commit", "-qm", "fixture")
+    monkeypatch.setattr(study, "ROOT", repo)
+    monkeypatch.setattr(study, "ENTRY_SOURCE_PIN", None)
+    return repo, helper, git
+
+
+@pytest.mark.parametrize("kind", ["unstaged", "staged", "untracked", "ignored_python"])
+def test_source_pin_refuses_dirty_import_source_before_database_read(
+    source_repo, monkeypatch, kind
+):
+    repo, helper, git = source_repo
+    if kind == "untracked":
+        (repo / "src/new_helper.py").write_text("value = 2\n")
+    elif kind == "ignored_python":
+        with (repo / ".gitignore").open("a") as out:
+            out.write("src/ignored_helper.py\n")
+        git("add", ".gitignore")
+        git("commit", "-qm", "ignored source fixture")
+        (repo / "src/ignored_helper.py").write_text("value = 2\n")
+    else:
+        helper.write_text("def value():\n    return 2\n")
+        if kind == "staged":
+            git("add", "src/helper.py")
+    reads = []
+    monkeypatch.setattr(study, "load_bounded", lambda *args: reads.append(args))
+    with pytest.raises(ValueError, match="source pin"):
+        study.evaluate_and_publish(repo / "unused.sqlite")
+    assert reads == []
+
+
+def test_source_pin_allows_ignored_output_and_records_all_tracked_files(source_repo):
+    repo, _helper, _ = source_repo
+    pin = study.capture_source_pin()
+    (repo / ".toolkit-runs").mkdir()
+    (repo / ".toolkit-runs/evidence.json").write_text("{}")
+    assert study.capture_source_pin() == pin
+    assert "src/helper.py" in pin["files"]
+    assert study.PROTOCOL in pin["files"]
+    assert pin["sha256"] == study.digest({k: pin[k] for k in ("commit", "files")})
+
+
+@pytest.mark.parametrize("state", ["unstaged", "staged", "committed"])
+@pytest.mark.parametrize("phase", ["evaluation", "render"])
+def test_imported_helper_mutated_during_evaluation_refuses_all_output(
+    source_repo, monkeypatch, state, phase
+):
+    repo, helper, git = source_repo
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    spec = importlib.util.spec_from_file_location("source_pin_fixture_helper", helper)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    real_runtime_pin = study.capture_runtime_pin
+    monkeypatch.setattr(
+        study,
+        "capture_runtime_pin",
+        lambda pin: real_runtime_pin(pin, {"source_pin_fixture_helper": module}),
+    )
+    monkeypatch.setattr(study, "load_bounded", lambda *args: ({}, {}))
+
+    def mutate():
+        assert module.value() == 1
+        helper.write_text("def value():\n    return 2\n")
+        if state in ("staged", "committed"):
+            git("add", "src/helper.py")
+        if state == "committed":
+            git("commit", "-qm", "source changed during evaluation")
+
+    def mutation(*args):
+        if phase == "evaluation":
+            mutate()
+        return report_fixture()
+
+    monkeypatch.setattr(study, "run_study", mutation)
+    if phase == "render":
+
+        def render_mutation(*args):
+            mutate()
+            return "do not publish"
+
+        monkeypatch.setattr(study, "render", render_mutation)
+    before = (repo / study.REPORT).read_bytes()
+    with pytest.raises(ValueError, match="source pin"):
+        study.evaluate_and_publish(repo / "unused.sqlite")
+    assert (repo / study.REPORT).read_bytes() == before
+    assert not (repo / ".toolkit-runs/conservative-crypto-cost-study/evidence.json").exists()
+
+
+def test_runtime_pin_rejects_foreign_project_import(source_repo):
+    _, _, _ = source_repo
+    from signalforge.research.fx import venues
+
+    with pytest.raises(ValueError, match="outside pinned checkout"):
+        study.capture_runtime_pin(
+            study.capture_source_pin(), {"signalforge.research.fx.venues": venues}
+        )
+
+
+@pytest.mark.parametrize("change", ["changed_runtime", "new_runtime_module"])
+def test_external_runtime_source_change_refuses_publication(source_repo, monkeypatch, change):
+    repo, helper, _ = source_repo
+    dependency = repo.parent / "external_dependency.py"
+    dependency.write_text("value = 1\n")
+    spec = importlib.util.spec_from_file_location("source_pin_external_dependency", dependency)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    spec.loader.exec_module(module)
+    inventory = {"source_pin_external_dependency": module}
+    real_pin = study.capture_runtime_pin
+    monkeypatch.setattr(study, "capture_runtime_pin", lambda pin: real_pin(pin, inventory))
+    monkeypatch.setattr(study, "load_bounded", lambda *args: ({}, {}))
+
+    def mutate(*args):
+        if change == "changed_runtime":
+            dependency.write_text("value = 2\n")
+        else:
+            inventory["new_runtime_module"] = type(module)("new_runtime_module")
+            inventory["new_runtime_module"].__file__ = str(helper)
+        return report_fixture()
+
+    monkeypatch.setattr(study, "run_study", mutate)
+    before = (repo / study.REPORT).read_bytes()
+    with pytest.raises(ValueError, match="runtime source pin changed"):
+        study.evaluate_and_publish(repo / "unused.sqlite")
+    assert (repo / study.REPORT).read_bytes() == before
+    assert not (repo / ".toolkit-runs/conservative-crypto-cost-study/evidence.json").exists()

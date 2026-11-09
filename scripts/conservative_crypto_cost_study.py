@@ -12,6 +12,7 @@ import json
 import math
 import sqlite3
 import subprocess
+import sys
 from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from datetime import date, timedelta
@@ -19,7 +20,44 @@ from decimal import ROUND_DOWN, Decimal, getcontext
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def git(*args: str) -> str:
+    return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()  # noqa: S603,S607
+
+
+def capture_source_pin() -> dict[str, Any]:
+    """Pin the entire committed checkout, not just the runner/protocol paths."""
+    if git("status", "--porcelain", "--untracked-files=all"):
+        raise ValueError("source pin requires a fully clean committed Git checkout")
+    ignored = git("ls-files", "--others", "--ignored", "--exclude-standard", "--", "src", "scripts")
+    if any(name.endswith(".py") for name in ignored.splitlines()):
+        raise ValueError("source pin refuses ignored untracked source under src/scripts")
+    files = {}
+    for name in git("ls-files", "-z").split("\0"):
+        if not name:
+            continue
+        path = ROOT / name
+        if not path.is_file() or not path.resolve().is_relative_to(ROOT):
+            raise ValueError(f"source pin refuses missing/external tracked file: {name}")
+        files[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    pin = {"commit": git("rev-parse", "HEAD"), "files": files}
+    return {**pin, "sha256": digest(pin)}
+
+
+# CLI admission runs BEFORE importing any project/third-party decision code.
+# Tests import this module without running the operational CLI admission.
+ENTRY_SOURCE_PIN = capture_source_pin() if __name__ == "__main__" else None
+
+# ruff: noqa: E402 -- source admission must precede decision-code imports.
+
 import numpy as np
+import numpy.random  # preload the RNG module before the runtime-source pin
 
 from signalforge.backtest.costs import CostModel
 from signalforge.data.series import PriceSeries
@@ -46,7 +84,6 @@ TRADE_RISK, OPEN_RISK, DRAWDOWN = D("0.005"), D("0.015"), D("0.10")
 SOURCE = "massive_crypto"
 LOWER = date(2016, 1, 1)
 SEALED = date(2025, 10, 26)
-ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL = "docs/research/CONSERVATIVE_CRYPTO_COST_PROTOCOL_2026-11-08.md"
 REPORT = "reports/CONSERVATIVE_CRYPTO_COST_STUDY_2026-11-08.md"
 WINDOWS = (
@@ -58,10 +95,6 @@ WINDOWS = (
 
 def dec(value: Any) -> Decimal:
     return D(str(value))
-
-
-def digest(value: Any) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def dates(start: date, end: date) -> list[date]:
@@ -690,6 +723,30 @@ def render(result: dict[str, Any], evidence: Path, evidence_hash: str) -> str:
         <= r["excess_annual_mean_90pct_block_interval_pp"][1]
         for r in follows
     )
+    hold_beats = sum(
+        r["buy_hold"]["metrics"]["net_return_pct"] > r["portfolio"]["metrics"]["net_return_pct"]
+        for r in unique
+    )
+    hold_larger_dd = sum(
+        r["buy_hold"]["metrics"]["max_drawdown_pct"] > r["portfolio"]["metrics"]["max_drawdown_pct"]
+        for r in unique
+    )
+    groups: dict[tuple, dict[str, Any]] = {}
+    for row in result["runs"]:
+        key = (row["window"], row["strategy"], row["stress"])
+        group = groups.setdefault(key, {})
+        if row["schedule"] in group:
+            raise ValueError("duplicate schedule in comparison result")
+        group[row["schedule"]] = row["portfolio"]
+    paired = [g for g in groups.values() if {"parent_long_legs", "variant"} <= g.keys()]
+    equal_accounts = sum(digest(g["parent_long_legs"]) == digest(g["variant"]) for g in paired)
+    distinct_accounts = len({digest(r["portfolio"]) for r in result["runs"]})
+    portfolios = [r["portfolio"]["metrics"] for r in result["runs"]]
+    max_exposure = max((m["max_close_exposure_pct"] for m in portfolios), default=0.0)
+    max_theme = max((m["admission_maxima"]["theme"] for m in portfolios), default=0.0)
+    max_dd = max((m["max_observed_drawdown_pct"] for m in portfolios), default=0.0)
+    halts = sum(m["halt_date"] is not None for m in portfolios)
+    pin = result.get("source_pin", {})
     lines = [
         "# Conservative crypto cost study — 2026-11-08",
         "",
@@ -697,21 +754,35 @@ def render(result: dict[str, Any], evidence: Path, evidence_hash: str) -> str:
         "No promotion or execution claim.",
         "",
         f"Protocol commit: `{result['protocol_commit']}`. Source: `{result['source_commit']}`.",
+        f"Protocol revision: `{result.get('protocol_revision', result['protocol_commit'])}`.",
         f"Base: `bb624d7`. Bounded data SHA256: `{result['data']['bounded_data_sha256']}`.",
         f"Local detailed evidence: `{evidence}`; SHA256 `{evidence_hash}`.",
+        f"Project source pin: `{pin.get('sha256', 'NOT RECORDED')}`; "
+        "runtime source pin: "
+        f"`{result.get('runtime_source_pin', {}).get('sha256', 'NOT RECORDED')}`.",
+        f"Pinned files: {len(pin.get('files', {}))} tracked checkout files and "
+        f"{len(result.get('runtime_source_pin', {}).get('files', {}))} runtime files.",
+        "Source/runtime pins verified after evaluation and after rendering, before publication: "
+        f"{result.get('source_verified_before_publish', False)}.",
         "",
-        "24 fixed portfolio runs, each $10,000; 5% all-in entry allocation, 20% crypto theme,",
+        f"{len(result['runs'])} portfolio runs, each $10,000; "
+        "5% all-in entry allocation, 20% crypto theme,",
         "60% gross, 0.5% trade / 1.5% aggregate modeled all-in stop risk; 10% DD entry halt.",
         "Limits apply at admission; price drift and stop gaps can exceed them afterward.",
+        f"Maximum passive close exposure: {max_exposure:.3f}%; "
+        f"maximum admitted theme/gross: {max_theme * 100:.3f}%.",
+        f"Maximum observed DD: {max_dd:.3f}%; {halts}/{len(portfolios)} accounts halted entries.",
+        "These are admission controls, not continuously enforced exposure ceilings.",
         "",
         f"Outcome: {positive}/{len(unique)} distinct long-only window/cost portfolios had positive",
         f"net returns; {beats_matched}/{len(unique)} exceeded the exposure-matched basket's point",
         f"return. {follow_intervals}/{len(follows)} followup excess-return intervals include zero.",
-        "Every parent LONG-leg schedule and full account path equals its CRYPTO-5 variant here:",
-        "24 runs represent 12 distinct accounts, not 24 independent confirmations.",
-        "Fully funded buy-and-hold has higher absolute returns in every comparison and much",
-        "larger drawdowns. Conservative sizing reduces losses; it does not remove cost drag",
-        "or establish reliable future excess returns.",
+        f"Parent/variant full-account equality: {equal_accounts}/{len(paired)} paired comparisons;",
+        f"{len(groups) - len(paired)} incomplete schedule groups. "
+        f"{len(result['runs'])} runs contain {distinct_accounts} distinct full accounts.",
+        f"Fully funded buy-and-hold has higher absolute returns in {hold_beats}/{len(unique)}",
+        f"comparisons and larger close drawdowns in {hold_larger_dd}/{len(unique)} comparisons.",
+        "These descriptive comparisons do not establish reliable future excess returns.",
         "",
         "Costs: base Coinbase Intro 90 bps taker + estimated half-spread (BTC 2, ETH 3,",
         "SOL 10, other pairs 15 bps) + 1 bp slippage, each side. Stress doubles fee and",
@@ -750,7 +821,10 @@ def render(result: dict[str, Any], evidence: Path, evidence_hash: str) -> str:
             )
     lines += [
         "",
-        "Stored daily volume is present for all accepted bars in this snapshot. Venue spreads,",
+        "Finite daily volume rows: "
+        f"{sum(m['finite_volume_rows'] for m in result['data']['pairs'].values())}/"
+        f"{sum(m['accepted_rows'] for m in result['data']['pairs'].values())} accepted bars. "
+        "Venue spreads,",
         "depth and market impact were not measured: liquidity remains UNVALIDATED.",
         "Not-yet-incepted symbols have zero expected days, rather than a continuity failure.",
         "",
@@ -868,8 +942,10 @@ def render(result: dict[str, Any], evidence: Path, evidence_hash: str) -> str:
     lines += [
         "",
         "A two-sided parent's short can block a later long; its funded LONG legs therefore",
-        "need not match the variant. Removing shorts at signal time reproduces CRYPTO-5",
-        "exactly. No short/futures/margin positions enter any cash account.",
+        "need not match the variant. Recorded filter-before-scheduling parity: "
+        f"{sum(bool(c['long_signal_filter_parity']) for c in result['comparisons'])}/"
+        f"{len(result['comparisons'])} cases. "
+        "No short/futures/margin positions enter any cash account.",
         "",
         "## Limitations and interpretation",
         "",
@@ -886,29 +962,73 @@ def render(result: dict[str, Any], evidence: Path, evidence_hash: str) -> str:
     return "\n".join(lines)
 
 
-def git(*args: str) -> str:
-    return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()  # noqa: S603,S607
+def capture_runtime_pin(project_pin: dict[str, Any], modules: dict | None = None) -> dict[str, Any]:
+    """Hash every loaded module file/cache plus the interpreter; reject foreign project imports."""
+    files = {}
+    for name, module in (dict(sys.modules) if modules is None else modules).items():
+        filename = getattr(module, "__file__", None)
+        if not filename:
+            continue
+        path = Path(filename).resolve()
+        if (name == "signalforge" or name.startswith("signalforge.")) and not path.is_relative_to(
+            ROOT / "src"
+        ):
+            raise ValueError(f"project module imported outside pinned checkout: {name}")
+        if path.is_relative_to(ROOT) and path.suffix in (".py", ".pyc"):
+            source = path.with_suffix(".py") if path.suffix == ".pyc" else path
+            if source.relative_to(ROOT).as_posix() not in project_pin["files"]:
+                raise ValueError(f"loaded untracked project source: {name}")
+        for filename in (str(path), getattr(module, "__cached__", None)):
+            if filename and Path(filename).is_file():
+                files[str(Path(filename).resolve())] = hashlib.sha256(
+                    Path(filename).read_bytes()
+                ).hexdigest()
+    files[str(Path(sys.executable).resolve())] = hashlib.sha256(
+        Path(sys.executable).read_bytes()
+    ).hexdigest()
+    pin = {"python": sys.version, "files": files}
+    return {**pin, "sha256": digest(pin)}
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("database", type=Path)
-    args = parser.parse_args()
+def verify_source_pins(project: dict[str, Any], runtime: dict[str, Any]) -> None:
+    if capture_source_pin() != project:
+        raise ValueError("committed source pin changed during evaluation")
+    if capture_runtime_pin(project) != runtime:
+        raise ValueError("loaded runtime source pin changed during evaluation")
+
+
+def evaluate_and_publish(database: Path) -> None:
+    project_pin = capture_source_pin()
+    if ENTRY_SOURCE_PIN is not None and project_pin != ENTRY_SOURCE_PIN:
+        raise ValueError("source pin changed while importing decision code")
+    runtime_pin = capture_runtime_pin(project_pin)
     if SEALED != CRYPTO5_DEV_CUT:
         raise ValueError("parent sealed boundary changed")
-    protocol_commit = git("log", "-1", "--format=%H", "--", PROTOCOL)
-    if not protocol_commit or git("status", "--porcelain", "--", PROTOCOL, __file__):
-        raise ValueError("commit clean protocol and implementation before the fixed run")
+    protocol_history = git("log", "--format=%H", "--", PROTOCOL).splitlines()
+    if not protocol_history:
+        raise ValueError("protocol must be committed before the fixed run")
+    protocol_commit = protocol_history[-1]
     pairs = sorted({p for ps in CRYPTO5_PAIRS.values() for p in ps})
-    panel, meta = load_bounded(args.database, pairs)
+    panel, meta = load_bounded(database, pairs)
     result = run_study(panel, meta)
-    result.update(protocol_commit=protocol_commit, source_commit=git("rev-parse", "HEAD"))
+    verify_source_pins(project_pin, runtime_pin)
+    result.update(
+        protocol_commit=protocol_commit,
+        protocol_revision=protocol_history[0],
+        source_commit=project_pin["commit"],
+        source_pin=project_pin,
+        runtime_source_pin=runtime_pin,
+        source_verified_before_publish=True,
+    )
     evidence = ROOT / ".toolkit-runs/conservative-crypto-cost-study/evidence.json"
-    evidence.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(result, sort_keys=True, indent=2, default=str) + "\n"
-    evidence.write_text(payload)
     evidence_hash = hashlib.sha256(payload.encode()).hexdigest()
-    (ROOT / REPORT).write_text(render(result, evidence, evidence_hash))
+    report = render(result, evidence, evidence_hash)
+    # Report rendering/serialization also execute code: verify again before ANY output write.
+    verify_source_pins(project_pin, runtime_pin)
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    evidence.write_text(payload)
+    (ROOT / REPORT).write_text(report)
     print(
         json.dumps(
             {
@@ -919,6 +1039,13 @@ def main() -> None:
             }
         )
     )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("database", type=Path)
+    args = parser.parse_args()
+    evaluate_and_publish(args.database)
 
 
 if __name__ == "__main__":
