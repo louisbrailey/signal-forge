@@ -17,8 +17,10 @@ from signalforge.db.models import BacktestMetric, BacktestRun, Instrument, Strat
 from signalforge.domain import Direction, Horizon, QualityGate
 from signalforge.research.evidence import evidence_inventory, metric_evidence
 from signalforge.research.persistence import latest_oos_metric, upsert_strategy_version
+from signalforge.research.promotion import get_or_create_dataset_snapshot
 from signalforge.research.scan import _build_draft
 from signalforge.research.strategies import TrendContinuation
+from tests.support import bind_matching_oos_scope
 
 SPEC = TrendContinuation().spec()
 STAMP = datetime(2026, 1, 1, tzinfo=UTC)
@@ -38,6 +40,7 @@ def _record(
     )
     session.add(run)
     session.flush()
+    bind_matching_oos_scope(session, run, spec, symbols=["SPY"])
     metric = BacktestMetric(
         run_id=run.id,
         segment="all",
@@ -81,6 +84,9 @@ def _draft(session: Session):
         fresh={},
         cfg=ResearchConfig(),
         equity=10_000,
+        dataset_snapshot_id=get_or_create_dataset_snapshot(session, symbols=["SPY"]).id,
+        source="fixture",
+        symbols=["SPY"],
     )
 
 
@@ -121,10 +127,14 @@ def test_positive_numeric_metrics_cannot_qualify_forced_or_mismatched_inputs(
     [
         {},
         {"allow_mismatch": False, "mismatched_inputs": []},
-        {"reproduces_evaluation": {"config_hash": True, "until": True, "source": True}},
+        {
+            "reproduces_evaluation": dict.fromkeys(
+                ("symbols", "window_start", "until", "source", "config_hash"), True
+            )
+        },
     ],
 )
-def test_unforced_passing_metrics_and_legacy_unknown_keep_their_existing_behavior(
+def test_unforced_scoped_metrics_keep_measured_data_provenance_unknown(
     session: Session, params: dict[str, Any]
 ) -> None:
     metric = _record(session, params)

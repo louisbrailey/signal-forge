@@ -17,8 +17,16 @@ from typer.testing import CliRunner
 
 from signalforge.cli import app
 from signalforge.data.adapters.fixture import FixtureMarketDataAdapter
+from signalforge.data.calendar import sessions
 from signalforge.data.ingest import ingest_universe
-from signalforge.db.models import BacktestRun, StrategyPromotionEvaluation, StrategySealedTest
+from signalforge.db.models import (
+    BacktestRun,
+    Strategy,
+    StrategyPromotionEvaluation,
+    StrategySealedTest,
+    StrategyVersion,
+)
+from signalforge.domain import StrategyStatus
 from signalforge.research.persistence import latest_oos_metric, spec_json_hash
 from signalforge.research.promotion import (
     development_sealed_boundary,
@@ -34,7 +42,10 @@ from signalforge.settings_store import effective_research_config
 
 UNIVERSE = ["SPY", "AAPL"]
 END = date(2024, 12, 31)
-START = END - timedelta(days=365 * 8)
+_START_DAY = END - timedelta(days=365 * 8)
+# The generic fixture adapter includes business-day holidays. This EOD
+# calendar-policy fixture must begin on an actual XNYS session.
+START = sessions(_START_DAY, _START_DAY + timedelta(days=14))[0]
 
 
 def _mr() -> MeanReversion:
@@ -58,7 +69,7 @@ def _evaluated(session: Session):
         dataset_snapshot=snap,
     )
     sealed = session.get(StrategySealedTest, result.sealed_test_id)
-    return snap, cfg, result, sealed.window_start - timedelta(days=1)
+    return snap, cfg, result, sessions(START, sealed.window_start - timedelta(days=1))[-1]
 
 
 def _n_runs(session: Session) -> int:
@@ -89,7 +100,9 @@ def test_recorded_oos_is_the_development_backtest_promotion_measured(session: Se
     assert params["purpose"] == "development_oos"
     assert params["dataset_snapshot"] == {"id": snap.id, "key": "dev_oos_test"}
     assert params["window"] == {"start": START.isoformat(), "until": dev_end.isoformat()}
-    assert params["sealed_boundary"] == (dev_end + timedelta(days=1)).isoformat()
+    sealed = session.get(StrategySealedTest, result.sealed_test_id)
+    assert params["sealed_boundary"] == sealed.window_start.isoformat()
+    assert params["development_calendar"]["expected_trading_cutoff"] == dev_end.isoformat()
     assert params["promotion_evaluation_id"] == result.evaluation_id
     assert sorted(params["symbols"]) == sorted(UNIVERSE)
     metric = latest_oos_metric(session, _mr().spec())
@@ -98,8 +111,8 @@ def test_recorded_oos_is_the_development_backtest_promotion_measured(session: Se
 
 
 def test_until_on_or_after_the_sealed_window_is_refused(session: Session) -> None:
-    snap, cfg, _, dev_end = _evaluated(session)
-    boundary = dev_end + timedelta(days=1)
+    snap, cfg, result, _ = _evaluated(session)
+    boundary = session.get(StrategySealedTest, result.sealed_test_id).window_start
     for bad in (boundary, boundary + timedelta(days=30)):
         with pytest.raises(ValueError, match="sealed window"):
             record_development_oos_backtest(
@@ -109,14 +122,21 @@ def test_until_on_or_after_the_sealed_window_is_refused(session: Session) -> Non
 
 
 def test_boundary_spans_every_sealed_test_on_the_snapshot(session: Session) -> None:
-    snap, _, result, dev_end = _evaluated(session)
-    assert development_sealed_boundary(
-        session, strategy_version_id=result.strategy_version_id, dataset_snapshot_id=snap.id
-    ) == dev_end + timedelta(days=1)
+    snap, _, result, _ = _evaluated(session)
+    boundary = session.get(StrategySealedTest, result.sealed_test_id).window_start
+    assert (
+        development_sealed_boundary(
+            session, strategy_version_id=result.strategy_version_id, dataset_snapshot_id=snap.id
+        )
+        == boundary
+    )
     # an unrelated version that never sealed anything still sees the snapshot's window
-    assert development_sealed_boundary(
-        session, strategy_version_id=987654, dataset_snapshot_id=snap.id
-    ) == dev_end + timedelta(days=1)
+    assert (
+        development_sealed_boundary(
+            session, strategy_version_id=987654, dataset_snapshot_id=snap.id
+        )
+        == boundary
+    )
     assert (
         development_sealed_boundary(session, strategy_version_id=987654, dataset_snapshot_id=999)
         is None
@@ -169,21 +189,22 @@ def test_a_mismatched_run_is_refused_unless_explicitly_allowed(session: Session)
         session,
         _mr(),
         dataset_snapshot_id=snap.id,
-        until=dev_end - timedelta(days=90),
-        config=cfg,
+        until=dev_end,
+        config=cfg.model_copy(update={"slippage_bps": cfg.slippage_bps + 1}),
         persist=False,
     )
-    assert rec.reproduces_evaluation["until"] is False
+    assert rec.reproduces_evaluation["config_hash"] is False
+    assert rec.reproduces_evaluation["until"] is True
     assert rec.reproduces_evaluation["window_start"] is True
 
-    with pytest.raises(ValueError, match=r"inputs differ .*\(until\)"):
+    with pytest.raises(ValueError, match=r"inputs differ .*\(config_hash\)"):
         persist_development_oos_record(session, rec)
     assert _n_runs(session) == 0
 
     saved = persist_development_oos_record(session, rec, allow_mismatch=True)
     params = session.get(BacktestRun, saved.backtest_run_id).params_json
     assert params["allow_mismatch"] is True
-    assert params["mismatched_inputs"] == ["until"]
+    assert params["mismatched_inputs"] == ["config_hash"]
 
 
 def test_a_repeat_of_a_recorded_run_is_refused_unless_forced(session: Session) -> None:
@@ -203,16 +224,18 @@ def test_a_repeat_of_a_recorded_run_is_refused_unless_forced(session: Session) -
     params = session.get(BacktestRun, forced.backtest_run_id).params_json
     assert params["duplicates_backtest_run_ids"] == [first.backtest_run_id]
 
-    # a different (allowed) window is not a duplicate of the first
-    other = record_development_oos_backtest(
-        session,
-        _mr(),
-        dataset_snapshot_id=snap.id,
-        until=dev_end - timedelta(days=90),
-        config=cfg,
-        persist=False,
-    )
-    assert persist_development_oos_record(session, other, allow_mismatch=True).backtest_run_id
+    # A shorter window cannot be a calendar-clean reproduction, even with
+    # the previously supported override for exploratory mismatched records.
+    with pytest.raises(ValueError, match="canonical XNYS"):
+        record_development_oos_backtest(
+            session,
+            _mr(),
+            dataset_snapshot_id=snap.id,
+            until=dev_end - timedelta(days=90),
+            config=cfg,
+            persist=False,
+        )
+    assert _n_runs(session) == 2
 
 
 def test_runs_in_the_evaluations_symbol_order_so_the_ci_reproduces(session: Session) -> None:
@@ -233,7 +256,7 @@ def test_runs_in_the_evaluations_symbol_order_so_the_ci_reproduces(session: Sess
         session,
         _mr(),
         dataset_snapshot_id=snap.id,
-        until=sealed.window_start - timedelta(days=1),
+        until=sessions(START, sealed.window_start - timedelta(days=1))[-1],
         config=cfg,
         persist=False,
     )
@@ -293,9 +316,16 @@ def test_cli_dry_run_then_record(db_url: str, session: Session) -> None:
     result = evaluate_promotion(
         session, strat, symbols=UNIVERSE, start=START, end=END, dataset_snapshot=snap
     )
+    # This CLI test explicitly seeds the current-approved state. It tests
+    # record identity/persistence, not whether fixture returns earn approval.
+    evaluation = session.get(StrategyPromotionEvaluation, result.evaluation_id)
+    evaluation.passed = True
+    version = session.get(StrategyVersion, result.strategy_version_id)
+    version.status = StrategyStatus.PAPER_APPROVED
+    session.get(Strategy, version.strategy_id).status = StrategyStatus.PAPER_APPROVED
     session.commit()
     sealed = session.get(StrategySealedTest, result.sealed_test_id)
-    dev_end = sealed.window_start - timedelta(days=1)
+    dev_end = sessions(START, sealed.window_start - timedelta(days=1))[-1]
     args = ("--strategy", strat.key, "--snapshot-id", str(snap.id), "--until", dev_end.isoformat())
 
     dry = _cli(*args, "--dry-run")
@@ -328,7 +358,7 @@ def test_cli_dry_run_then_record(db_url: str, session: Session) -> None:
     early = (dev_end - timedelta(days=90)).isoformat()
     mismatch = _cli("--strategy", strat.key, "--snapshot-id", str(snap.id), "--until", early)
     assert mismatch.exit_code == 1
-    assert "--allow-mismatch" in mismatch.output
+    assert "canonical XNYS" in mismatch.output
     session.rollback()
     assert _n_runs(session) == 2
 
