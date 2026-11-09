@@ -2,28 +2,29 @@
 
 DESCRIPTIVE, already-seen history. Liquidity UNVALIDATED. No promotion or execution claim.
 
-Protocol commit: `bb8c27ea925d315b15a8c9e8fc64ac98ef608149`. Source: `3613e97064bce9dd058764b959be92f8c441b0b5`.
+Protocol commit: `bb8c27ea925d315b15a8c9e8fc64ac98ef608149`. Source: `5df4f5aa73028f836cc25505140f7b70ff37e1ed`.
+Protocol revision: `5df4f5aa73028f836cc25505140f7b70ff37e1ed`.
 Base: `bb624d7`. Bounded data SHA256: `becc82a484317308523aa45d31cc4d8340c4a4935758bed2b6224f3e0d95d512`.
-Local detailed evidence: `/Users/louisbrailey/.codex/worktrees/conservative-crypto-cost-study/signal-forge/.toolkit-runs/conservative-crypto-cost-study/evidence.json`; SHA256 `abb695351f7eb4555868fe8886fb94f38ae547513ff90dc331d0420f7d2bea21`.
+Local detailed evidence: `/Users/louisbrailey/.codex/worktrees/conservative-crypto-cost-study/signal-forge/.toolkit-runs/conservative-crypto-cost-study/evidence.json`; SHA256 `b7f8f00d7a83d19f345519afe2f65779cb040ddedf2e52097aea251f257802cc`.
+Project source pin: `3049892b9dd7a8fe53e37dba9991b4f28e68e6d3dd2b56cef4dce14cde0c28f9`; runtime source pin: `d78a88e5e5bb164325ffdde83b27c95d3ccd7c76e948170b9bcb3b70201b348c`.
+Pinned files: 833 tracked checkout files and 2312 runtime files.
+Source/runtime pins verified after evaluation and after rendering, before publication: True.
 
-24 fixed portfolio runs, each $10,000; 5% all-in entry allocation, 20% crypto theme,
+24 portfolio runs, each $10,000; 5% all-in entry allocation, 20% crypto theme,
 60% gross, 0.5% trade / 1.5% aggregate modeled all-in stop risk; 10% DD entry halt.
 Limits apply at admission; price drift and stop gaps can exceed them afterward.
-
-The 20% theme limit is an admission limit in this protocol, not continuous
-rebalancing: maximum passive close exposure reached **30.962%** in the nine-pair
-2021–23 base account. Maximum admitted theme/gross was **14.180%**. Largest
-observed portfolio DD was **6.871%**; no account activated the 10% entry halt.
-These results do not establish compliance with a continuously enforced 20% cap.
+Maximum passive close exposure: 30.962%; maximum admitted theme/gross: 14.180%.
+Maximum observed DD: 6.871%; 0/24 accounts halted entries.
+These are admission controls, not continuously enforced exposure ceilings.
 
 Outcome: 12/12 distinct long-only window/cost portfolios had positive
 net returns; 12/12 exceeded the exposure-matched basket's point
 return. 4/4 followup excess-return intervals include zero.
-Every parent LONG-leg schedule and full account path equals its CRYPTO-5 variant here:
-24 runs represent 12 distinct accounts, not 24 independent confirmations.
-Fully funded buy-and-hold has higher absolute returns in every comparison and much
-larger drawdowns. Conservative sizing reduces losses; it does not remove cost drag
-or establish reliable future excess returns.
+Parent/variant full-account equality: 12/12 paired comparisons;
+0 incomplete schedule groups. 24 runs contain 12 distinct full accounts.
+Fully funded buy-and-hold has higher absolute returns in 12/12
+comparisons and larger close drawdowns in 12/12 comparisons.
+These descriptive comparisons do not establish reliable future excess returns.
 
 Costs: base Coinbase Intro 90 bps taker + estimated half-spread (BTC 2, ETH 3,
 SOL 10, other pairs 15 bps) + 1 bp slippage, each side. Stress doubles fee and
@@ -81,7 +82,7 @@ point-in-time universe membership, measured depth/spreads or execution capacity.
 | followup_SEEN | SOLUSD | 663/664 | 1 | within continuity policy; [['2025-03-25', '2025-03-25']] |
 | followup_SEEN | XRPUSD | 663/664 | 1 | within continuity policy; [['2025-03-25', '2025-03-25']] |
 
-Stored daily volume is present for all accepted bars in this snapshot. Venue spreads,
+Finite daily volume rows: 24983/24983 accepted bars. Venue spreads,
 depth and market impact were not measured: liquidity remains UNVALIDATED.
 Not-yet-incepted symbols have zero expected days, rather than a continuity failure.
 
@@ -213,8 +214,7 @@ benchmark, not compounded return differences or independent OOS confidence.
 | followup_SEEN/crypto_donchian_55_u10_long/2x | 53/53 | True | True |
 
 A two-sided parent's short can block a later long; its funded LONG legs therefore
-need not match the variant. Removing shorts at signal time reproduces CRYPTO-5
-exactly. No short/futures/margin positions enter any cash account.
+need not match the variant. Recorded filter-before-scheduling parity: 12/12 cases. No short/futures/margin positions enter any cash account.
 
 ## Limitations and interpretation
 
@@ -227,46 +227,66 @@ risk. The 10% DD control only halts entries at observed opens/closes; it cannot
 guarantee a maximum loss. Zero yield is assumed on idle cash. No guarantee of
 positive returns, excess returns, execution capacity or promotion follows.
 
-## Verification and run provenance
+## Gatekeeper repair and fresh provenance proof
 
-Only the four assigned new files changed on isolated branch
-`codex/conservative-crypto-cost-study-20261108`, based on `bb624d7`.
-The protocol was committed as `bb8c27e` before the first bar evaluation.
-Implementation `442242d` ran the fixed study successfully. Reporting correction
-`3613e97` then distinguished pre-inception dates from missing data and expanded
-the report, with no parameter, rule, sizing or accounting change. The same fixed
-study was repeated once to verify that correction: the bounded source metadata,
-all 24 complete portfolio/benchmark paths, trades, admission audits and bootstrap
-intervals were **exactly unchanged**. Both raw evidence files remain local:
+This report supersedes the report at `b53bd00`, which was held for two source/reporting
+defects. Repair commit `5df4f5aa73028f836cc25505140f7b70ff37e1ed` derives outcome
+counts, parent-account equivalence, distinct-account counts, benchmark return/DD
+comparisons and volume coverage from the supplied results. Regressions include
+losing variants, losing benchmarks, unequal parent accounts and failed parity.
 
-* First run: `.toolkit-runs/conservative-crypto-cost-study/evidence-first-run-b62999df.json`,
-  SHA256 `b62999df49efa12a28debe231520dd04bc4f572a0551cdd2f49fbd928cbd2787`.
-* Final run: the evidence file and SHA256 at the top of this report.
+The runner now requires a fully committed, clean checkout before project imports
+and before reading data. Its project manifest covers every tracked file; imported
+project modules must resolve to tracked source in this checkout. A separate runtime
+manifest covers loaded source/cache files, compiled modules and the Python
+executable. Both pins are checked after evaluation and after rendering, before any
+evidence/report write. The recorded manifests and digests are in the evidence JSON.
+This is a source/runtime provenance check, separate from the coherent mode=ro /
+query_only SQLite read transaction and the SQL-bounded data hash.
 
-Tests: **51 passed** across the new accounting suite (21), existing crypto venue
-tests and existing FX harness tests. After the reporting correction, all 21 new
-tests passed again. Focused Ruff and Black checks passed. The independent
-saved-trade audit used literal Coinbase fee/half-spread rates and Decimal
-arithmetic to reconcile every trade, total costs and ending equity, enforce all
-admission maxima/nonnegative cash, verify matched exposure and confirm complete
-parent/variant account equality. No local Qwen answers were used.
+The original economic protocol remains `bb8c27e`. Its `5df4f5a` amendment adds only
+these provenance/publication checks. An AST audit found all 21 study/data/accounting
+definitions and fixed parameter assignments identical to `b53bd00`; costs, sizing,
+windows, the sealed cutoff and signal rules did not change.
 
-Local full verification logs:
+The fresh pinned run completed in **11.9 seconds**. Bounded data, all 24 full
+portfolio/benchmark paths, coverage, comparison records and bootstrap intervals
+were exactly equal to the held artifact. Independent Decimal arithmetic again
+reconciled all **822 saved trade rows**, every book's costs/ending equity and
+matched exposure. The source audit checked every recorded project hash directly
+against the committed Git blobs, verified both manifest digests and verified every
+runtime file hash. The held artifact remains local at
+`.toolkit-runs/conservative-crypto-cost-study/evidence-b53-held-abb69535.json`,
+SHA256 `abb695351f7eb4555868fe8886fb94f38ae547513ff90dc331d0420f7d2bea21`.
 
-* Focused 51-test run: `.toolkit-runs/20261109T000623.396223Z.log`.
-* Post-correction 21-test run: `.toolkit-runs/20261109T000917.515544Z.log`.
-* Final fixed study: `.toolkit-runs/20261109T000932.502168Z.log` (4.1 seconds).
-* Independent reconciliation and unchanged-path check:
-  `.toolkit-runs/20261109T001011.397661Z.log`.
+**67 focused tests passed**, including 37 conservative-study tests and the existing
+venue/harness tests. Source-guard regressions cover staged/unstaged/untracked and
+ignored Python changes, committed helper changes during evaluation or rendering,
+changed external runtime files, newly loaded runtime files, and foreign project
+imports. Refusal preserves the previous report and publishes no new evidence.
+Focused Ruff and Black checks passed.
 
-The report is dated for the requested study; actual run timestamps were
-2026-11-09 UTC / 2026-11-08 Pacific. A new invocation reads the current bounded
-database snapshot and must compare its data hash before claiming reproduction:
+Local verification logs:
+
+* 67 tests: `.toolkit-runs/20261109T002948.008570Z.log`.
+* AST invariance: `.toolkit-runs/20261109T002901.145755Z.log`.
+* Fresh pinned run: `.toolkit-runs/20261109T003055.359358Z.log`.
+* Independent accounting/source/blob audit:
+  `.toolkit-runs/20261109T003145.078500Z.log`.
+* Black check: `.toolkit-runs/20261109T003222.280838Z.log`.
+
+Reproduce from a clean, committed checkout (no credentials are needed):
 
 ```sh
-PYTHONPATH=src /Users/louisbrailey/Projects/signal-forge/.venv/bin/python \
+devkit run -- env PYTHONPATH=src \
+  /Users/louisbrailey/Projects/signal-forge/.venv/bin/python \
   scripts/conservative_crypto_cost_study.py \
   /Users/louisbrailey/Projects/signal-forge/data/signalforge.sqlite
 ```
 
-No merge, deployment or CI integration was performed; those remain Main's scope.
+The report date is the requested study date; the fresh run occurred on
+2026-11-09 UTC / 2026-11-08 Pacific. A later database snapshot must match the
+bounded-data hash before claiming numerical reproduction. Only the same four
+assigned files changed; no canonical writes, provider/broker calls, sealed reads,
+paper actions, merge, deployment or CI integration were performed. Gatekeeper
+re-review remains separate from this repair and its passing local checks.
