@@ -755,6 +755,30 @@ def crypto_hourly_paper_status(
     typer.echo(st["notice"])
 
 
+@crypto_app.command("paper-venue-report")
+def crypto_paper_venue_report(
+    as_json: Annotated[bool, typer.Option("--json", help="Print the report as JSON.")] = False,
+    funding_bps_per_year: Annotated[
+        float, typer.Option(help="Funding charged on coinbase_cfm_intro positions (bps/year).")
+    ] = 0.0,
+) -> None:
+    """READ-ONLY: every crypto paper book's trades with R as recorded and R
+    repriced at coinbase_spot_intro and coinbase_cfm_intro, plus subtotals of
+    each parent book's LONG trades (not a *_long rule's book). Writes nothing;
+    no order is placed."""
+    import json as _json
+
+    from signalforge.db.session import session_scope
+    from signalforge.paper.crypto_venue_report import render_text, venue_report
+    from signalforge.research.fx.venues import COINBASE_CFM_INTRO, COINBASE_SPOT_INTRO
+
+    venues = (COINBASE_SPOT_INTRO, COINBASE_CFM_INTRO.with_funding(funding_bps_per_year))
+    with session_scope() as session:
+        report = venue_report(session, venues=venues)
+        session.rollback()  # reader scope: nothing to commit
+    typer.echo(_json.dumps(report, indent=2, default=str) if as_json else render_text(report))
+
+
 @data_app.command("crypto-hourly-ingest")
 def data_crypto_hourly_ingest(
     since: Annotated[str, typer.Option(help="First UTC day to fetch (YYYY-MM-DD).")] = "2017-01-01",
@@ -804,7 +828,10 @@ def crypto_research_hourly(
     version: Annotated[
         str,
         typer.Option(
-            help="Pre-registered hourly set: CRYPTO-H1, CRYPTO-H2, CRYPTO-H3 or CRYPTO-H4."
+            help=(
+                "Pre-registered hourly set: CRYPTO-H1, CRYPTO-H2, CRYPTO-H3, CRYPTO-H4, or "
+                "CRYPTO-H5 (EXPERIMENTAL; development window cut at CRYPTO-H4's sealed start)."
+            )
         ),
     ] = "CRYPTO-H1",
 ) -> None:

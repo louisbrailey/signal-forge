@@ -38,6 +38,7 @@ from signalforge.research.fx.harness import (
     CRYPTO2_MARKET,
     CRYPTO3_MARKET,
     CRYPTO4_MARKET,
+    CRYPTO5_MARKET,
     CRYPTO_MARKET,
     FX2_GATES,
     FX2_MARKET,
@@ -57,12 +58,15 @@ from signalforge.research.fx.hourly import (
     CRYPTO_H3_VERSION,
     CRYPTO_H4_STRATEGIES,
     CRYPTO_H4_VERSION,
+    CRYPTO_H5_STRATEGIES,
+    CRYPTO_H5_VERSION,
     load_hourly_series,
 )
 from signalforge.research.fx.strategies import (
     CRYPTO2_STRATEGIES,
     CRYPTO3_STRATEGIES,
     CRYPTO4_STRATEGIES,
+    CRYPTO5_STRATEGIES,
     CRYPTO_STRATEGIES,
     FX2_STRATEGIES,
     FX3_STRATEGIES,
@@ -87,6 +91,7 @@ _MARKETS: dict[str, tuple[tuple[ResearchMarket, tuple[FxStrategy, ...], FxGates]
         (CRYPTO2_MARKET, CRYPTO2_STRATEGIES, FxGates()),
         (CRYPTO3_MARKET, CRYPTO3_STRATEGIES, FxGates()),
         (CRYPTO4_MARKET, CRYPTO4_STRATEGIES, FxGates()),
+        (CRYPTO5_MARKET, CRYPTO5_STRATEGIES, FxGates()),
     ),
     # Hourly crypto (2026-11-04): same spreads as the daily crypto market, bars
     # from crypto_bar_intraday, sealed window = the final 365 calendar days of
@@ -103,10 +108,41 @@ _MARKETS: dict[str, tuple[tuple[ResearchMarket, tuple[FxStrategy, ...], FxGates]
             CRYPTO_H4_STRATEGIES,
             FxGates(),
         ),
+        (
+            _replace(CRYPTO_MARKET, name="Crypto (hourly)", version=CRYPTO_H5_VERSION),
+            CRYPTO_H5_STRATEGIES,
+            FxGates(),
+        ),
     ),
 }
 
 HOURLY_MARKET_KEY = "crypto_hourly"
+
+# EXPERIMENTAL versions registered after their parents' sealed years were seen
+# (CRYPTO-5 / CRYPTO-H5, the long-only variants of 2026-11-08). Every bar up to
+# the registration date has been read for these pairs (parent sealed tests and
+# paper books), so their one sealed look is refused until the sealed window
+# starts on or after this date, and only with the registered gates (a full
+# sealed year). (market name, version) -> first allowed day.
+#
+# NECESSARY, NOT SUFFICIENT. The parent paper books (CRYPTO-1 crypto_donchian_55,
+# CRYPTO-2 crypto_donchian_55_u10, CRYPTO-H4 crypto_h_donchian168_trail72_volx)
+# keep cycling on the same pairs over exactly the bars this date protects, and
+# their LONG trades are nearly the trades these long-only rules would take (the
+# paper venue report even subtotals them). By the time a fresh-dated window
+# exists it will have been watched trade by trade, so a sealed look then is NOT
+# an unseen holdout. Whether these versions get a sealed look at all, or the
+# parent books stop observing these pairs first, is an operator decision that
+# has not been recorded; until it is, any such row carries HOLDOUT_CAVEAT.
+SEALED_NOT_BEFORE: dict[tuple[str, str], date] = {
+    (CRYPTO5_MARKET.name, CRYPTO5_MARKET.version): date(2026, 11, 9),
+    ("Crypto (hourly)", CRYPTO_H5_VERSION): date(2026, 11, 9),
+}
+HOLDOUT_CAVEAT = (
+    "EXPERIMENTAL version: its parent's paper book observed this sealed window's bars on the "
+    "same pairs (the parent's LONG trades are nearly this rule's trades), so this is not an "
+    "unseen holdout."
+)
 
 
 def _series_loader(session: Session, market: str, mk: ResearchMarket) -> Callable[[str], Any]:
@@ -165,6 +201,12 @@ def run_sealed_test(
     now: datetime | None = None,
 ) -> CurrencySealedTest:
     mk, strat, registered_gates = _lookup(market, strategy_key)
+    not_before = SEALED_NOT_BEFORE.get((mk.name, mk.version))
+    if not_before is not None and gates is not None and gates != registered_gates:
+        raise SealedTestRefused(
+            f"{mk.name} {mk.version} {strategy_key} is EXPERIMENTAL: its sealed look uses only "
+            "its registered gates (a full sealed year); a caller-supplied gates value is refused"
+        )
     gates = gates or registered_gates
     prior = existing(session, market, strategy_key)
     if prior is not None:
@@ -184,6 +226,15 @@ def run_sealed_test(
         raise SealedTestRefused(f"no history for requested pairs {absent}; universe incomplete")
     seal_from = sealed_start(series_by_pair, gates.sealed_days)
     seal_to = max(s.dates[-1] for s in series_by_pair.values())
+    if not_before is not None and _as_date(seal_from) < not_before:
+        raise SealedTestRefused(
+            f"{mk.name} {mk.version} {strategy_key} is EXPERIMENTAL: a sealed window from "
+            f"{_as_date(seal_from)} overlaps bars already seen; its sealed year may not start "
+            f"before {not_before} (needs data through "
+            f"{not_before + timedelta(days=gates.sealed_days - 1)}). Even then it is not an "
+            "unseen holdout while the parent paper book keeps observing these pairs; whether "
+            "this version gets a sealed look at all is an operator decision."
+        )
 
     # 1) development gate, recomputed now — the sealed window is not read here
     dev = evaluate_strategy(strat, series_by_pair, seal_from=seal_from, gates=gates, market=mk)
@@ -205,6 +256,7 @@ def run_sealed_test(
             "ci_expectancy_r": dev.ci_expectancy_r,
             "stress_expectancy_r": dev.stress_expectancy_r,
             "fold_expectancy_r": dev.fold_expectancy_r,
+            **({} if not_before is None else {"holdout_caveat": HOLDOUT_CAVEAT}),
         },
         verdict="IN_PROGRESS",
     )

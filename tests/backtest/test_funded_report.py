@@ -38,6 +38,10 @@ def test_scenarios_use_same_snapshot_without_database_writes(tmp_path):
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TABLE instrument(id INTEGER, symbol TEXT, sector TEXT)")
         conn.execute("INSERT INTO instrument VALUES (1, 'SPY', 'broad_etf')")
+        conn.execute("""CREATE TABLE dividend_event(symbol TEXT, ex_dividend_date TEXT,
+            cash_amount REAL, pay_date TEXT, currency TEXT, source TEXT)""")
+        conn.execute("""CREATE TABLE split_event(symbol TEXT, execution_date TEXT,
+            split_from REAL, split_to REAL)""")
         conn.execute("""CREATE TABLE ohlcv_daily(instrument_id INTEGER,session_date TEXT,
             open REAL,high REAL,low REAL,close REAL,volume REAL,is_adjusted INTEGER,
             is_simulated INTEGER,quality_flags TEXT,source TEXT,latency_category TEXT)""")

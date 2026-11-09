@@ -14,7 +14,12 @@ from signalforge.config.research import RiskLimits
 from signalforge.data.calendar import sessions
 from signalforge.data.series import PriceSeries
 from signalforge.domain import Direction
-from signalforge.paper.ledger import HARD_MAX_SECTOR_PCT, HARD_MAX_SYMBOL_PCT
+from signalforge.paper.ledger import (
+    HARD_MAX_OPEN_RISK_PCT,
+    HARD_MAX_PER_TRADE_RISK_PCT,
+    HARD_MAX_SECTOR_PCT,
+    HARD_MAX_SYMBOL_PCT,
+)
 
 FREE = CostModel(slippage_bps=0)
 
@@ -38,9 +43,11 @@ def never(series, t):
 
 
 def run(data, signals=None, sectors=None, limits=None, **kw):
+    # A $2.50 stop distance keeps 20 five-share positions (2.5% open risk) inside
+    # the 3% open-risk hard maximum, so only the ceiling under test binds.
     return run_funded_replay(
         data,
-        signals or dict.fromkeys(data, fires()),
+        signals or dict.fromkeys(data, fires(97.5)),
         sectors or {s: s for s in data},
         limits=limits
         or RiskLimits(max_portfolio_exposure_pct=100, max_daily_portfolio_risk_pct=100),
@@ -58,7 +65,7 @@ def buys(result):
 def test_default_position_ceiling_unchanged_at_five_percent():
     data = {f"S{i:02}": bars(f"S{i:02}") for i in range(25)}
     r = run(data)
-    # 0.5% risk / $5 stop distance allows 10 shares; the 5% default ceiling binds at 5.
+    # 0.5% risk / $2.50 stop distance allows 20 shares; the 5% default ceiling binds at 5.
     assert len(buys(r)) == 20 and {f["shares"] for f in buys(r)} == {5}
     assert all("strategy" not in f for f in r.fills)
     assert all("strategy" not in d for d in r.decisions)
@@ -67,6 +74,7 @@ def test_default_position_ceiling_unchanged_at_five_percent():
 def test_position_ceiling_parameter_widens_up_to_paper_maximum():
     data = {f"S{i:02}": bars(f"S{i:02}") for i in range(25)}
     r = run(data, max_position_ceiling_pct=HARD_MAX_SYMBOL_PCT)
+    # The 10% ceiling binds at 10 shares; cash then funds 10 positions.
     assert len(buys(r)) == 10 and {f["shares"] for f in buys(r)} == {10}
     # Stricter caller limits remain effective under a wider ceiling.
     r = run(
@@ -90,6 +98,11 @@ def test_position_ceiling_parameter_widens_up_to_paper_maximum():
         {"max_sector_ceiling_pct": HARD_MAX_SECTOR_PCT + 1},
         {"max_gross_ceiling_pct": 100.5},
         {"max_gross_ceiling_pct": -1.0},
+        {"max_open_risk_ceiling_pct": HARD_MAX_OPEN_RISK_PCT + 0.01},
+        {"max_open_risk_ceiling_pct": 0.0},
+        {"max_open_risk_ceiling_pct": float("inf")},
+        {"per_trade_risk_ceiling_pct": HARD_MAX_PER_TRADE_RISK_PCT + 0.01},
+        {"per_trade_risk_ceiling_pct": float("nan")},
     ],
 )
 def test_ceilings_cannot_exceed_paper_ledger_maxima(kw):
@@ -108,6 +121,24 @@ def test_sector_and_gross_ceilings_are_honoured():
     assert len(buys(run(data, sectors=same, limits=limits))) == 4  # default 20% sector ceiling
     assert len(buys(run(data, sectors=same, limits=limits, max_sector_ceiling_pct=10))) == 2
     assert len(buys(run(data, max_gross_ceiling_pct=50))) == 10
+
+
+def test_caller_risk_budgets_are_capped_at_paper_ledger_maxima():
+    data = {f"S{i:02}": bars(f"S{i:02}") for i in range(25)}
+    wide = RiskLimits(
+        max_portfolio_exposure_pct=100, max_daily_portfolio_risk_pct=100, per_trade_risk_pct=10
+    )
+    # $5 stop: 5 shares (5% name ceiling) risk $25 each; 3% open risk admits 12 of 25.
+    r = run(data, dict.fromkeys(data, fires(95)), limits=wide)
+    assert len(buys(r)) == 12 and {f["shares"] for f in buys(r)} == {5}
+    assert {d["reason"] for d in r.decisions if d["status"] == "rejected"} == {
+        "max daily portfolio risk 3.0% would be exceeded"
+    }
+    five = dict.fromkeys(data, fires(95))
+    assert len(buys(run(data, five, limits=wide, max_open_risk_ceiling_pct=1.5))) == 6
+    # Per-trade risk 10% is capped at 0.5%: $50 / $5 stop = 10 shares under a 10% name cap.
+    one = run({"A": bars()}, {"A": fires(95)}, limits=wide, max_position_ceiling_pct=10)
+    assert buys(one)[0]["shares"] == 10
 
 
 def test_composite_first_listed_strategy_wins():

@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import asdict
-from datetime import UTC
-from typing import Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from sqlalchemy import select
@@ -28,7 +28,10 @@ from signalforge.research.fx.harness import (
     evaluate_strategy,
     sealed_start,
 )
-from signalforge.research.fx.strategies import FxStrategy, atr
+from signalforge.research.fx.strategies import FxStrategy, atr, long_only_variant
+
+if TYPE_CHECKING:
+    from signalforge.research.fx.venues import VenueCost
 
 CRYPTO_H1_VERSION = "CRYPTO-H1"
 # Refinement round 1 (pre-registered 2026-11-02, PREREGISTRATION_universe_program §7.3):
@@ -43,7 +46,19 @@ CRYPTO_H4_VERSION = "CRYPTO-H4"
 # CRYPTO-H3: the two NEW hourly rules of PREREGISTRATION_round2_2026-11-03.md R2-H
 # (quiet-tape filter; two-week channel). The H1 baseline is NOT part of this set.
 CRYPTO_H3_VERSION = "CRYPTO-H3"
-HOURLY_VERSIONS = (CRYPTO_H1_VERSION, CRYPTO_H2_VERSION, CRYPTO_H3_VERSION, CRYPTO_H4_VERSION)
+# CRYPTO-H5 (2026-11-08): EXPERIMENTAL, unsealed long-only variant of the CRYPTO-H4
+# volx rule (RESULTS_crypto_executability_2026-11-08.md), on its parent's pairs.
+CRYPTO_H5_VERSION = "CRYPTO-H5"
+# CRYPTO-H4's sealed year (from 2025-11-03) was seen, so a CRYPTO-H5 development
+# read never runs past its start. version -> latest allowed development cut.
+HOURLY_DEV_CUT: dict[str, datetime] = {CRYPTO_H5_VERSION: datetime(2025, 11, 3, tzinfo=UTC)}
+HOURLY_VERSIONS = (
+    CRYPTO_H1_VERSION,
+    CRYPTO_H2_VERSION,
+    CRYPTO_H3_VERSION,
+    CRYPTO_H4_VERSION,
+    CRYPTO_H5_VERSION,
+)
 SOURCE = "massive_crypto"
 BAR_SIZE = "1h"
 
@@ -322,11 +337,24 @@ CRYPTO_H3_STRATEGIES: tuple[FxStrategy, ...] = (
         trail_channel=_WIDE_TRAIL,
     ),
 )
+CRYPTO_H5_PAIRS: dict[str, tuple[str, ...]] = {
+    "crypto_h_donchian168_trail72_volx_long": ("BTCUSD", "ETHUSD"),
+}
+CRYPTO_H5_STRATEGIES: tuple[FxStrategy, ...] = (
+    long_only_variant(
+        CRYPTO_H4_STRATEGIES[2],
+        "crypto_h_donchian168_trail72_volx_long",
+        "LONG on a close above the prior 168h high only when ATR(24) >= ATR(168) "
+        "(crypto_h_donchian168_trail72_volx, long only); 2xATR(24) stop; exit on a close back "
+        "below the prior 72h low; 720h safety stop. EXPERIMENTAL, unsealed.",
+    ),
+)
 HOURLY_STRATEGIES: dict[str, tuple[FxStrategy, ...]] = {
     CRYPTO_H1_VERSION: CRYPTO_H1_STRATEGIES,
     CRYPTO_H2_VERSION: CRYPTO_H1_STRATEGIES,
     CRYPTO_H3_VERSION: CRYPTO_H3_STRATEGIES,
     CRYPTO_H4_VERSION: CRYPTO_H4_STRATEGIES,
+    CRYPTO_H5_VERSION: CRYPTO_H5_STRATEGIES,
 }
 
 
@@ -337,6 +365,7 @@ def run_crypto_hourly_research(
     gates: FxGates | None = None,
     strategies: Sequence[FxStrategy] | None = None,
     version: str = CRYPTO_H1_VERSION,
+    venue: VenueCost | None = None,
 ) -> dict[str, Any]:
     if version not in HOURLY_VERSIONS:
         raise ValueError(f"unknown hourly version {version!r}; expected one of {HOURLY_VERSIONS}")
@@ -349,8 +378,12 @@ def run_crypto_hourly_research(
             "no hourly crypto history for the requested pairs; run crypto-hourly-ingest"
         )
     seal_from = sealed_start(series_by_pair, gates.sealed_days)
+    if version in HOURLY_DEV_CUT:
+        seal_from = min(seal_from, HOURLY_DEV_CUT[version])
     results = [
-        evaluate_strategy(s, series_by_pair, seal_from=seal_from, gates=gates, market=CRYPTO_MARKET)
+        evaluate_strategy(
+            s, series_by_pair, seal_from=seal_from, gates=gates, market=CRYPTO_MARKET, venue=venue
+        )
         for s in strategies
     ]
     absent = sorted(set(pairs) - set(series_by_pair))
@@ -361,8 +394,12 @@ def run_crypto_hourly_research(
     return {
         "market": "Crypto (hourly)",
         "version": version,
+        **({} if venue is None else {"venue": asdict(venue)}),
         "gates": asdict(gates),
-        "spread_bps": {p: CRYPTO_MARKET.spread(p) for p in series_by_pair},
+        "spread_bps": {
+            p: CRYPTO_MARKET.spread(p) if venue is None else venue.engine_spread_bps(p)
+            for p in series_by_pair
+        },
         "history": {
             p: {"first": s.dates[0].isoformat(), "last": s.dates[-1].isoformat(), "bars": len(s)}
             for p, s in sorted(series_by_pair.items())

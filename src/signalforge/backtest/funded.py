@@ -22,7 +22,13 @@ from signalforge.config.research import RiskLimits
 from signalforge.data.calendar import sessions
 from signalforge.data.series import PriceSeries
 from signalforge.domain import Direction
-from signalforge.paper.ledger import HARD_MAX_GROSS_PCT, HARD_MAX_SECTOR_PCT, HARD_MAX_SYMBOL_PCT
+from signalforge.paper.ledger import (
+    HARD_MAX_GROSS_PCT,
+    HARD_MAX_OPEN_RISK_PCT,
+    HARD_MAX_PER_TRADE_RISK_PCT,
+    HARD_MAX_SECTOR_PCT,
+    HARD_MAX_SYMBOL_PCT,
+)
 from signalforge.risk.engine import OpenExposure, SizingRequest, size_position
 
 # Research replay ceilings applied by default: stricter than the paper ledger's
@@ -31,6 +37,10 @@ from signalforge.risk.engine import OpenExposure, SizingRequest, size_position
 DEFAULT_MAX_POSITION_CEILING_PCT = 5.0
 DEFAULT_MAX_SECTOR_CEILING_PCT = 20.0
 DEFAULT_MAX_GROSS_CEILING_PCT = 100.0
+# Risk-budget ceilings default to the paper ledger's hard maxima, so no caller's
+# limits can budget more per-trade or aggregate open risk than the ledger allows.
+DEFAULT_MAX_OPEN_RISK_CEILING_PCT = HARD_MAX_OPEN_RISK_PCT
+DEFAULT_PER_TRADE_RISK_CEILING_PCT = HARD_MAX_PER_TRADE_RISK_PCT
 
 
 def money(value: float | Decimal) -> Decimal:
@@ -145,6 +155,8 @@ def run_funded_replay(
     max_position_ceiling_pct: float = DEFAULT_MAX_POSITION_CEILING_PCT,
     max_sector_ceiling_pct: float = DEFAULT_MAX_SECTOR_CEILING_PCT,
     max_gross_ceiling_pct: float = DEFAULT_MAX_GROSS_CEILING_PCT,
+    max_open_risk_ceiling_pct: float = DEFAULT_MAX_OPEN_RISK_CEILING_PCT,
+    per_trade_risk_ceiling_pct: float = DEFAULT_PER_TRADE_RISK_CEILING_PCT,
 ) -> FundedReplay:
     """Deterministic alphabetic admission order; shared cash, no leverage.
 
@@ -152,14 +164,17 @@ def run_funded_replay(
     provenance, dividends, survivorship, earnings or corporate-action history.
     No implicit truncation to an intersection of available dates is permitted.
 
-    The ``max_*_ceiling_pct`` arguments cap the caller's ``limits`` (stricter
+    The ``*_ceiling_pct`` arguments cap the caller's ``limits`` (stricter
     caller limits remain effective); each must be positive and may not exceed
-    the paper ledger's hard maximum for the same quantity.
+    the paper ledger's hard maximum for the same quantity. The open-risk and
+    per-trade risk ceilings default to those hard maxima, as in the ledger.
     """
     for name, ceiling, hard_max in (
         ("max_position_ceiling_pct", max_position_ceiling_pct, HARD_MAX_SYMBOL_PCT),
         ("max_sector_ceiling_pct", max_sector_ceiling_pct, HARD_MAX_SECTOR_PCT),
         ("max_gross_ceiling_pct", max_gross_ceiling_pct, HARD_MAX_GROSS_PCT),
+        ("max_open_risk_ceiling_pct", max_open_risk_ceiling_pct, HARD_MAX_OPEN_RISK_PCT),
+        ("per_trade_risk_ceiling_pct", per_trade_risk_ceiling_pct, HARD_MAX_PER_TRADE_RISK_PCT),
     ):
         if not math.isfinite(ceiling) or not 0 < ceiling <= hard_max:
             raise ValueError(f"{name} must be in (0, {hard_max}] (paper ledger hard maximum)")
@@ -227,6 +242,10 @@ def run_funded_replay(
             "max_portfolio_exposure_pct": min(
                 limits.max_portfolio_exposure_pct, max_gross_ceiling_pct
             ),
+            "max_daily_portfolio_risk_pct": min(
+                limits.max_daily_portfolio_risk_pct, max_open_risk_ceiling_pct
+            ),
+            "per_trade_risk_pct": min(limits.per_trade_risk_pct, per_trade_risk_ceiling_pct),
         }
     )
     if any(a.symbol not in series or a.day not in series[a.symbol].dates for a in splits):
