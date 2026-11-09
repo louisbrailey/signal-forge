@@ -187,10 +187,14 @@ def _admission_state(session: Session, book: CryptoHourlyPaperBook) -> _Admissio
                     raise ValueError("enrollment boundary disagrees with book")
                 state.enrolled_at, state.hold = enrolled, ""
             elif kind in ("blocked", "resumed") and event["reason"] in ("kill_switch", "data_hold"):
-                state.cutoffs.append((_audit_time(event["at"]), event["reason"]))
+                through = _audit_time(event["at"])
+                state.cutoffs.append((through, event["reason"]))
                 state.pending_reason = event["reason"] if kind == "blocked" else ""
                 if event.get("kill_seen_at"):
-                    state.kill_seen_at = _audit_time(event["kill_seen_at"])
+                    acknowledged = _audit_time(event["kill_seen_at"])
+                    if acknowledged > through:
+                        raise ValueError("acknowledged transition has no covering refusal cutoff")
+                    state.kill_seen_at = max(state.kill_seen_at or acknowledged, acknowledged)
                 state.hold_seen_id = max(state.hold_seen_id, int(event.get("hold_seen_id", 0)))
             else:
                 raise ValueError("invalid admission event")
@@ -211,10 +215,12 @@ def _inhibition_event(
     # Missing state is the kill switch's documented fresh-install state; its
     # synthetic changed_at is not a release. Corrupt state reads as active.
     kill_at = _utc(kill.changed_at) if paths.kill_switch_state_path().exists() else None
-    since = max(_utc(book.start_at), _utc(book.last_cycle_at or book.start_at))
-    unseen_release = bool(
-        kill_at and kill_at > max(since, state.kill_seen_at or since) and not kill.active
-    )
+    # Completion is NOT an observation: a kill can engage and release after
+    # the last switch read but before last_cycle_at is stamped. A transition
+    # is acknowledged only by a durable admission event carrying its cutoff.
+    # Existing H2 histories already have this field; no history is rewritten.
+    since = state.kill_seen_at or state.enrolled_at
+    unseen_release = bool(kill_at and (since is None or kill_at > since) and not kill.active)
     unseen_hold = False
     hold_seen_id = state.hold_seen_id
     for h in session.scalars(
@@ -243,7 +249,9 @@ def _inhibition_event(
         return None
     return {
         "kind": "blocked" if pending else "resumed",
-        "at": at.isoformat(),
+        # The state read can occur after the caller sampled `at`. Never
+        # acknowledge a transition newer than the cutoff protecting it.
+        "at": max(at, kill_at or at).isoformat(),
         "reason": reason,
         "kill_seen_at": kill_at.isoformat() if kill_at else None,
         "hold_seen_id": hold_seen_id,

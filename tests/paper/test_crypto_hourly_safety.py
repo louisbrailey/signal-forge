@@ -193,6 +193,84 @@ def test_full_kill_interval_between_ticks_is_conservatively_refused(
     assert _rows(session)[0].status == "SKIPPED"
 
 
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("prior_ack", [False, True])
+def test_kill_after_final_observation_before_completion_is_not_acknowledged(
+    session: Session,
+    feed: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    restart: bool,
+    prior_ack: bool,
+) -> None:
+    """Completion cannot acknowledge a switch transition the cycle never saw."""
+    with freeze_time(_at(12, 37)):
+        _sealed(session)
+        book = hl.start_book(session, KEY)
+    if prior_ack:
+        with freeze_time(_at(13)):
+            get_kill_switch().engage("earlier observed interval")
+        with freeze_time(_at(13, 10)):
+            get_kill_switch().release("earlier observed interval")
+        with freeze_time(_at(13, 20)):
+            hl.record_admission_state(session, KEY)
+    audit_query = (
+        select(AppSettingHistory.id, AppSettingHistory.new_value_json)
+        .where(AppSettingHistory.key == hl._audit_key(book))
+        .order_by(AppSettingHistory.id)
+    )
+    before = list(session.execute(audit_query))
+    session.commit()
+    original_apply = hl._apply_pair
+    feed["last"] = 13  # the 14:00 fill is still unseen, as ingestion was paused
+    with freeze_time(_at(14) - timedelta(milliseconds=200)) as clock:
+
+        def apply_then_switch(*args: Any, **kwargs: Any) -> None:
+            original_apply(*args, **kwargs)
+            # AFTER the final switch observation/admission read, BEFORE the
+            # completion stamp. The kill spans the next bar's opening fill.
+            clock.move_to(_at(14) - timedelta(milliseconds=100))
+            get_kill_switch().engage("final-observation race")
+            clock.move_to(_at(14) + timedelta(milliseconds=100))
+            get_kill_switch().release("final-observation race")
+            clock.move_to(_at(14) + timedelta(milliseconds=200))
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(hl, "_apply_pair", apply_then_switch)
+            hl.run_cycle(session, KEY)
+    assert book.last_cycle_at == _at(14) + timedelta(milliseconds=200)
+    assert hl._admission_state(session, book).kill_seen_at == (_at(13, 10) if prior_ack else None)
+    session.rollback()
+    feed["last"], feed["trades"] = 15, [_trade(14, end=15, reason="target")]
+    with freeze_time(_at(15, 10)):
+        if restart:
+            import signalforge.killswitch as ks
+
+            monkeypatch.setattr(ks, "_default", None)
+            with get_sessionmaker()() as recovered:
+                hl.run_cycle(recovered, KEY)
+        else:
+            hl.run_cycle(session, KEY)
+    rows = _rows(session)
+    assert [(r.entry_at, r.status, r.exit_reason) for r in rows] == [
+        (_at(14), "SKIPPED", "kill_switch"),
+    ]
+    state = hl._admission_state(session, book)
+    assert state.kill_seen_at == _at(14) + timedelta(milliseconds=100)
+    acknowledged = list(session.execute(audit_query))
+    assert acknowledged[: len(before)] == before  # retain all existing H2 history
+    with freeze_time(_at(19)):
+        feed["last"] = 18
+        feed["trades"].append(_trade(16))
+        hl.run_cycle(session, KEY)  # the acknowledged interval does not block future fills
+        rep = hl.run_cycle(session, KEY)  # replay is idempotent
+    assert rep.opened == []
+    assert [(r.entry_at, r.status) for r in _rows(session)] == [
+        (_at(14), "SKIPPED"),
+        (_at(16), "OPEN"),
+    ]
+    assert list(session.execute(audit_query)) == acknowledged
+
+
 @pytest.mark.parametrize("missed_ticks", [False, True])
 def test_data_hold_cannot_backfill_late_entries(
     session: Session, feed: dict[str, Any], missed_ticks: bool
@@ -213,6 +291,29 @@ def test_data_hold_cannot_backfill_late_entries(
         hl.run_cycle(session, KEY)
         hl.run_cycle(session, KEY)
     assert [(r.status, r.exit_reason) for r in _rows(session)] == [("SKIPPED", "data_hold")]
+
+
+def test_acknowledged_release_is_always_covered_by_its_durable_cutoff(
+    session: Session, feed: dict[str, Any]
+) -> None:
+    with freeze_time(_at(12, 37)):
+        _sealed(session)
+        book = hl.start_book(session, KEY)
+    with freeze_time(_at(14) - timedelta(milliseconds=100)):
+        get_kill_switch().engage("state read after sampled observation time")
+    with freeze_time(_at(14) + timedelta(milliseconds=100)):
+        get_kill_switch().release("state read after sampled observation time")
+        # The caller sampled `now` just before the state changed. It cannot
+        # consume the release while saving a cutoff earlier than that release.
+        hl.record_admission_state(session, KEY, now=_at(14) - timedelta(milliseconds=200))
+    state = hl._admission_state(session, book)
+    assert not state.hold
+    assert state.kill_seen_at == _at(14) + timedelta(milliseconds=100)
+    assert state.cutoffs[-1][0] >= state.kill_seen_at
+    feed["trades"] = [_trade(14)]
+    with freeze_time(_at(19)):
+        hl.run_cycle(session, KEY)
+    assert [(r.status, r.exit_reason) for r in _rows(session)] == [("SKIPPED", "kill_switch")]
 
 
 @pytest.mark.parametrize("audit", ["missing", "corrupt"])
