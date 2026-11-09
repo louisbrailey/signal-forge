@@ -18,7 +18,9 @@ The drills this module carries, named as the ADR names them:
   lapsed. This is the drill that PROVES the headline promise rather than
   asserting it.
 * **V19's job half** — with ``execution.enabled`` False the worker's job list is
-  byte-identical to ``scheduler.default_job_specs()``.
+  byte-identical to ``scheduler.default_job_specs()``. Only the exact reviewed
+  hourly paper-maintenance job may self-guard in those defaults; it is no broker
+  execution path.
 
 No adapter from ``execution/brokers`` is touched anywhere in this file: the
 double lives in ``tests/execution/fakes.py`` and the paper_reference adapter is
@@ -146,7 +148,7 @@ def _protective_close(session: Session, position: FakePosition):
 
 
 def test_the_job_list_is_byte_identical_while_execution_is_disabled(session: Session) -> None:
-    from signalforge.scheduler import default_job_specs
+    from signalforge.scheduler import default_job_specs, job_crypto_hourly_paper
 
     assert cycle_mod.execution_job_specs() == []
 
@@ -160,7 +162,10 @@ def test_the_job_list_is_byte_identical_while_execution_is_disabled(session: Ses
         for s in worker_list
     ]
     assert after == before
-    assert not any(s.self_guarded for s in default_job_specs())
+    assert all(
+        not s.self_guarded or (s.name == "crypto_hourly_paper" and s.fn is job_crypto_hourly_paper)
+        for s in default_job_specs()
+    )
     assert "execution_cycle" not in {s.name for s in default_job_specs()}
 
 
@@ -174,7 +179,7 @@ def test_the_job_is_registered_only_when_the_setting_is_on(
 
     specs = cycle_mod.execution_job_specs()
     assert [s.name for s in specs] == [cycle_mod.EXECUTION_CYCLE_JOB]
-    # The one spec in the tree that must NOT be wrapped in scheduler.guarded.
+    # This execution spec must retain its own protective-only kill handling.
     assert specs[0].self_guarded is True
     assert "nothing is armed by default" in specs[0].description
 
