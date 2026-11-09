@@ -63,6 +63,11 @@ def test_default_strategies_is_unchanged_by_the_options_family() -> None:
         "mean_reversion.short_swing",
         "relative_strength.medium_swing",
         "volatility_breakout.short_swing",
+        "tsmom_etf.medium_swing",
+        "turn_of_month.short_swing",
+        "tsmom_etf.position",
+        "high52_breakout.medium_swing",
+        "trend_pullback.short_swing",
     ]
     assert not any(k.startswith("options") for k in keys)
 
@@ -117,7 +122,7 @@ def test_the_options_spec_hash_collides_with_no_equity_spec_hash() -> None:
     options_hash = spec_json_hash(OptionsShortVertical().spec())
     equity_hashes = {spec_json_hash(s.spec()) for s in default_strategies()}
     assert options_hash not in equity_hashes
-    assert len(equity_hashes) == 6  # and the equity set itself is still collision-free
+    assert len(equity_hashes) == len(default_strategies())  # every equity hash is unique
 
 
 def test_the_options_spec_is_distinguishable_without_hashing_it_at_all() -> None:

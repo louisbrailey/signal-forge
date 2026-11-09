@@ -27,4 +27,10 @@ def test_upgrade_creates_two_tables_and_downgrade_removes_only_them(db_url: str)
     command.downgrade(cfg, PARENT)
     after = set(inspect(create_engine(db_url)).get_table_names())
     assert {"crypto_paper_book", "crypto_paper_trade"} <= before - after
-    assert before - after <= {"crypto_paper_book", "crypto_paper_trade", "crypto_bar_intraday"}
+    assert before - after <= {
+        "crypto_hourly_paper_book",
+        "crypto_hourly_paper_trade",
+        "crypto_paper_book",
+        "crypto_paper_trade",
+        "crypto_bar_intraday",
+    }

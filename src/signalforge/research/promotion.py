@@ -55,7 +55,7 @@ from datetime import date, timedelta
 from typing import Any
 
 import numpy as np
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -70,6 +70,7 @@ from signalforge.data.series import PriceSeries
 from signalforge.data.validate import validate_daily
 from signalforge.db.models import (
     AuditLog,
+    BacktestRun,
     DataSnapshot,
     Strategy,
     StrategyPromotionEvaluation,
@@ -79,7 +80,11 @@ from signalforge.db.models import (
 from signalforge.db.types import utcnow
 from signalforge.domain import Horizon, StrategyStatus
 from signalforge.observability import get_logger
-from signalforge.research.backtest_runner import _as_date, run_strategy_over_universe
+from signalforge.research.backtest_runner import (
+    StrategyBacktestResult,
+    _as_date,
+    run_strategy_over_universe,
+)
 from signalforge.research.features.daily import (
     atr,
     atr_contraction,
@@ -89,7 +94,11 @@ from signalforge.research.features.daily import (
     sma,
     true_range,
 )
-from signalforge.research.persistence import spec_json_hash, upsert_strategy_version
+from signalforge.research.persistence import (
+    persist_backtest_result,
+    spec_json_hash,
+    upsert_strategy_version,
+)
 from signalforge.research.portfolio_metrics import compute_portfolio_metrics
 from signalforge.research.sensitivity import MAX_GRID_POINTS, run_parameter_sensitivity
 from signalforge.research.strategies.base import BaselineStrategy
@@ -337,6 +346,59 @@ def _sensitivity_plan(
             strategy, {"contraction_max": [0.65, 0.75, 0.85], "stop_atr": [1.5, 1.75, 2.0]}
         )
 
+    # Pre-registered 2026-11-02 (PREREGISTRATION_universe_program_2026-11-02.md §2A/§2B),
+    # written before any bar of either universe was backtested.
+    if key.startswith("tsmom_etf"):
+        from signalforge.research.strategies.tsmom_etf import TsmomEtf
+
+        base = strategy.params  # type: ignore[attr-defined]
+
+        horizon = strategy.horizon  # type: ignore[attr-defined]
+
+        def factory(p: Mapping[str, Any]) -> BaselineStrategy:
+            return TsmomEtf(horizon, _replace(base, **p))
+
+        return factory, _merge_declared_axes(
+            strategy, {"lookback": [189, 252, 315], "sma_window": [168, 210, 252]}
+        )
+
+    if key.startswith("turn_of_month"):
+        from signalforge.research.strategies.turn_of_month import TurnOfMonth
+
+        base = strategy.params  # type: ignore[attr-defined]
+
+        def factory(p: Mapping[str, Any]) -> BaselineStrategy:
+            return TurnOfMonth(_replace(base, **p))
+
+        return factory, _merge_declared_axes(
+            strategy, {"hold_bars": [2, 3, 4], "stop_atr": [2.0, 3.0, 4.0]}
+        )
+
+    # Round 2, pre-registered 2026-11-03 (PREREGISTRATION_round2_2026-11-03.md R2-E1 / R2-E2).
+    if key.startswith("high52_breakout"):
+        from signalforge.research.strategies.high52_breakout import High52Breakout
+
+        base = strategy.params  # type: ignore[attr-defined]
+
+        def factory(p: Mapping[str, Any]) -> BaselineStrategy:
+            return High52Breakout(_replace(base, **p))
+
+        return factory, _merge_declared_axes(
+            strategy, {"lookback": [189, 252, 315], "stop_atr": [1.5, 2.0, 2.5]}
+        )
+
+    if key.startswith("trend_pullback"):
+        from signalforge.research.strategies.trend_pullback import TrendPullback
+
+        base = strategy.params  # type: ignore[attr-defined]
+
+        def factory(p: Mapping[str, Any]) -> BaselineStrategy:
+            return TrendPullback(_replace(base, **p))
+
+        return factory, _merge_declared_axes(
+            strategy, {"sma_fast": [5, 10, 15], "stop_atr": [1.5, 2.0, 2.5]}
+        )
+
     return None
 
 
@@ -437,6 +499,13 @@ def _regime_census(trades: list[Any], regimes: Mapping[date, str]) -> _RegimeCen
         unlabelled=unlabelled,
         n_trades=len(trades),
     )
+
+
+def _fold_trades(trades: list[Any], lo: date, hi: date) -> list[Any]:
+    """Trades whose entry falls in ``[lo, hi)``. Intraday trades carry a
+    ``datetime`` entry stamp; comparing it to a fold's ``date`` bound raises
+    ``TypeError``, so the stamp is normalised the same way gate 6 does."""
+    return [t for t in trades if lo <= _as_date(t.entry_date) < hi]
 
 
 def _last_warmup_date(regimes: Mapping[date, str]) -> date | None:
@@ -825,6 +894,25 @@ def format_sealed_look_line(ledger: Mapping[str, Any]) -> str:
 # --------------------------------------------------------------------------- #
 # gate 9 — sealed test, computed once, reused forever
 # --------------------------------------------------------------------------- #
+#: Calendar days of history loaded BEFORE a sealed window so indicators and the
+#: regime proxy are warm on the window's first session (730 days ≈ 500 sessions,
+#: enough for a 12-month lookback plus a 10-month moving average). Trades are
+#: still scored only when ENTERED inside the window (``_sealed_window_trades``).
+SEALED_WARMUP_LEAD_DAYS = 730
+
+
+def sealed_lead_start(sealed_start: date) -> date:
+    """First day of history fed to the sealed-window backtest (warm-up only)."""
+    return sealed_start - timedelta(days=SEALED_WARMUP_LEAD_DAYS)
+
+
+def _sealed_window_trades(trades: list[Any], sealed_start: date, end: date) -> list[Any]:
+    """Only trades whose ENTRY falls inside ``[sealed_start, end]``: a position
+    opened on lead-in (development) data is not sealed evidence, however it
+    exits; a position opened inside the window is, wherever it exits."""
+    return [t for t in trades if sealed_start <= _as_date(t.entry_date) <= end]
+
+
 def _get_or_create_sealed_test(
     session: Session,
     strategy: BaselineStrategy,
@@ -859,11 +947,19 @@ def _get_or_create_sealed_test(
     if existing is not None:
         return existing, True  # locked — never recomputed, never overwritten
 
+    # Feature warm-up lead-in (2026-11-02): the strategy's indicators (and the
+    # regime proxy's 200-session lookback) are fed history from BEFORE the
+    # sealed window, exactly as a live scan would have had on the window's
+    # first day. Only trades ENTERED inside [sealed_start, end] are scored, so
+    # no sealed outcome is read twice and no development outcome is counted.
+    # Without this, any rule whose warm-up exceeds the window (a 12-month
+    # lookback against a 365-day window) scored "0 trades" by construction.
+    lead_start = sealed_lead_start(sealed_start)
     result = run_strategy_over_universe(
         session,
         strategy,
         symbols,
-        sealed_start,
+        lead_start,
         end,
         proxy_symbol=proxy_symbol,
         source=source,
@@ -871,8 +967,9 @@ def _get_or_create_sealed_test(
         intraday=intraday,
         bar_size=bar_size,
     )
-    trades = result.trades  # every trade in the sealed window, evaluated once
+    trades = _sealed_window_trades(result.trades, sealed_start, end)
     n = len(trades)
+    n_lead_in_excluded = len(result.trades) - n
     exp = sum(t.pnl_r for t in trades) / n if n else 0.0
     pm = compute_portfolio_metrics(trades, span_start=sealed_start, span_end=end)
     proxy = PriceSeries.load(session, proxy_symbol, sealed_start, end, source=source)
@@ -880,7 +977,9 @@ def _get_or_create_sealed_test(
     passed = bool(n >= th.sealed_min_trades and exp >= th.sealed_min_expectancy_r)
     detail = (
         f"{n} trades, net expectancy {exp:+.4f}R (need >= {th.sealed_min_expectancy_r:+.4f}R "
-        f"on >= {th.sealed_min_trades} trades)"
+        f"on >= {th.sealed_min_trades} trades); features warmed up on "
+        f"{SEALED_WARMUP_LEAD_DAYS} days before the window, {n_lead_in_excluded} lead-in "
+        "entries excluded"
     )
     row = StrategySealedTest(
         strategy_version_id=version.id,
@@ -893,7 +992,13 @@ def _get_or_create_sealed_test(
             "simulated": result.data.simulated,
             "bars": result.data.bars,
         },
-        metrics_json={"n_trades": n, "expectancy_r": round(exp, 4), **pm.to_dict()},
+        metrics_json={
+            "n_trades": n,
+            "expectancy_r": round(exp, 4),
+            "warmup_lead_days": SEALED_WARMUP_LEAD_DAYS,
+            "lead_in_entries_excluded": n_lead_in_excluded,
+            **pm.to_dict(),
+        },
         benchmark_metrics_json=bench,
         passed=passed,
         detail=detail,
@@ -925,6 +1030,49 @@ def _get_or_create_sealed_test(
         passed=passed,
     )
     return row, False
+
+
+# --------------------------------------------------------------------------- #
+# the pre-sealed development backtest (shared by gates 1-8 and the OOS record)
+# --------------------------------------------------------------------------- #
+def promotion_cost_model(config: ResearchConfig) -> CostModel:
+    """The conservative cost model every promotion backtest is charged."""
+    return CostModel(
+        commission_per_share=config.commission_per_share,
+        commission_min_per_order=config.commission_min_per_order,
+        slippage_bps=config.slippage_bps,
+        half_spread_fill_penalty=config.half_spread_fill_penalty,
+    )
+
+
+def run_development_backtest(
+    session: Session,
+    strategy: BaselineStrategy,
+    *,
+    symbols: list[str],
+    start: date,
+    pre_sealed_end: date,
+    proxy_symbol: str = "SPY",
+    source: SourceFilter = None,
+    config: ResearchConfig,
+) -> StrategyBacktestResult:
+    """The single backtest over the PRE-SEALED span ``[start, pre_sealed_end]``
+    that gates 1-4 and 6-7 read. ``evaluate_promotion`` and
+    ``record_development_oos_backtest`` both call this, so a recorded
+    development OOS metric is by construction the one the gates measured."""
+    return run_strategy_over_universe(
+        session,
+        strategy,
+        symbols,
+        start,
+        pre_sealed_end,
+        proxy_symbol=proxy_symbol,
+        source=source,
+        cost_model=promotion_cost_model(config),
+        config_hash=config.config_hash,
+        intraday=strategy.spec().horizon is Horizon.INTRADAY,
+        bar_size=config.intraday_bar_size,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -973,12 +1121,7 @@ def evaluate_promotion(
 
         config = effective_research_config(session)
     th = config.promotion
-    cost_model = CostModel(
-        commission_per_share=config.commission_per_share,
-        commission_min_per_order=config.commission_min_per_order,
-        slippage_bps=config.slippage_bps,
-        half_spread_fill_penalty=config.half_spread_fill_penalty,
-    )
+    cost_model = promotion_cost_model(config)
     if dataset_snapshot is None:
         dataset_snapshot = get_or_create_dataset_snapshot(session, symbols=symbols)
 
@@ -1104,18 +1247,15 @@ def evaluate_promotion(
     # `opening_range` never completes and every gate reads 0 trades — a
     # truthful gate-0 fail would have become five gate failures that read as
     # strategy defects.
-    full = run_strategy_over_universe(
+    full = run_development_backtest(
         session,
         strategy,
-        symbols,
-        start,
-        pre_sealed_end,
+        symbols=symbols,
+        start=start,
+        pre_sealed_end=pre_sealed_end,
         proxy_symbol=proxy_symbol,
         source=source,
-        cost_model=cost_model,
-        config_hash=config.config_hash,
-        intraday=intraday,
-        bar_size=bar_size,
+        config=config,
     )
     data_provenance = {
         "sources": list(full.data.sources),
@@ -1136,7 +1276,7 @@ def evaluate_promotion(
     for k in range(n_folds):
         lo = start + timedelta(days=span_days * k // n_folds)
         hi = start + timedelta(days=span_days * (k + 1) // n_folds)
-        ft = [t for t in full.trades if lo <= t.entry_date < hi]
+        ft = _fold_trades(full.trades, lo, hi)
         pm = compute_portfolio_metrics(ft, span_start=lo, span_end=hi)
         fold_rows.append(
             {
@@ -1647,3 +1787,331 @@ def latest_evaluations(session: Session) -> dict[int, StrategyPromotionEvaluatio
     for row in rows:
         out.setdefault(row.strategy_version_id, row)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# recording the development-window OOS backtest the scan gate and health
+# monitor read (BacktestRun/BacktestMetric) — never the sealed window
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class DevelopmentOOSRecord:
+    """One development-window backtest, as recorded (or, on a dry run, as it
+    would be recorded) by :func:`record_development_oos_backtest`."""
+
+    strategy_key: str
+    version: str
+    strategy_version_id: int
+    dataset_snapshot_id: int
+    dataset_snapshot_key: str
+    start: date
+    until: date
+    sealed_boundary: date
+    evaluation_id: int
+    #: gates 2-4 of the evaluation this run reproduces: what it measured then.
+    evaluation_oos: dict[str, Any]
+    #: per-input check that this run used exactly the evaluation's inputs.
+    reproduces_evaluation: dict[str, bool]
+    provenance: dict[str, Any]
+    result: StrategyBacktestResult
+    backtest_run_id: int | None = None
+
+
+def development_sealed_boundary(
+    session: Session, *, strategy_version_id: int, dataset_snapshot_id: int
+) -> date | None:
+    """First day of the sealed window for this version or snapshot — the
+    earliest ``window_start`` of any sealed test locked on the snapshot (any
+    version) or for the version (any snapshot). A development backtest must
+    end strictly before it. ``None`` when nothing has been sealed, in which
+    case the sealed window cannot be located and nothing may be recorded."""
+    return session.scalar(
+        select(func.min(StrategySealedTest.window_start)).where(
+            or_(
+                StrategySealedTest.dataset_snapshot_id == dataset_snapshot_id,
+                StrategySealedTest.strategy_version_id == strategy_version_id,
+            )
+        )
+    )
+
+
+def _evaluation_gate_evidence(evaluation: StrategyPromotionEvaluation) -> dict[str, Any]:
+    by_number = {g.get("number"): g.get("evidence") or {} for g in evaluation.gates_json or []}
+    return {
+        "n_trades": by_number.get(2, {}).get("n_oos_trades"),
+        "expectancy_r": by_number.get(3, {}).get("expectancy_r"),
+        "ci": by_number.get(4, {}).get("ci"),
+    }
+
+
+def record_development_oos_backtest(
+    session: Session,
+    strategy: BaselineStrategy,
+    *,
+    dataset_snapshot_id: int,
+    until: date,
+    since: date | None = None,
+    source: SourceFilter = None,
+    proxy_symbol: str = "SPY",
+    config: ResearchConfig | None = None,
+    persist: bool = True,
+    allow_mismatch: bool = False,
+    allow_duplicate: bool = False,
+) -> DevelopmentOOSRecord:
+    """Re-run the pre-sealed development backtest a promotion evaluation of
+    this strategy version on this dataset snapshot measured, and (unless
+    ``persist`` is False) record it through ``persist_backtest_result`` so
+    the scan's out-of-sample gate and the health monitor have a value.
+
+    It changes no status and takes no sealed look: ``until`` must fall
+    strictly before every sealed window locked on the snapshot or for the
+    version, and the run is refused if none has been locked (the boundary
+    would be unknown). The symbols are the snapshot's own; ``since`` and
+    ``source`` default to the newest (preferably passing) evaluation's
+    window start and data sources, and the strategy's spec must hash to
+    what that evaluation recorded. Raises ``ValueError`` on any refusal;
+    ``allow_mismatch``/``allow_duplicate`` are passed to
+    :func:`persist_development_oos_record`.
+    """
+    if config is None:
+        from signalforge.settings_store import effective_research_config
+
+        config = effective_research_config(session)
+    spec = strategy.spec()
+    snapshot = session.get(DataSnapshot, dataset_snapshot_id)
+    if snapshot is None:
+        raise ValueError(f"no dataset snapshot with id {dataset_snapshot_id}")
+    version = session.scalar(
+        select(StrategyVersion)
+        .join(Strategy, StrategyVersion.strategy_id == Strategy.id)
+        .where(Strategy.name == spec.name, StrategyVersion.version == spec.version)
+    )
+    if version is None:
+        raise ValueError(f"{spec.name} v{spec.version} has never been registered or evaluated")
+
+    evaluations = list(
+        session.scalars(
+            select(StrategyPromotionEvaluation)
+            .where(
+                StrategyPromotionEvaluation.strategy_version_id == version.id,
+                StrategyPromotionEvaluation.dataset_snapshot_id == snapshot.id,
+            )
+            .order_by(StrategyPromotionEvaluation.id.desc())
+        )
+    )
+    if not evaluations:
+        raise ValueError(
+            f"{spec.name} v{spec.version} (strategy_version {version.id}) has no promotion "
+            f"evaluation on dataset snapshot {snapshot.id} ({snapshot.key!r}) — there is no "
+            f"development backtest to reproduce"
+        )
+    evaluation = next((e for e in evaluations if e.passed), evaluations[0])
+    current_hash = spec_json_hash(spec)
+    if evaluation.spec_json_hash != current_hash:
+        raise ValueError(
+            f"{spec.name} v{spec.version}'s spec has changed since evaluation {evaluation.id} "
+            f"(spec_json_hash {current_hash[:12]} != {evaluation.spec_json_hash[:12]}); its "
+            f"backtest would not be the evaluated strategy's"
+        )
+
+    boundary = development_sealed_boundary(
+        session, strategy_version_id=version.id, dataset_snapshot_id=snapshot.id
+    )
+    if boundary is None:
+        raise ValueError(
+            f"no sealed test is locked on dataset snapshot {snapshot.id} or for strategy_version "
+            f"{version.id}, so the sealed window cannot be located; refusing to record"
+        )
+    if until >= boundary:
+        raise ValueError(
+            f"--until {until} is on or after the sealed window's first day {boundary}; a "
+            f"development backtest must end by {boundary - timedelta(days=1)}"
+        )
+    start = since or evaluation.window_start
+    if start >= until:
+        raise ValueError(f"window start {start} is not before --until {until}")
+
+    if source is None:
+        recorded = list((evaluation.data_provenance_json or {}).get("sources") or [])
+        if not recorded:
+            raise ValueError(
+                f"evaluation {evaluation.id} records no data source; pass one explicitly"
+            )
+        source = recorded[0] if len(recorded) == 1 else recorded
+    source_json: Any = source if isinstance(source, str) else list(source)
+
+    eval_sealed = (
+        session.get(StrategySealedTest, evaluation.sealed_test_id)
+        if evaluation.sealed_test_id is not None
+        else None
+    )
+    eval_dev_end = None if eval_sealed is None else eval_sealed.window_start - timedelta(days=1)
+    eval_sources = (evaluation.data_provenance_json or {}).get("sources") or []
+    # Trade order follows symbol order and the bootstrap CI is order-dependent,
+    # so reuse the evaluation's own ordering whenever it covers the same set;
+    # the flag is order-sensitive so any other ordering is reported.
+    eval_universe = list(evaluation.universe_json or [])
+    symbols = list(snapshot.symbols_json)
+    if sorted(symbols) == sorted(eval_universe):
+        symbols = eval_universe
+    reproduces = {
+        "symbols": symbols == eval_universe,
+        "window_start": start == evaluation.window_start,
+        "until": eval_dev_end is not None and until == eval_dev_end,
+        "source": sorted([source] if isinstance(source, str) else source) == sorted(eval_sources),
+        "config_hash": config.config_hash == evaluation.config_hash,
+    }
+
+    result = run_development_backtest(
+        session,
+        strategy,
+        symbols=symbols,
+        start=start,
+        pre_sealed_end=until,
+        proxy_symbol=proxy_symbol,
+        source=source,
+        config=config,
+    )
+    provenance: dict[str, Any] = {
+        "purpose": "development_oos",
+        "dataset_snapshot": {"id": snapshot.id, "key": snapshot.key},
+        "window": {"start": start.isoformat(), "until": until.isoformat()},
+        "sealed_boundary": boundary.isoformat(),
+        "source": source_json,
+        "proxy_symbol": proxy_symbol,
+        "promotion_evaluation_id": evaluation.id,
+        "reproduces_evaluation": reproduces,
+        "spec_json_hash": current_hash,
+        "code_git_sha": spec.git_sha,
+        "is_oos_split": "per-symbol fraction (backtest_runner._is_boundary)",
+    }
+    record = DevelopmentOOSRecord(
+        strategy_key=spec.name,
+        version=spec.version,
+        strategy_version_id=version.id,
+        dataset_snapshot_id=snapshot.id,
+        dataset_snapshot_key=snapshot.key,
+        start=start,
+        until=until,
+        sealed_boundary=boundary,
+        evaluation_id=evaluation.id,
+        evaluation_oos=_evaluation_gate_evidence(evaluation),
+        reproduces_evaluation=reproduces,
+        provenance=provenance,
+        result=result,
+    )
+    if not persist:
+        return record
+    return persist_development_oos_record(
+        session, record, allow_mismatch=allow_mismatch, allow_duplicate=allow_duplicate
+    )
+
+
+#: provenance keys that identify one development OOS recording; a second run
+#: agreeing on all of them (and on config_hash) is a duplicate.
+_DEV_OOS_IDENTITY = (
+    "purpose",
+    "dataset_snapshot",
+    "window",
+    "source",
+    "proxy_symbol",
+    "promotion_evaluation_id",
+    "spec_json_hash",
+)
+
+
+def matching_development_oos_runs(session: Session, record: DevelopmentOOSRecord) -> list[int]:
+    """Ids of ``BacktestRun`` rows already recording this same development OOS
+    backtest (same version, snapshot, window, source, evaluation, spec and
+    config hash)."""
+    want = {k: record.provenance.get(k) for k in _DEV_OOS_IDENTITY}
+    runs = session.scalars(
+        select(BacktestRun)
+        .where(
+            BacktestRun.strategy_version_id == record.strategy_version_id,
+            BacktestRun.config_hash == record.result.config_hash,
+        )
+        .order_by(BacktestRun.id)
+    )
+    return [
+        run.id
+        for run in runs
+        if {k: (run.params_json or {}).get(k) for k in _DEV_OOS_IDENTITY} == want
+    ]
+
+
+def persist_development_oos_record(
+    session: Session,
+    record: DevelopmentOOSRecord,
+    *,
+    allow_mismatch: bool = False,
+    allow_duplicate: bool = False,
+) -> DevelopmentOOSRecord:
+    """Write a computed :class:`DevelopmentOOSRecord` as a ``BacktestRun``.
+
+    Split from the computation so a caller can run the (long) backtest in a
+    read-only session and hold the write lock only for this short insert. The
+    sealed boundary is re-checked here, inside the writing transaction.
+
+    The scan's OOS gate reads the newest such row, so a run whose inputs
+    differ from the evaluation's (any ``reproduces_evaluation`` flag false)
+    is refused unless ``allow_mismatch`` — it would unlock candidates on a
+    metric gates 1-8 never measured — and the override is written into the
+    provenance and audit event. A run identical to one already recorded is
+    refused unless ``allow_duplicate``."""
+    mismatched = sorted(k for k, ok in record.reproduces_evaluation.items() if not ok)
+    if mismatched and not allow_mismatch:
+        raise ValueError(
+            f"refusing to record: inputs differ from evaluation {record.evaluation_id} "
+            f"({', '.join(mismatched)}), so this is not the evaluated development backtest; "
+            f"pass allow_mismatch (--allow-mismatch) to record it anyway"
+        )
+    existing = matching_development_oos_runs(session, record)
+    if existing and not allow_duplicate:
+        raise ValueError(
+            f"refusing to record: backtest_run {', '.join(map(str, existing))} already records "
+            f"this development OOS backtest; pass allow_duplicate (--force) to add another"
+        )
+    provenance = dict(record.provenance)
+    if mismatched:
+        provenance["allow_mismatch"] = True
+        provenance["mismatched_inputs"] = mismatched
+    if existing:
+        provenance["duplicates_backtest_run_ids"] = existing
+    boundary = development_sealed_boundary(
+        session,
+        strategy_version_id=record.strategy_version_id,
+        dataset_snapshot_id=record.dataset_snapshot_id,
+    )
+    if boundary is None or record.until >= boundary:
+        raise ValueError(
+            f"refusing to record: --until {record.until} is not before the sealed window "
+            f"({boundary or 'unknown'})"
+        )
+    version = session.get(StrategyVersion, record.strategy_version_id)
+    if version is None:
+        raise ValueError(f"strategy_version {record.strategy_version_id} no longer exists")
+    run = persist_backtest_result(session, version, record.result, provenance=provenance)
+    session.flush()
+    oos = record.result.out_of_sample
+    audit.record(
+        "research.development_oos_recorded",
+        actor="research",
+        entity=f"{record.strategy_key}@{record.version}",
+        backtest_run_id=run.id,
+        dataset_snapshot_id=record.dataset_snapshot_id,
+        until=record.until.isoformat(),
+        promotion_evaluation_id=record.evaluation_id,
+        oos_n_trades=oos.n_trades,
+        oos_expectancy_r=oos.expectancy_r,
+        allow_mismatch=bool(mismatched),
+        mismatched_inputs=mismatched,
+        duplicates_backtest_run_ids=existing,
+    )
+    _log.info(
+        "promotion.development_oos_recorded",
+        strategy=record.strategy_key,
+        version=record.version,
+        backtest_run_id=run.id,
+        dataset_snapshot_id=record.dataset_snapshot_id,
+    )
+    return _replace(record, provenance=provenance, backtest_run_id=run.id)

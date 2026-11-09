@@ -37,9 +37,16 @@ def run(data, **kw):
 
 def test_next_open_shared_cash_and_simultaneous_exposure():
     data = {f"S{i:02}": bars(f"S{i:02}") for i in range(25)}
-    result = run(
+    # A $2.50 stop keeps 20 five-share positions (2.5%) inside the 3% open-risk
+    # hard maximum, so shared cash is what rejects the last five.
+    result = run_funded_replay(
         data,
+        dict.fromkeys(
+            data, lambda s, t: EntrySignal(Direction.LONG, 97.5, 20, 120) if t == 0 else None
+        ),
+        {s: s for s in data},
         limits=RiskLimits(max_portfolio_exposure_pct=100, max_daily_portfolio_risk_pct=100),
+        warmup=0,
         cost_model=CostModel(slippage_bps=0),
         spread_bps=0,
     )

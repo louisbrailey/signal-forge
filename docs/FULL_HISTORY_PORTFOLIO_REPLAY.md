@@ -38,7 +38,7 @@ The dollar target is a reporting threshold. It must never select parameters, inc
 
 ```sh
 PYTHONPATH=src uv run python scripts/funded_replay_report.py /absolute/path/signalforge.sqlite \
-  --symbols SPY QQQ --since 2016-10-17 --until 2026-11-02
+  --symbols SPY QQQ --since 2016-10-17 --until 2025-09-07
 ```
 
 The runner opens the operating database read-only, rejects comparison databases, requires complete equal XNYS calendars and clean adjusted non-simulated Massive bars, and records input hashes. Missing data halts rather than silently shortening the period.

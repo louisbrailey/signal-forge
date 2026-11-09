@@ -68,9 +68,9 @@ def _num(raw: str | None) -> Decimal | None:
 
 
 def sniff(csv_text: str) -> ImportPreview:
-    rows = list(csv.reader(io.StringIO(csv_text)))
+    rows = list(csv.reader(io.StringIO(csv_text.lstrip("\ufeff"))))
     # Some brokers prepend disclaimer lines; find the first row that looks like a header.
-    header_idx = next((i for i, r in enumerate(rows) if any("symbol" in c.lower() for c in r)), 0)
+    header_idx = _header_index(rows)
     if not rows or header_idx >= len(rows):
         return ImportPreview("unknown", "unknown", (), 0)
     header = [c.strip() for c in rows[header_idx]]
@@ -89,10 +89,18 @@ def sniff(csv_text: str) -> ImportPreview:
 
 
 def _dictreader_from(csv_text: str) -> csv.DictReader[str]:
-    rows = list(csv.reader(io.StringIO(csv_text)))
-    header_idx = next((i for i, r in enumerate(rows) if any("symbol" in c.lower() for c in r)), 0)
+    rows = list(csv.reader(io.StringIO(csv_text.lstrip("\ufeff"))))
+    header_idx = _header_index(rows)
     body = "\n".join(",".join(_quote(c) for c in r) for r in rows[header_idx:])
     return csv.DictReader(io.StringIO(body))
+
+
+def _header_index(rows: list[list[str]]) -> int:
+    for i, row in enumerate(rows):
+        cells = {cell.strip().lower().lstrip("\ufeff") for cell in row}
+        if "symbol" in cells or {"timestamp", "transaction type", "asset"} <= cells:
+            return i
+    return 0
 
 
 def _quote(cell: str) -> str:
@@ -186,6 +194,11 @@ def import_csv(
 
 def _parse_date(raw: str) -> datetime | None:
     raw = raw.strip()
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=utcnow().tzinfo)
+    except ValueError:
+        pass
     for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y", "%d-%b-%Y"):
         try:
             return datetime.strptime(raw, fmt).replace(tzinfo=utcnow().tzinfo)

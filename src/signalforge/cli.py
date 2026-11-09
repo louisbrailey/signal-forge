@@ -359,7 +359,7 @@ def fx_research(
         typer.Option(help="Write the markdown report here (default: <data dir>/research/fx/)."),
     ] = None,
     version: Annotated[
-        str, typer.Option(help="Pre-registered strategy set: FX-1 or FX-2.")
+        str, typer.Option(help="Pre-registered strategy set: FX-1, FX-2 or FX-3.")
     ] = "FX-1",
 ) -> None:
     """Evaluate the pre-registered FX strategies on the development window.
@@ -373,14 +373,16 @@ def fx_research(
     from signalforge.research.fx.harness import (
         render_markdown,
         run_fx2_research,
+        run_fx3_research,
         run_fx_research,
     )
 
-    if version not in ("FX-1", "FX-2"):
-        typer.echo("--version must be FX-1 or FX-2")
+    runners = {"FX-1": run_fx_research, "FX-2": run_fx2_research, "FX-3": run_fx3_research}
+    if version not in runners:
+        typer.echo("--version must be FX-1, FX-2 or FX-3")
         raise typer.Exit(2)
     chosen = parse_pairs(pairs if pairs is not None else get_settings().forex_pairs)
-    runner = run_fx2_research if version == "FX-2" else run_fx_research
+    runner = runners[version]
     with session_scope() as session:
         report = runner(session, chosen)
     md = render_markdown(report)
@@ -420,6 +422,9 @@ def crypto_research(
         Path | None,
         typer.Option(help="Write the markdown report here (default: <data dir>/research/crypto/)."),
     ] = None,
+    version: Annotated[
+        str, typer.Option(help="Pre-registered strategy set: CRYPTO-1, CRYPTO-2 or CRYPTO-3.")
+    ] = "CRYPTO-1",
 ) -> None:
     """Evaluate the pre-registered crypto strategies on the development window.
     The sealed final year is never evaluated here. Research only."""
@@ -429,11 +434,24 @@ def crypto_research(
     from signalforge.config.paths import data_dir
     from signalforge.data.forex import CRYPTO, parse_pairs
     from signalforge.db.session import session_scope
-    from signalforge.research.fx.harness import render_markdown, run_crypto_research
+    from signalforge.research.fx.harness import (
+        render_markdown,
+        run_crypto2_research,
+        run_crypto3_research,
+        run_crypto_research,
+    )
 
+    runners = {
+        "CRYPTO-1": run_crypto_research,
+        "CRYPTO-2": run_crypto2_research,
+        "CRYPTO-3": run_crypto3_research,
+    }
+    if version not in runners:
+        typer.echo("--version must be CRYPTO-1, CRYPTO-2 or CRYPTO-3")
+        raise typer.Exit(2)
     chosen = parse_pairs(pairs if pairs is not None else get_settings().crypto_pairs, CRYPTO)
     with session_scope() as session:
-        report = run_crypto_research(session, chosen)
+        report = runners[version](session, chosen)
     target = out or (
         data_dir()
         / "research"
@@ -621,6 +639,8 @@ def crypto_paper_status(
         f"from {st['start_date']} to {st['observation_end']}, bars through {st['last_bar_date']}"
     )
     exp = st["expectancy_r"]
+    if st.get("data_hold"):
+        typer.echo(f"  NEW ENTRIES HELD: {st['data_hold']}")
     typer.echo(
         f"  closed {st['closed_trades']}, expectancy "
         f"{'n/a' if exp is None else f'{exp:+.3f}R'} (sealed {st['sealed_expectancy_r']:+.3f}R), "
@@ -635,6 +655,128 @@ def crypto_paper_status(
     for d in st["divergences"]:
         typer.echo(f"  DIVERGENCE {d}")
     typer.echo(st["notice"])
+
+
+crypto_hourly_paper_app = typer.Typer(
+    help="SIMULATED HOURLY crypto paper book for a SEALED_PASS hourly strategy (CRYPTO-H4). "
+    "No broker; no order is placed."
+)
+crypto_app.add_typer(crypto_hourly_paper_app, name="paper-hourly")
+
+
+@crypto_hourly_paper_app.command("start")
+def crypto_hourly_paper_start(
+    strategy: Annotated[str, typer.Argument(help="e.g. crypto_h_donchian168_trail72_volx")],
+    confirm: Annotated[bool, typer.Option("--confirm", help="Required.")] = False,
+) -> None:
+    """Create the prospective hourly paper book (start = current hour UTC,
+    180-day observation). Refused unless the hourly version is SEALED_PASS."""
+    from signalforge.db.session import session_scope
+    from signalforge.paper.crypto_hourly_ledger import PaperBookRefused, start_book
+
+    if not confirm:
+        typer.echo("Refusing without --confirm: the start hour is fixed once set.")
+        raise typer.Exit(2)
+    with session_scope(write=True) as session:
+        try:
+            book = start_book(session, strategy)
+        except PaperBookRefused as exc:
+            typer.echo(f"Refused: {exc}")
+            raise typer.Exit(1) from None
+        typer.echo(
+            f"Hourly paper book {book.strategy_key} {book.version}: {', '.join(book.pairs)}; "
+            f"entries from {book.start_at.isoformat()}; observation to "
+            f"{book.observation_end.isoformat()}."
+        )
+    typer.echo("SIMULATED — no order was placed; no broker is connected.")
+
+
+@crypto_hourly_paper_app.command("run")
+def crypto_hourly_paper_run(
+    strategy: Annotated[str, typer.Argument()] = "crypto_h_donchian168_trail72_volx",
+) -> None:
+    """Run one cycle now (the scheduler does this hourly when CRYPTO_HOURLY_PAPER_ENABLED)."""
+    from signalforge.db.session import session_scope
+    from signalforge.paper.crypto_hourly_ledger import PaperBookRefused, run_cycle
+
+    with session_scope(write=True) as session:
+        try:
+            rep = run_cycle(session, strategy)
+        except PaperBookRefused as exc:
+            typer.echo(f"Refused: {exc}")
+            raise typer.Exit(1) from None
+    typer.echo(f"Cycle through {rep.last_bar}:")
+    for label, items in (
+        ("opened", rep.opened),
+        ("closed", rep.closed),
+        ("marked", rep.marked),
+        ("NOT opened (kill switch)", rep.skipped_open_kill_switch),
+        ("NOT opened (data hold)", rep.skipped_open_data_hold),
+        ("DIVERGENCE", rep.divergences),
+    ):
+        for it in items:
+            typer.echo(f"  {label}: {it}")
+    typer.echo("SIMULATED — no order was placed; no broker is connected.")
+
+
+@crypto_hourly_paper_app.command("status")
+def crypto_hourly_paper_status(
+    strategy: Annotated[str, typer.Argument()] = "crypto_h_donchian168_trail72_volx",
+) -> None:
+    """Show the hourly paper book: open trades, closed record vs the sealed result."""
+    from signalforge.db.session import session_scope
+    from signalforge.paper.crypto_hourly_ledger import status as _status
+
+    with session_scope() as session:
+        st = _status(session, strategy)
+    if st.get("book") is None and "start_at" not in st:
+        typer.echo(f"No hourly paper book for {strategy}.")
+        return
+    typer.echo(
+        f"{st['strategy_key']} {st['version']} ({st['paper_version']}): {', '.join(st['pairs'])}; "
+        f"from {st['start_at']} to {st['observation_end']}, bars through {st['last_bar_at']}"
+    )
+    exp = st["expectancy_r"]
+    if st.get("data_hold"):
+        typer.echo(f"  NEW ENTRIES HELD: {st['data_hold']}")
+    typer.echo(
+        f"  closed {st['closed_trades']}, expectancy "
+        f"{'n/a' if exp is None else f'{exp:+.3f}R'} (sealed {st['sealed_expectancy_r']:+.3f}R), "
+        f"total {st['total_r']:+.2f}R (illustrative ${st['illustrative_usd']:+,.0f})"
+    )
+    for o in st["open"]:
+        mark = "n/a" if o["mark_r"] is None else f"{o['mark_r']:+.2f}R"
+        typer.echo(
+            f"  OPEN {o['pair']} {o['direction']} since {o['entry_at']} "
+            f"@ {o['entry_price']} stop {o['stop_price']} mark {mark}"
+        )
+    for d in st["divergences"]:
+        typer.echo(f"  DIVERGENCE {d}")
+    typer.echo(st["notice"])
+
+
+@crypto_app.command("paper-venue-report")
+def crypto_paper_venue_report(
+    as_json: Annotated[bool, typer.Option("--json", help="Print the report as JSON.")] = False,
+    funding_bps_per_year: Annotated[
+        float, typer.Option(help="Funding charged on coinbase_cfm_intro positions (bps/year).")
+    ] = 0.0,
+) -> None:
+    """READ-ONLY: every crypto paper book's trades with R as recorded and R
+    repriced at coinbase_spot_intro and coinbase_cfm_intro, plus subtotals of
+    each parent book's LONG trades (not a *_long rule's book). Writes nothing;
+    no order is placed."""
+    import json as _json
+
+    from signalforge.db.session import session_scope
+    from signalforge.paper.crypto_venue_report import render_text, venue_report
+    from signalforge.research.fx.venues import COINBASE_CFM_INTRO, COINBASE_SPOT_INTRO
+
+    venues = (COINBASE_SPOT_INTRO, COINBASE_CFM_INTRO.with_funding(funding_bps_per_year))
+    with session_scope() as session:
+        report = venue_report(session, venues=venues)
+        session.rollback()  # reader scope: nothing to commit
+    typer.echo(_json.dumps(report, indent=2, default=str) if as_json else render_text(report))
 
 
 @data_app.command("crypto-hourly-ingest")
@@ -683,9 +825,18 @@ def crypto_research_hourly(
         Path | None,
         typer.Option(help="Report path (default: <data dir>/research/crypto/)."),
     ] = None,
+    version: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "Pre-registered hourly set: CRYPTO-H1, CRYPTO-H2, CRYPTO-H3, CRYPTO-H4, or "
+                "CRYPTO-H5 (EXPERIMENTAL; development window cut at CRYPTO-H4's sealed start)."
+            )
+        ),
+    ] = "CRYPTO-H1",
 ) -> None:
-    """Evaluate the pre-registered CRYPTO-H1 hourly rules on the development
-    window. The sealed final year is never evaluated here. Research only."""
+    """Evaluate the pre-registered hourly rules on the development window.
+    The sealed final year is never evaluated here. Research only."""
     import json as _json
 
     from signalforge.config import get_settings
@@ -697,7 +848,7 @@ def crypto_research_hourly(
 
     chosen = parse_pairs(pairs if pairs is not None else get_settings().crypto_pairs, CRYPTO)
     with session_scope() as session:
-        report = run_crypto_hourly_research(session, chosen)
+        report = run_crypto_hourly_research(session, chosen, version=version)
     target = out or (
         data_dir() / "research" / "crypto" / f"crypto_hourly_{report['version']}_{date.today()}.md"
     )
@@ -2364,7 +2515,12 @@ def ingest_intraday_cmd(
         start_dt = end_dt - timedelta(days=days)
         with session_scope(write=True) as session:
             report = ingest_intraday_universe(
-                session, adapter, syms, start_dt, end_dt, bar_size=bar_size  # type: ignore[arg-type]
+                session,
+                adapter,  # type: ignore[arg-type]
+                syms,
+                start_dt,
+                end_dt,
+                bar_size=bar_size,
             )
         typer.secho(
             f"ingest-intraday[{adapter.provider_name}] {bar_size}: "
@@ -3391,6 +3547,142 @@ def evaluate_promotion_cmd(
     typer.echo("Research signal only — no order was placed.")
 
 
+@app.command("record-oos-backtest")
+def record_oos_backtest_cmd(
+    strategy: Annotated[
+        str, typer.Option(help="Exact strategy key, e.g. 'high52_breakout.medium_swing'.")
+    ],
+    snapshot_id: Annotated[
+        int, typer.Option(help="DataSnapshot id the version's promotion was evaluated on.")
+    ],
+    until: Annotated[
+        str,
+        typer.Option(
+            help="YYYY-MM-DD last development day; must be before the snapshot's sealed window."
+        ),
+    ],
+    since: Annotated[
+        str, typer.Option(help="YYYY-MM-DD; default: the promotion evaluation's window start.")
+    ] = "",
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Compute and print only; write nothing.")
+    ] = False,
+    allow_mismatch: Annotated[
+        bool,
+        typer.Option(
+            "--allow-mismatch",
+            help="Record even if inputs differ from the evaluation (noted in provenance/audit).",
+        ),
+    ] = False,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Record even if an identical run is already on record."),
+    ] = False,
+) -> None:
+    """Record the development-window out-of-sample backtest for one strategy
+    version on one dataset snapshot.
+
+    Re-runs exactly the pre-sealed backtest that ``evaluate-promotion`` gates
+    1-8 measured (the snapshot's symbols, the evaluation's window start and
+    data source, the promotion cost model) and persists it as a BacktestRun,
+    giving the scan's out-of-sample gate and the health monitor a comparison
+    value. Refuses an --until on or after the sealed window, a run whose
+    inputs differ from the evaluation's (unless --allow-mismatch) and a repeat
+    of a run already on record (unless --force). Changes no strategy status,
+    takes no sealed look, and places no order.
+    """
+    ensure_not_engaged()
+    from datetime import date as _date
+
+    from signalforge.db.session import session_scope
+    from signalforge.research.promotion import (
+        matching_development_oos_runs,
+        persist_development_oos_record,
+        record_development_oos_backtest,
+    )
+    from signalforge.research.strategies import default_strategies
+
+    matches = [s for s in default_strategies() if s.key == strategy]
+    if not matches:
+        typer.secho(f"no default strategy has key {strategy!r}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    try:
+        until_d = _date.fromisoformat(until)
+        since_d = _date.fromisoformat(since) if since else None
+    except ValueError as exc:
+        typer.secho(f"--since/--until must be YYYY-MM-DD: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from None
+
+    # The backtest runs in a read-only session; the write lock is taken only
+    # for the short insert afterwards (the sealed boundary is re-checked there).
+    with session_scope() as session:
+        try:
+            rec = record_development_oos_backtest(
+                session,
+                matches[0],
+                dataset_snapshot_id=snapshot_id,
+                until=until_d,
+                since=since_d,
+                persist=False,
+            )
+        except ValueError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(code=1) from None
+        existing = matching_development_oos_runs(session, rec)
+
+    res = rec.result
+    oos = res.out_of_sample
+    ci = res.oos_ci.get("expectancy_r", {})
+    typer.echo(
+        f"{rec.strategy_key} v{rec.version} (strategy_version {rec.strategy_version_id})  "
+        f"snapshot {rec.dataset_snapshot_key!r} (id {rec.dataset_snapshot_id}, "
+        f"{len(res.symbols)} symbols)"
+    )
+    typer.echo(
+        f"  development window {rec.start}..{rec.until} (sealed window starts "
+        f"{rec.sealed_boundary})  source {rec.provenance['source']}  costs {res.costs_label}"
+    )
+    typer.echo(
+        f"  OOS: {oos.n_trades} trades  expectancy {oos.expectancy_r:+.4f}R  "
+        f"95% CI [{float(ci.get('low', 0.0)):+.4f}, {float(ci.get('high', 0.0)):+.4f}]R  "
+        f"(IS {res.in_sample.n_trades} trades, {res.in_sample.expectancy_r:+.4f}R)"
+    )
+    ev = rec.evaluation_oos
+    ev_exp = ev.get("expectancy_r")
+    typer.echo(
+        f"  evaluation {rec.evaluation_id} recorded: {ev.get('n_trades')} OOS trades, "
+        + (f"expectancy {float(ev_exp):+.4f}R" if ev_exp is not None else "no expectancy")
+    )
+    mismatched = [k for k, ok in rec.reproduces_evaluation.items() if not ok]
+    if mismatched:
+        typer.secho(
+            f"  WARNING: inputs differ from evaluation {rec.evaluation_id}: "
+            f"{', '.join(mismatched)} — this is not the evaluated development backtest"
+            + ("" if allow_mismatch else "; a write is refused without --allow-mismatch"),
+            fg=typer.colors.YELLOW,
+        )
+    if existing:
+        typer.secho(
+            f"  already on record as backtest_run {', '.join(map(str, existing))}"
+            + ("" if force else "; a write is refused without --force"),
+            fg=typer.colors.YELLOW,
+        )
+    if dry_run:
+        typer.secho("dry run — nothing written", fg=typer.colors.CYAN)
+        return
+
+    with session_scope(write=True) as session:
+        try:
+            rec = persist_development_oos_record(
+                session, rec, allow_mismatch=allow_mismatch, allow_duplicate=force
+            )
+        except ValueError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(code=1) from None
+    typer.secho(f"recorded backtest_run {rec.backtest_run_id}", fg=typer.colors.GREEN)
+    typer.echo("Research record only — no status changed, no order placed.")
+
+
 @app.command("symbol-continuity-backfill")
 def symbol_continuity_backfill_cmd(
     old_symbol: Annotated[str, typer.Option(help="Predecessor symbol, e.g. FB.")],
@@ -3952,8 +4244,7 @@ def universe_sectors_cmd(
         fg=typer.colors.GREEN,
     )
     typer.echo(
-        "SIC-derived labels are approximate (not GICS). "
-        "Research signal only — no order was placed."
+        "SIC-derived labels are approximate (not GICS). Research signal only — no order was placed."
     )
 
 
@@ -5595,8 +5886,7 @@ def execution_arm(
         str,
         typer.Option(
             "--preregistration",
-            help="The pre-registration document id (a docs/ filename stem). No arming "
-            "without one.",
+            help="The pre-registration document id (a docs/ filename stem). No arming without one.",
         ),
     ] = "",
     adapter: Annotated[str, typer.Option("--adapter", help="Adapter name.")] = "",

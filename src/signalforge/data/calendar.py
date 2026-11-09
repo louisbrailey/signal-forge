@@ -49,6 +49,20 @@ def session_count(start: date, end: date) -> int:
     return len(sessions(start, end))
 
 
+def rth_bar_counts(start: date, end: date, bar_size: str) -> dict[date, int]:
+    """Full calendar bar counts in one schedule query, including early closes.
+
+    Computing a fresh exchange schedule for each of thousands of individual
+    sessions repeats holiday calculations needlessly during coverage checks.
+    """
+    minutes = bar_minutes(bar_size)
+    sched = _xnys().schedule(start_date=start.isoformat(), end_date=end.isoformat())
+    return {
+        stamp.date(): int((row.market_close - row.market_open).total_seconds() // 60) // minutes
+        for stamp, row in sched.iterrows()
+    }
+
+
 @lru_cache(maxsize=4096)
 def rth_bounds_utc(d: date) -> tuple[datetime, datetime] | None:
     """(open, close) as tz-aware UTC datetimes for a regular session, else None."""

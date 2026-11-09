@@ -3,6 +3,17 @@ f546c57cbfeac1acbb1769130a735f01fdff0e3d:tests/safety/test_s15_execution_boundar
 5b32f5cb995042f6624ab73bba43b242fc1e7544:tests/research/test_evaluate_promotion_snapshot_key.py:generic-api-key:96
 # Reviewed 2026-10-25: a test constant holding a strategy name, not a credential (renamed afterwards).
 c11cbeaa2d01be2e136d1a7a4d3b032407b6564c:tests/paper/test_crypto_ledger.py:generic-api-key:21
+# Reviewed 2026-11-03: pre-registered strategy keys (crypto_donchian_55_u10, crypto_mom_21_long_u10) in tests, not credentials.
+f580498c2c8838b756c87101192caa8ae8177de5:tests/paper/test_crypto_ledger.py:generic-api-key:286
+3253d0dd103bded5761f5ddd111bb876f49d68d4:tests/research/test_universe_program_strategies.py:generic-api-key:232
+# Reviewed 2026-11-08: strategy key constant (crypto_h_donchian168_trail72_volx) in a test, not a credential.
+800558f80e4b083b39c9d9cce6a9e3b418af84c2:tests/paper/test_crypto_paper_lock_scope.py:generic-api-key:40
+# Reviewed 2026-11-08: strategy key literals (crypto_donchian_55, crypto_donchian_55_u10) in rule lookups and tests, not credentials.
+b4a6fe0c5cec6c3b32d18696cb080217de6038cc:src/signalforge/research/fx/strategies.py:generic-api-key:406
+b4a6fe0c5cec6c3b32d18696cb080217de6038cc:src/signalforge/research/fx/strategies.py:generic-api-key:407
+b4a6fe0c5cec6c3b32d18696cb080217de6038cc:tests/research/test_crypto_venues.py:generic-api-key:180
+b4a6fe0c5cec6c3b32d18696cb080217de6038cc:tests/research/test_crypto_venues.py:generic-api-key:182
+b4a6fe0c5cec6c3b32d18696cb080217de6038cc:tests/research/test_crypto_venues.py:generic-api-key:480
 
 # Reviewed: cryptography isinstance key-type guard, not a credential or string literal.
 # Exact historical fingerprint only; no rule/path/value-wide exclusion.

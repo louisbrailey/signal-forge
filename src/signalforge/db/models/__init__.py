@@ -7,6 +7,7 @@ autogenerate and ``Base.metadata.create_all`` see the full schema.
 from __future__ import annotations
 
 from signalforge.db.base import Base
+from signalforge.db.models.crypto_hourly_paper import CryptoHourlyPaperBook, CryptoHourlyPaperTrade
 from signalforge.db.models.crypto_paper import CryptoPaperBook, CryptoPaperTrade
 from signalforge.db.models.execution import (
     ArmedStrategy,
@@ -108,6 +109,8 @@ from signalforge.db.models.universe import (
 
 __all__ = [
     "Base",
+    "CryptoHourlyPaperBook",
+    "CryptoHourlyPaperTrade",
     "CryptoPaperBook",
     "CryptoPaperTrade",
     # market

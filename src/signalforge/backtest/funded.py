@@ -9,7 +9,7 @@ proceeds cannot fund that morning's entries. Output contains no income forecast.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
@@ -22,7 +22,25 @@ from signalforge.config.research import RiskLimits
 from signalforge.data.calendar import sessions
 from signalforge.data.series import PriceSeries
 from signalforge.domain import Direction
+from signalforge.paper.ledger import (
+    HARD_MAX_GROSS_PCT,
+    HARD_MAX_OPEN_RISK_PCT,
+    HARD_MAX_PER_TRADE_RISK_PCT,
+    HARD_MAX_SECTOR_PCT,
+    HARD_MAX_SYMBOL_PCT,
+)
 from signalforge.risk.engine import OpenExposure, SizingRequest, size_position
+
+# Research replay ceilings applied by default: stricter than the paper ledger's
+# per-symbol hard maximum. A caller may widen them only up to the paper ledger's
+# hard maxima (``signalforge.paper.ledger``), never beyond.
+DEFAULT_MAX_POSITION_CEILING_PCT = 5.0
+DEFAULT_MAX_SECTOR_CEILING_PCT = 20.0
+DEFAULT_MAX_GROSS_CEILING_PCT = 100.0
+# Risk-budget ceilings default to the paper ledger's hard maxima, so no caller's
+# limits can budget more per-trade or aggregate open risk than the ledger allows.
+DEFAULT_MAX_OPEN_RISK_CEILING_PCT = HARD_MAX_OPEN_RISK_PCT
+DEFAULT_PER_TRADE_RISK_CEILING_PCT = HARD_MAX_PER_TRADE_RISK_PCT
 
 
 def money(value: float | Decimal) -> Decimal:
@@ -31,6 +49,46 @@ def money(value: float | Decimal) -> Decimal:
 
 def sell_price(raw: float, penalty: float) -> Decimal:
     return Decimal(str(raw * (1 - penalty))).quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+
+
+@dataclass(frozen=True, slots=True)
+class AttributedEntrySignal(EntrySignal):
+    """An entry signal that names the strategy key which produced it, so fills,
+    decisions and P&L can be attributed per strategy in a composite replay."""
+
+    strategy: str = ""
+
+
+def composite_signal_fn(entries: Sequence[tuple[str, SignalFn]]) -> SignalFn:
+    """Per-symbol composite: strategies are evaluated in the given priority order
+    and the first LONG entry signal wins that session; lower-priority strategies
+    are not evaluated. A SHORT signal never blocks a lower-priority long (the
+    funded replay is long-only). Each winning signal carries its strategy key."""
+    if not entries or len({key for key, _ in entries}) != len(entries):
+        raise ValueError("Composite requires unique strategy keys")
+    if any(not key for key, _ in entries):
+        raise ValueError("Composite strategy keys must be nonempty")
+
+    def _fn(series: PriceSeries, t: int) -> EntrySignal | None:
+        for key, fn in entries:
+            sig = fn(series, t)
+            if sig is not None and sig.direction is Direction.LONG:
+                return AttributedEntrySignal(
+                    direction=sig.direction,
+                    stop_price=sig.stop_price,
+                    time_stop_bars=sig.time_stop_bars,
+                    target_price=sig.target_price,
+                    reason=sig.reason,
+                    strategy=key,
+                )
+        return None
+
+    return _fn
+
+
+def _attribution(sig: EntrySignal) -> dict[str, str]:
+    # Only attributed signals add keys, so unattributed replays keep their records.
+    return {"strategy": sig.strategy} if isinstance(sig, AttributedEntrySignal) else {}
 
 
 @dataclass
@@ -94,13 +152,32 @@ def run_funded_replay(
     max_drawdown_pct: float | None = None,
     allow_staggered_start: bool = False,
     entry_admission: Callable[[EntryProposal], EntryVerdict] | None = None,
+    max_position_ceiling_pct: float = DEFAULT_MAX_POSITION_CEILING_PCT,
+    max_sector_ceiling_pct: float = DEFAULT_MAX_SECTOR_CEILING_PCT,
+    max_gross_ceiling_pct: float = DEFAULT_MAX_GROSS_CEILING_PCT,
+    max_open_risk_ceiling_pct: float = DEFAULT_MAX_OPEN_RISK_CEILING_PCT,
+    per_trade_risk_ceiling_pct: float = DEFAULT_PER_TRADE_RISK_CEILING_PCT,
 ) -> FundedReplay:
     """Deterministic alphabetic admission order; shared cash, no leverage.
 
     Does not promote strategies or independently verify an input dataset's
     provenance, dividends, survivorship, earnings or corporate-action history.
     No implicit truncation to an intersection of available dates is permitted.
+
+    The ``*_ceiling_pct`` arguments cap the caller's ``limits`` (stricter
+    caller limits remain effective); each must be positive and may not exceed
+    the paper ledger's hard maximum for the same quantity. The open-risk and
+    per-trade risk ceilings default to those hard maxima, as in the ledger.
     """
+    for name, ceiling, hard_max in (
+        ("max_position_ceiling_pct", max_position_ceiling_pct, HARD_MAX_SYMBOL_PCT),
+        ("max_sector_ceiling_pct", max_sector_ceiling_pct, HARD_MAX_SECTOR_PCT),
+        ("max_gross_ceiling_pct", max_gross_ceiling_pct, HARD_MAX_GROSS_PCT),
+        ("max_open_risk_ceiling_pct", max_open_risk_ceiling_pct, HARD_MAX_OPEN_RISK_PCT),
+        ("per_trade_risk_ceiling_pct", per_trade_risk_ceiling_pct, HARD_MAX_PER_TRADE_RISK_PCT),
+    ):
+        if not math.isfinite(ceiling) or not 0 < ceiling <= hard_max:
+            raise ValueError(f"{name} must be in (0, {hard_max}] (paper ledger hard maximum)")
     if not series or set(signals) != set(series):
         raise ValueError("Each instrument requires a signal function")
     if not initial_cash.is_finite() or initial_cash <= 0 or warmup < 0:
@@ -153,12 +230,22 @@ def run_funded_replay(
                 or v < 0
             ):
                 raise ValueError("Invalid OHLCV")
-    # Research-only conservative ceiling; stricter caller limits remain effective.
+    # Research-only ceilings; stricter caller limits remain effective.
     limits = limits.model_copy(
         update={
-            "max_position_concentration_pct": min(limits.max_position_concentration_pct, 5.0),
-            "max_correlated_exposure_pct": min(limits.max_correlated_exposure_pct, 20.0),
-            "max_portfolio_exposure_pct": min(limits.max_portfolio_exposure_pct, 100.0),
+            "max_position_concentration_pct": min(
+                limits.max_position_concentration_pct, max_position_ceiling_pct
+            ),
+            "max_correlated_exposure_pct": min(
+                limits.max_correlated_exposure_pct, max_sector_ceiling_pct
+            ),
+            "max_portfolio_exposure_pct": min(
+                limits.max_portfolio_exposure_pct, max_gross_ceiling_pct
+            ),
+            "max_daily_portfolio_risk_pct": min(
+                limits.max_daily_portfolio_risk_pct, max_open_risk_ceiling_pct
+            ),
+            "per_trade_risk_pct": min(limits.per_trade_risk_pct, per_trade_risk_ceiling_pct),
         }
     )
     if any(a.symbol not in series or a.day not in series[a.symbol].dates for a in splits):
@@ -204,6 +291,7 @@ def run_funded_replay(
                 "modeled_cost_usd": str(cost),
                 "reason": reason,
                 "realized_pnl_usd": str(fill * p.shares - p.cost_basis - fee - p.entry_fee),
+                **_attribution(p.signal),
             }
         )
 
@@ -342,6 +430,7 @@ def run_funded_replay(
                         "status": "rejected",
                         "reason": "portfolio_drawdown_halt",
                         "shares": 0,
+                        **_attribution(sig),
                     }
                 )
                 continue
@@ -370,6 +459,7 @@ def run_funded_replay(
                         "status": "rejected",
                         "reason": reason,
                         "shares": 0,
+                        **_attribution(sig),
                     }
                 )
                 continue
@@ -442,6 +532,7 @@ def run_funded_replay(
                     "shares": 0 if reason else shares,
                     "signal_day": str(dates[i - 1]),
                     "entry_admission": admission_evidence,
+                    **_attribution(sig),
                 }
             )
             if reason:
@@ -462,6 +553,11 @@ def run_funded_replay(
                     "price": str(fill),
                     "commission": str(fee),
                     "modeled_cost_usd": str(cost),
+                    **(
+                        {**_attribution(sig), "signal_reason": sig.reason}
+                        if isinstance(sig, AttributedEntrySignal)
+                        else {}
+                    ),
                 }
             )
         pending = {}
@@ -541,6 +637,7 @@ def run_funded_replay(
             "target_price": sig.target_price,
             "time_stop_bars": sig.time_stop_bars,
             "reason": sig.reason,
+            **_attribution(sig),
         }
         for s, sig in pending.items()
     }
@@ -553,6 +650,7 @@ def run_funded_replay(
             "entry_day": str(dates[p.entry_index]),
             "stop_price": p.signal.stop_price,
             "target_price": p.signal.target_price,
+            **_attribution(p.signal),
         }
         for s, p in positions.items()
     }

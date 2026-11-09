@@ -42,15 +42,23 @@ def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
     monkeypatch.setenv("NOTIFICATION_PROVIDER", "")
     monkeypatch.setenv("DISCORD_WEBHOOK_URL", "")
     monkeypatch.setenv("LLM_PROVIDER", "")
+    # Opt-in research/paper lanes default OFF in tests regardless of the local .env.
+    monkeypatch.setenv("FOREX_INGEST_ENABLED", "false")
+    monkeypatch.setenv("CRYPTO_INGEST_ENABLED", "false")
+    monkeypatch.setenv("CRYPTO_PAPER_ENABLED", "false")
+    monkeypatch.setenv("CRYPTO_HOURLY_PAPER_ENABLED", "false")
 
     import signalforge.killswitch as ks
     from signalforge.config.settings import get_settings
     from signalforge.db.session import reset_engine_cache
+    from signalforge.scheduler import reset_job_bookkeeping
 
     monkeypatch.setattr(ks, "_default", None)
     get_settings.cache_clear()
     reset_engine_cache()
+    reset_job_bookkeeping()
     yield tmp_path
+    reset_job_bookkeeping()  # a deferred job record must never reach the next test's DB
     reset_engine_cache()
     get_settings.cache_clear()
     # structlog caches bound loggers; a test that configured logging under capsys

@@ -56,6 +56,10 @@
   <h2 class="text-lg font-semibold">Long-term holdings (imported CSV — analytics only)</h2>
   <p class="mt-1 text-sm text-slate-500">Kept entirely separate from the paper ledger. Never scanned as tradable.
     No brokerage is contacted — this is a plain file upload.</p>
+  <p class="mt-1 text-sm text-slate-600">For Webull or Coinbase holdings, upload a CSV with columns
+    <code>Symbol,Quantity,Cost Basis,Account</code> (cost basis is a total, not a current valuation).
+    Coinbase transaction reports with Timestamp, Transaction Type and Asset are also supported.
+    Imported transactions do not automatically create holdings. Check your file before importing.</p>
   <form method="post" action="/portfolio/import" enctype="multipart/form-data" class="mt-2 flex items-center gap-2 text-sm">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
     <input type="file" name="file" accept=".csv" required class="text-sm" />

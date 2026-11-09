@@ -21,10 +21,14 @@ from signalforge.research.strategies.base import (
     signal_fn_for,
 )
 from signalforge.research.strategies.breakout import VolatilityBreakout
+from signalforge.research.strategies.high52_breakout import High52Breakout
 from signalforge.research.strategies.intraday_orb import IntradayORB
 from signalforge.research.strategies.mean_reversion import MeanReversion
 from signalforge.research.strategies.relative_strength import RelativeStrength
 from signalforge.research.strategies.trend_continuation import TrendContinuation
+from signalforge.research.strategies.trend_pullback import TrendPullback
+from signalforge.research.strategies.tsmom_etf import TsmomEtf
+from signalforge.research.strategies.turn_of_month import TurnOfMonth
 
 __all__ = [
     "BaselineStrategy",
@@ -35,6 +39,10 @@ __all__ = [
     "RelativeStrength",
     "VolatilityBreakout",
     "IntradayORB",
+    "TsmomEtf",
+    "TurnOfMonth",
+    "High52Breakout",
+    "TrendPullback",
     "default_strategies",
     "build_registry",
 ]
@@ -48,6 +56,14 @@ def default_strategies() -> list[BaselineStrategy]:
         MeanReversion(),
         RelativeStrength(Horizon.MEDIUM_SWING),
         VolatilityBreakout(Horizon.SHORT_SWING),
+        # Pre-registered 2026-11-02 (PREREGISTRATION_universe_program_2026-11-02.md).
+        TsmomEtf(),
+        TurnOfMonth(),
+        # Refinement round 1, pre-registered 2026-11-02 (same document §7.1).
+        TsmomEtf(Horizon.POSITION),
+        # Round 2, pre-registered 2026-11-03 (PREREGISTRATION_round2_2026-11-03.md).
+        High52Breakout(),
+        TrendPullback(),
     ]
 
 
