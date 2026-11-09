@@ -30,7 +30,7 @@ from signalforge.domain import Direction, Horizon, QualityGate
 from signalforge.research.features.daily import atr, sma
 from signalforge.research.persistence import (
     latest_oos_metric,
-    oos_provenance_failures,
+    oos_scope_failures,
     upsert_strategy_version,
 )
 from signalforge.research.regime import RegimeState, regime_from_proxy
@@ -333,6 +333,9 @@ def run_scan(
                 fresh=fresh.as_dict(),
                 cfg=cfg,
                 equity=equity,
+                dataset_snapshot_id=result.dataset_snapshot_id,
+                source=result.source,
+                symbols=result.universe,
                 regime_label=f"{ctx.regime.trend.value}/{ctx.regime.vol.value}",
             )
             result.candidates.append(draft)  # both PASSED and NO_TRADE drafts are recorded
@@ -461,6 +464,9 @@ def _build_draft(
     cfg: ResearchConfig,
     equity: float,
     regime_label: str = "unknown",
+    dataset_snapshot_id: int | None = None,
+    source: str = "",
+    symbols: object = None,
 ) -> CandidateDraft:
     lo, hi = _entry_band(close, atr_val)
     entry_ref = (lo + hi) / 2
@@ -484,7 +490,17 @@ def _build_draft(
         if q.require_backtest:
             failed.append("no out-of-sample backtest on record")
     else:
-        failed.extend(oos_provenance_failures(metric.run.params_json))
+        failed.extend(
+            oos_scope_failures(
+                session,
+                metric,
+                spec,
+                config_hash=cfg.config_hash,
+                dataset_snapshot_id=dataset_snapshot_id,
+                source=source,
+                symbols=symbols,
+            )
+        )
         failed.extend(_oos_metric_failures(metric.metrics_json, metric.ci_json, q))
         n_regimes, regime_labels = _oos_regime_coverage(
             session, metric.run_id, q.min_trades_per_regime

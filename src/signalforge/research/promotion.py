@@ -71,6 +71,7 @@ from signalforge.data.repository import SourceFilter
 from signalforge.data.series import PriceSeries
 from signalforge.data.validate import validate_daily
 from signalforge.db.models import (
+    AppSetting,
     AuditLog,
     BacktestRun,
     DataSnapshot,
@@ -1994,6 +1995,100 @@ def _require_daily_cutoff_coverage(
         raise ValueError(f"missing required XNYS cutoff session {until}: {', '.join(missing)}")
 
 
+def _current_record_config(session: Session) -> ResearchConfig:
+    """Fresh DB overlay, not a cached ORM setting or caller historical config."""
+    from signalforge.config import get_settings
+    from signalforge.settings_store import _deep_merge
+
+    overlay = session.scalar(
+        select(AppSetting.value_json).where(AppSetting.key == "research_overrides")
+    )
+    if overlay is None:
+        overlay = {}
+    if not isinstance(overlay, dict):
+        raise ValueError("current research configuration overlay is malformed")
+    return ResearchConfig.model_validate(
+        _deep_merge(get_settings().research.model_dump(mode="json"), overlay)
+    )
+
+
+def _approved_record_evaluation(
+    session: Session,
+    evaluation: StrategyPromotionEvaluation,
+    *,
+    version: StrategyVersion,
+    spec: StrategySpec,
+    config_hash: str,
+    snapshot_id: int,
+    source: SourceFilter,
+    symbols: list[str],
+) -> None:
+    """Identity pin to latest matching APPROVED metadata; never rank results."""
+    from signalforge.research.approval_scope import ApprovedScope, scan_scope_matches
+
+    status = session.execute(
+        select(Strategy.status, StrategyVersion.status)
+        .join(StrategyVersion, StrategyVersion.strategy_id == Strategy.id)
+        .where(StrategyVersion.id == version.id)
+    ).one()
+    if any(s is not StrategyStatus.PAPER_APPROVED for s in status):
+        raise ValueError(
+            "explicit/current ordinary record requires current PAPER_APPROVED statuses"
+        )
+    source_values = [source] if isinstance(source, str) else list(source or ())
+    if len(source_values) != 1:
+        raise ValueError("explicit/current approved scope requires exactly one source")
+    e = StrategyPromotionEvaluation
+    rows = session.execute(
+        select(
+            e.id,
+            e.strategy_version_id,
+            e.dataset_snapshot_id,
+            e.config_hash,
+            e.spec_json_hash,
+            e.universe_json,
+            e.data_provenance_json,
+        )
+        .where(e.strategy_version_id == version.id, e.passed.is_(True))
+        .order_by(e.evaluated_at.desc(), e.id.desc())
+    )
+    matches = []
+    for row in rows:
+        data = row.data_provenance_json
+        sources = data.get("sources") if isinstance(data, dict) else None
+        if (
+            not isinstance(sources, list)
+            or not sources
+            or not all(isinstance(s, str) and s for s in sources)
+            or not isinstance(row.universe_json, list)
+            or not row.universe_json
+            or not all(isinstance(s, str) and s for s in row.universe_json)
+        ):
+            continue
+        scope = ApprovedScope(
+            row.id,
+            row.dataset_snapshot_id,
+            row.config_hash,
+            row.spec_json_hash,
+            frozenset(s.upper() for s in row.universe_json),
+            frozenset(sources),
+        )
+        if scan_scope_matches(
+            [scope],
+            dataset_snapshot_id=snapshot_id,
+            config_hash=config_hash,
+            spec_json_hash=spec_json_hash(spec),
+            source=source_values[0],
+            universe=frozenset(symbols),
+        ):
+            matches.append(row.id)
+    if not matches or evaluation.id != matches[0] or evaluation.strategy_version_id != version.id:
+        raise ValueError(
+            "evaluation_id is not the latest approved metadata match "
+            "for the intended config/scan scope"
+        )
+
+
 def record_development_oos_backtest(
     session: Session,
     strategy: BaselineStrategy,
@@ -2007,6 +2102,8 @@ def record_development_oos_backtest(
     persist: bool = True,
     allow_mismatch: bool = False,
     allow_duplicate: bool = False,
+    evaluation_id: int | None = None,
+    require_current_scope: bool = False,
 ) -> DevelopmentOOSRecord:
     """Re-run the pre-sealed development backtest a promotion evaluation of
     this strategy version on this dataset snapshot measured, and (unless
@@ -2027,11 +2124,19 @@ def record_development_oos_backtest(
     what that evaluation recorded. Raises ``ValueError`` on any refusal;
     ``allow_mismatch``/``allow_duplicate`` are passed to
     :func:`persist_development_oos_record`.
+
+    ``evaluation_id=None`` retains the historical selector. An explicit ID
+    pins the newest passing approved metadata for the supplied scope, before
+    data access. ``require_current_scope`` additionally requires the actual
+    current config and is independently repeated by the CLI's short writer.
+    Historical research config never establishes eligibility for another scan.
     """
     if config is None:
         from signalforge.settings_store import effective_research_config
 
         config = effective_research_config(session)
+    if require_current_scope and config.config_hash != _current_record_config(session).config_hash:
+        raise ValueError("caller config does not match actual effective CURRENT research config")
     spec = strategy.spec()
     if spec.horizon is Horizon.INTRADAY:
         raise ValueError("development calendar policy supports daily EOD only; intraday refused")
@@ -2046,23 +2151,39 @@ def record_development_oos_backtest(
     if version is None:
         raise ValueError(f"{spec.name} v{spec.version} has never been registered or evaluated")
 
-    evaluations = list(
-        session.scalars(
-            select(StrategyPromotionEvaluation)
-            .where(
-                StrategyPromotionEvaluation.strategy_version_id == version.id,
-                StrategyPromotionEvaluation.dataset_snapshot_id == snapshot.id,
+    if evaluation_id is None:
+        evaluations = list(
+            session.scalars(
+                select(StrategyPromotionEvaluation)
+                .where(
+                    StrategyPromotionEvaluation.strategy_version_id == version.id,
+                    StrategyPromotionEvaluation.dataset_snapshot_id == snapshot.id,
+                )
+                .order_by(StrategyPromotionEvaluation.id.desc())
             )
-            .order_by(StrategyPromotionEvaluation.id.desc())
         )
-    )
-    if not evaluations:
-        raise ValueError(
-            f"{spec.name} v{spec.version} (strategy_version {version.id}) has no promotion "
-            f"evaluation on dataset snapshot {snapshot.id} ({snapshot.key!r}) — there is no "
-            f"development backtest to reproduce"
-        )
-    evaluation = next((e for e in evaluations if e.passed), evaluations[0])
+        if not evaluations:
+            raise ValueError(
+                f"{spec.name} v{spec.version} (strategy_version {version.id}) has no promotion "
+                f"evaluation on dataset snapshot {snapshot.id} ({snapshot.key!r}) — there is no "
+                f"development backtest to reproduce"
+            )
+        evaluation = next((e for e in evaluations if e.passed), evaluations[0])
+    else:
+        if (
+            isinstance(evaluation_id, bool)
+            or not isinstance(evaluation_id, int)
+            or evaluation_id <= 0
+        ):
+            raise ValueError("evaluation_id must be a positive integer")
+        selected = session.get(StrategyPromotionEvaluation, evaluation_id)
+        if (
+            selected is None
+            or selected.strategy_version_id != version.id
+            or selected.dataset_snapshot_id != snapshot.id
+        ):
+            raise ValueError("evaluation_id belongs to a different strategy/version or snapshot")
+        evaluation = selected
     current_hash = spec_json_hash(spec)
     if evaluation.spec_json_hash != current_hash:
         raise ValueError(
@@ -2105,6 +2226,19 @@ def record_development_oos_backtest(
     symbols = list(snapshot.symbols_json)
     if sorted(symbols) == sorted(eval_universe):
         symbols = eval_universe
+    if evaluation_id is not None or require_current_scope:
+        _approved_record_evaluation(
+            session,
+            evaluation,
+            version=version,
+            spec=spec,
+            config_hash=config.config_hash,
+            snapshot_id=snapshot.id,
+            source=source,
+            symbols=symbols,
+        )
+        if start != evaluation.window_start:
+            raise ValueError("explicit/current evaluation window start differs")
     calendar = _daily_development_calendar(
         session,
         evaluation,
@@ -2155,6 +2289,14 @@ def record_development_oos_backtest(
         "promotion_evaluation_id": evaluation.id,
         "reproduces_evaluation": reproduces,
         "development_calendar": calendar,
+        "evaluation_selection": {
+            "mode": (
+                "current_scope"
+                if require_current_scope
+                else "explicit_approved" if evaluation_id is not None else "historical_research"
+            ),
+            "requested_evaluation_id": evaluation_id,
+        },
         "spec_json_hash": current_hash,
         "code_git_sha": spec.git_sha,
         "is_oos_split": "per-symbol fraction (backtest_runner._is_boundary)",
@@ -2177,7 +2319,11 @@ def record_development_oos_backtest(
     if not persist:
         return record
     return persist_development_oos_record(
-        session, record, allow_mismatch=allow_mismatch, allow_duplicate=allow_duplicate
+        session,
+        record,
+        allow_mismatch=allow_mismatch,
+        allow_duplicate=allow_duplicate,
+        require_current_scope=require_current_scope,
     )
 
 
@@ -2220,6 +2366,7 @@ def persist_development_oos_record(
     *,
     allow_mismatch: bool = False,
     allow_duplicate: bool = False,
+    require_current_scope: bool = False,
 ) -> DevelopmentOOSRecord:
     """Write a computed :class:`DevelopmentOOSRecord` as a ``BacktestRun``.
 
@@ -2229,9 +2376,9 @@ def persist_development_oos_record(
 
     The scan's OOS gate reads the newest such row, so a run whose inputs
     differ from the evaluation's (any ``reproduces_evaluation`` flag false)
-    is refused unless ``allow_mismatch`` — it would unlock candidates on a
-    metric gates 1-8 never measured — and the override is written into the
-    provenance and audit event. A run identical to one already recorded is
+    is refused unless ``allow_mismatch``, and the override is written into
+    provenance and audit. Forced research rows remain ineligible candidate
+    evidence. A run identical to one already recorded is
     refused unless ``allow_duplicate``. Daily calendar, linked-boundary and
     required-session coverage checks are independently repeated here and
     can never be waived by either override flag."""
@@ -2273,6 +2420,49 @@ def persist_development_oos_record(
         or spec_json_hash(record.result.spec) != evaluation.spec_json_hash
     ):
         raise ValueError("daily record evaluation identity changed; recompute before recording")
+    selection = record.provenance.get("evaluation_selection", {})
+    current_intent = require_current_scope or (
+        isinstance(selection, dict) and selection.get("mode") == "current_scope"
+    )
+    explicit_intent = isinstance(selection, dict) and selection.get("mode") == "explicit_approved"
+    if current_intent or explicit_intent:
+        version = session.get(StrategyVersion, record.strategy_version_id)
+        if version is None:
+            raise ValueError("ordinary record strategy version disappeared")
+        cfg = _current_record_config(session) if current_intent else None
+        if current_intent and (cfg is None or record.result.config_hash != cfg.config_hash):
+            raise ValueError("effective CURRENT config changed before persistence; recompute")
+        if current_intent:
+            from signalforge.research.strategies import default_strategies
+
+            current_spec = next(
+                (
+                    s.spec()
+                    for s in default_strategies()
+                    if s.spec().name == record.result.spec.name
+                    and s.spec().version == record.result.spec.version
+                ),
+                None,
+            )
+            if current_spec is None or spec_json_hash(current_spec) != spec_json_hash(
+                record.result.spec
+            ):
+                raise ValueError(
+                    "current executable strategy changed before persistence; recompute"
+                )
+        expected_hash = cfg.config_hash if cfg is not None else record.result.config_hash
+        # Historical API mode does not establish current eligibility. A hash
+        # is identity only, never a reconstructed historical config body.
+        _approved_record_evaluation(
+            session,
+            evaluation,
+            version=version,
+            spec=record.result.spec,
+            config_hash=expected_hash,
+            snapshot_id=record.dataset_snapshot_id,
+            source=record.provenance.get("source"),
+            symbols=record.result.symbols,
+        )
     calendar = _daily_development_calendar(
         session,
         evaluation,

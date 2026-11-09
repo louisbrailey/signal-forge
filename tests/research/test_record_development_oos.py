@@ -19,7 +19,14 @@ from signalforge.cli import app
 from signalforge.data.adapters.fixture import FixtureMarketDataAdapter
 from signalforge.data.calendar import sessions
 from signalforge.data.ingest import ingest_universe
-from signalforge.db.models import BacktestRun, StrategyPromotionEvaluation, StrategySealedTest
+from signalforge.db.models import (
+    BacktestRun,
+    Strategy,
+    StrategyPromotionEvaluation,
+    StrategySealedTest,
+    StrategyVersion,
+)
+from signalforge.domain import StrategyStatus
 from signalforge.research.persistence import latest_oos_metric, spec_json_hash
 from signalforge.research.promotion import (
     development_sealed_boundary,
@@ -309,6 +316,13 @@ def test_cli_dry_run_then_record(db_url: str, session: Session) -> None:
     result = evaluate_promotion(
         session, strat, symbols=UNIVERSE, start=START, end=END, dataset_snapshot=snap
     )
+    # This CLI test explicitly seeds the current-approved state. It tests
+    # record identity/persistence, not whether fixture returns earn approval.
+    evaluation = session.get(StrategyPromotionEvaluation, result.evaluation_id)
+    evaluation.passed = True
+    version = session.get(StrategyVersion, result.strategy_version_id)
+    version.status = StrategyStatus.PAPER_APPROVED
+    session.get(Strategy, version.strategy_id).status = StrategyStatus.PAPER_APPROVED
     session.commit()
     sealed = session.get(StrategySealedTest, result.sealed_test_id)
     dev_end = sessions(START, sealed.window_start - timedelta(days=1))[-1]

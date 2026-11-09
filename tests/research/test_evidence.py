@@ -126,7 +126,9 @@ def test_inventory_separates_current_superseded_and_other_families_without_write
         event.remove(connection, "before_cursor_execute", capture)
     assert inventory["registered_version_count"] == 3
     assert len(inventory["superseded"]) == len(inventory["unlisted"]) == 1
-    assert inventory["counts"]["negative_point_estimate"] == 1
+    assert inventory["counts"]["ambiguous_scope"] == 1
+    legacy = next(r for r in inventory["current"] if r["run_id"] is not None)
+    assert legacy["expectancy_r"] == -0.2 and legacy["data_kind"] == "unknown"
     assert inventory["counts"]["unrecorded"] == inventory["current_strategy_count"] - 1
     assert all(s.lstrip().upper().startswith("SELECT") for s in statements)
     assert not any("sealed" in s.lower() or "kronos" in s.lower() for s in statements)
@@ -280,6 +282,6 @@ def test_cli_inventory_reads_an_existing_database_without_mutating_it(session, t
         source.backup(destination)
     before = hashlib.sha256(copied.read_bytes()).hexdigest()
     report = audit(copied)
-    assert report["counts"]["negative_point_estimate"] == 1
+    assert report["counts"]["ambiguous_scope"] == 1
     assert report["registered_version_count"] == 1
     assert hashlib.sha256(copied.read_bytes()).hexdigest() == before

@@ -56,8 +56,15 @@ def approved_scopes(session: Session, strategy_version_id: int) -> list[Approved
     evaluations on two different snapshots an unordered query would show an
     arbitrary one. Ordering changes no membership, so ``scan_scope_matches``'s
     ``any(...)`` verdict is unaffected by construction."""
-    rows = session.scalars(
-        select(StrategyPromotionEvaluation)
+    rows = session.execute(
+        select(
+            StrategyPromotionEvaluation.id,
+            StrategyPromotionEvaluation.dataset_snapshot_id,
+            StrategyPromotionEvaluation.config_hash,
+            StrategyPromotionEvaluation.spec_json_hash,
+            StrategyPromotionEvaluation.universe_json,
+            StrategyPromotionEvaluation.data_provenance_json,
+        )
         .where(
             StrategyPromotionEvaluation.strategy_version_id == strategy_version_id,
             StrategyPromotionEvaluation.passed.is_(True),
@@ -67,17 +74,29 @@ def approved_scopes(session: Session, strategy_version_id: int) -> list[Approved
             StrategyPromotionEvaluation.id.desc(),
         )
     )
-    return [
-        ApprovedScope(
-            evaluation_id=r.id,
-            dataset_snapshot_id=r.dataset_snapshot_id,
-            config_hash=r.config_hash,
-            spec_json_hash=r.spec_json_hash,
-            universe=frozenset(s.upper() for s in r.universe_json),
-            sources=frozenset(r.data_provenance_json.get("sources") or ()),
+    scopes = []
+    for r in rows:
+        universe = r.universe_json
+        data = r.data_provenance_json
+        sources = (data.get("sources") or []) if isinstance(data, dict) else []
+        if (
+            not isinstance(universe, list)
+            or not all(isinstance(s, str) and s for s in universe)
+            or not isinstance(sources, list)
+            or not all(isinstance(s, str) and s for s in sources)
+        ):
+            continue  # Missing/malformed approval scope never supplies membership.
+        scopes.append(
+            ApprovedScope(
+                evaluation_id=r.id,
+                dataset_snapshot_id=r.dataset_snapshot_id,
+                config_hash=r.config_hash,
+                spec_json_hash=r.spec_json_hash,
+                universe=frozenset(s.upper() for s in universe),
+                sources=frozenset(sources),
+            )
         )
-        for r in rows
-    ]
+    return scopes
 
 
 def scan_scope_matches(

@@ -17,6 +17,7 @@ from signalforge.research.candidates import persist_scan
 from signalforge.research.persistence import upsert_strategy_version
 from signalforge.research.scan import run_scan
 from signalforge.research.strategies import default_strategies
+from tests.support import bind_matching_oos_scope
 
 SYMS = ["SPY", "AAPL", "MSFT", "NVDA"]
 
@@ -36,6 +37,7 @@ def _seed(session: Session) -> None:
         )
         session.add(run)
         session.flush()
+        bind_matching_oos_scope(session, run, strat.spec(), symbols=SYMS)
         session.add(
             BacktestMetric(
                 run_id=run.id,

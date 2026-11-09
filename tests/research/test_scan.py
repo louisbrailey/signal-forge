@@ -16,8 +16,10 @@ from signalforge.domain import Horizon, QualityGate
 from signalforge.research.candidates import persist_scan
 from signalforge.research.display import probability_display
 from signalforge.research.persistence import upsert_strategy_version
+from signalforge.research.promotion import get_or_create_dataset_snapshot
 from signalforge.research.scan import run_scan
 from signalforge.research.strategies import default_strategies
+from tests.support import bind_matching_oos_scope
 
 UNIVERSE = ["SPY", "AAPL", "MSFT", "NVDA", "XOM"]
 AS_OF = date(2024, 6, 30)
@@ -47,6 +49,7 @@ def _seed(
         )
         session.add(run)
         session.flush()
+        bind_matching_oos_scope(session, run, strat.spec(), symbols=UNIVERSE)
         session.add(
             BacktestMetric(
                 run_id=run.id,
@@ -122,6 +125,9 @@ def test_missing_ci_cannot_pass_the_scan_quality_gate(session: Session) -> None:
         fresh={},
         cfg=ResearchConfig(),
         equity=10_000,
+        dataset_snapshot_id=get_or_create_dataset_snapshot(session, symbols=UNIVERSE).id,
+        source="fixture",
+        symbols=UNIVERSE,
     )
     assert draft.quality_gate_status is QualityGate.NO_TRADE
     assert draft.failed_gates == ["OOS expectancy CI missing or invalid"]
