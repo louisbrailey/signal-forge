@@ -15,7 +15,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from signalforge.db.models import BacktestMetric, Strategy, StrategyVersion
-from signalforge.research.persistence import latest_oos_metric, spec_json_hash
+from signalforge.research.persistence import (
+    latest_oos_metric,
+    oos_provenance_failures,
+    spec_json_hash,
+)
 from signalforge.research.registry import StrategySpec
 from signalforge.research.strategies import default_strategies
 
@@ -58,7 +62,9 @@ def metric_evidence(metric: BacktestMetric | None, spec: StrategySpec) -> dict[s
     else:
         state, label = "zero_point_estimate", "Zero OOS point estimate"
 
-    warnings: list[str] = []
+    warnings = oos_provenance_failures(params)
+    if warnings:
+        state, label = "ambiguous_provenance", "Ambiguous OOS evidence: forced or mismatched inputs"
     raw_data = params.get("data_provenance")
     data = raw_data if isinstance(raw_data, dict) else {}
     sources = data.get("sources")

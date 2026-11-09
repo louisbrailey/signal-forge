@@ -176,8 +176,43 @@ def persist_backtest_result(
     return run
 
 
+def oos_provenance_failures(params: object) -> list[str]:
+    """Explicitly forced/non-reproducing evidence cannot qualify a candidate.
+
+    Recording an exploratory result is separate from using it as evaluated OOS
+    evidence. Missing legacy provenance stays unknown; it is not reconstructed
+    or labelled reproduced. No saved metrics, flags or strategy status change.
+    """
+    if not isinstance(params, dict):
+        return []
+    reasons = []
+    allowed = params.get("allow_mismatch")
+    if allowed is True:
+        reasons.append("allow_mismatch=true")
+    elif allowed is not None and allowed is not False:
+        reasons.append("invalid allow_mismatch flag")
+    mismatched = params.get("mismatched_inputs")
+    if isinstance(mismatched, list) and mismatched:
+        names = ", ".join(str(name) for name in mismatched)
+        reasons.append(f"mismatched_inputs: {names}")
+    elif mismatched is not None and not isinstance(mismatched, list):
+        reasons.append("invalid mismatched_inputs metadata")
+    reproduces = params.get("reproduces_evaluation")
+    if isinstance(reproduces, dict):
+        failed = sorted(str(key) for key, value in reproduces.items() if value is False)
+        if failed:
+            reasons.append(f"reproduces_evaluation=false: {', '.join(failed)}")
+    if not reasons:
+        return []
+    return [
+        f"OOS provenance mismatch ({'; '.join(reasons)}); "
+        "not eligible candidate evidence for the evaluated inputs"
+    ]
+
+
 def latest_oos_metric(session: Session, spec: StrategySpec) -> BacktestMetric | None:
-    """Most recent out-of-sample 'all' metric row for this strategy+version."""
+    """Most recent OOS 'all' metric for this strategy+version, including forced
+    runs. Consumers must check provenance; never fall back to an older good run."""
     return session.scalar(
         select(BacktestMetric)
         .join(BacktestRun, BacktestMetric.run_id == BacktestRun.id)

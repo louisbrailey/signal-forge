@@ -28,7 +28,11 @@ from signalforge.db.session import set_write_intent
 from signalforge.db.types import utcnow
 from signalforge.domain import Direction, Horizon, QualityGate
 from signalforge.research.features.daily import atr, sma
-from signalforge.research.persistence import latest_oos_metric, upsert_strategy_version
+from signalforge.research.persistence import (
+    latest_oos_metric,
+    oos_provenance_failures,
+    upsert_strategy_version,
+)
 from signalforge.research.regime import RegimeState, regime_from_proxy
 from signalforge.research.registry import StrategySpec
 from signalforge.research.strategies import default_strategies
@@ -480,6 +484,7 @@ def _build_draft(
         if q.require_backtest:
             failed.append("no out-of-sample backtest on record")
     else:
+        failed.extend(oos_provenance_failures(metric.run.params_json))
         failed.extend(_oos_metric_failures(metric.metrics_json, metric.ci_json, q))
         n_regimes, regime_labels = _oos_regime_coverage(
             session, metric.run_id, q.min_trades_per_regime
