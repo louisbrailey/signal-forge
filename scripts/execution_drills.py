@@ -421,29 +421,43 @@ def seed_evidence(session: Any, world: World, *, n: int = 20, pnl: float = 0.5) 
     """``n`` closed paper positions at a fixed R, for decision 10's counter.
 
     Entry 100, stop 99 => $1 of per-share risk on one share, so ``pnl`` IS the
-    R-multiple the health monitor computes.
+    R-multiple the health monitor computes. Each position carries the ACCEPTED
+    ``paper_trade`` of the automatic actor that opened it: decision 10 counts
+    mechanically accepted trades only.
     """
     from sqlalchemy import select
 
-    from signalforge.db.models import Instrument, PaperPosition
-    from signalforge.domain import Horizon, PositionSide
+    from signalforge.db.models import Instrument, PaperPosition, PaperTrade
+    from signalforge.domain import Horizon, PaperDecision, PositionSide
+    from signalforge.paper.auto_simulate import AUTO_SIM_ACTOR
 
     inst = session.scalar(select(Instrument).where(Instrument.symbol == "SPY"))
     when = world.now - timedelta(days=1)
     for i in range(n):
+        position = PaperPosition(
+            account_id=world.account.id,
+            instrument_id=inst.id,
+            strategy_version_id=world.version.id,
+            horizon=Horizon.SHORT_SWING,
+            side=PositionSide.LONG,
+            qty=1,
+            avg_price=Decimal("100"),
+            stop_level=99.0,
+            opened_at=when - timedelta(days=2),
+            closed_at=when + timedelta(seconds=i),
+            realized_pnl=Decimal(str(pnl)),
+        )
+        session.add(position)
+        session.flush()
         session.add(
-            PaperPosition(
+            PaperTrade(
                 account_id=world.account.id,
-                instrument_id=inst.id,
-                strategy_version_id=world.version.id,
-                horizon=Horizon.SHORT_SWING,
-                side=PositionSide.LONG,
-                qty=1,
-                avg_price=Decimal("100"),
-                stop_level=99.0,
-                opened_at=when - timedelta(days=2),
-                closed_at=when + timedelta(seconds=i),
-                realized_pnl=Decimal(str(pnl)),
+                position_id=position.id,
+                decision=PaperDecision.ACCEPTED,
+                signal_snapshot_json={"decision": {"actor": AUTO_SIM_ACTOR, "automatic": True}},
+                plan_json={"shares": 1},
+                actor=AUTO_SIM_ACTOR,
+                created_at=when - timedelta(days=2),
             )
         )
     session.flush()
@@ -3255,7 +3269,7 @@ def render_report(results: list[DrillResult], *, started: datetime) -> str:
         if r.outcome.events:
             lines += [
                 "",
-                "<details><summary>audit rows observed " f"({len(r.outcome.events)})</summary>",
+                f"<details><summary>audit rows observed ({len(r.outcome.events)})</summary>",
                 "",
                 "```",
             ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -355,3 +356,67 @@ def test_settings_persist_per_alert_type_switches(seeded: TestClient) -> None:
     assert states["system_health"] is False and states["daily_briefing"] is False
     r = seeded.get("/settings")
     assert "approved paper-probation candidate" in r.text
+
+
+def test_strategies_page_shows_insufficient_data_health_rows_as_a_note(
+    seeded: TestClient,
+) -> None:
+    """An ``insufficient_data`` strategy_health row carries placeholder 0.0
+    numbers (NOT NULL columns); the page shows its note, never "+0.000R / z +0.00"."""
+    from signalforge.db.session import session_scope
+    from signalforge.research.health_monitor import evaluate_strategy_health
+
+    with session_scope(write=True) as s:
+        evaluate_strategy_health(s)
+
+    r = seeded.get("/strategies")
+    assert r.status_code == 200
+    assert "closed mechanically accepted paper trade(s) &lt; 20 required" in r.text
+    assert "z +0.00" not in r.text
+
+
+def test_paper_probation_shows_each_versions_own_health_and_no_placeholder_z(
+    registered_client: TestClient,
+) -> None:
+    """Paper Probation renders one row per approved version, so it reads health
+    per VERSION: a sibling version's newer row must not stand in for it. An
+    ``insufficient`` row's 0.0 z is a placeholder, shown as a dash."""
+    from datetime import timedelta
+
+    from signalforge.db.models import Strategy, StrategyHealth
+    from signalforge.db.session import session_scope
+    from signalforge.db.types import utcnow
+    from signalforge.domain import StrategyStatus
+    from signalforge.research.health_monitor import evaluate_strategy_health
+    from signalforge.research.persistence import upsert_strategy_version
+    from signalforge.research.strategies import default_strategies
+
+    spec = default_strategies()[0].spec()
+    with session_scope(write=True) as s:
+        ver = upsert_strategy_version(s, spec)
+        strat = s.get(Strategy, ver.strategy_id)
+        assert strat is not None
+        strat.status = ver.status = StrategyStatus.PAPER_APPROVED
+        sibling = upsert_strategy_version(s, replace(spec, version="9.9.9"))
+        s.flush()
+        evaluate_strategy_health(s)  # 0 trades -> an `insufficient` row per version
+        s.add(
+            StrategyHealth(
+                strategy_version_id=sibling.id,
+                window_label="last_40_paper_trades",
+                paper_expectancy=-0.5,
+                backtest_expectancy=0.3,
+                z_score=-7.25,
+                action="none",
+                note="sibling-only assessment",
+                evaluated_at=utcnow() + timedelta(minutes=5),
+            )
+        )
+
+    r = registered_client.get("/paper-probation")
+    assert r.status_code == 200
+    assert "sibling-only assessment" not in r.text
+    assert "-7.25" not in r.text
+    assert "closed mechanically accepted paper trade(s) &lt; 20 required" in r.text
+    assert '<dd class="font-mono">—</dd>' in r.text
+    assert '<dd class="font-mono">0.0</dd>' not in r.text

@@ -42,7 +42,7 @@ from signalforge.research.health_monitor import (
     _latest_oos_expectancy,
     closed_options_r_multiples,
     is_options_strategy_version,
-    latest_health_by_strategy,
+    latest_health_by_version,
 )
 from signalforge.settings_store import effective_research_config, get_setting
 
@@ -277,7 +277,9 @@ def _options_version_summary(session: Session, strategy_version_id: int) -> dict
 def paper_probation_context(session: Session) -> dict[str, Any]:
     """Everything the Paper Probation dashboard page needs: one entry per
     PAPER_APPROVED strategy version."""
-    health_by_name = latest_health_by_strategy(session)
+    # Per VERSION: this page renders one row per approved version, so a
+    # sibling version's row must never stand in for this one's.
+    health_by_version = latest_health_by_version(session)
     rows: list[dict[str, Any]] = []
 
     approved = session.execute(
@@ -306,7 +308,7 @@ def paper_probation_context(session: Session) -> dict[str, Any]:
             )
         oos_expectancy = _latest_oos_expectancy(session, ver.id)
         paper = _paper_trade_summary(session, ver.id)
-        health = health_by_name.get(strat.name)
+        health = health_by_version.get(ver.id)
 
         shortfall = None
         if paper.realized_expectancy_r is not None and oos_expectancy is not None:

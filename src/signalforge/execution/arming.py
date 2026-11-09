@@ -78,7 +78,9 @@ __all__ = [
 ARMING_EXPIRY_DAYS = 7
 
 #: Decision 10, binding. Closed PAPER trades, counted by the health monitor's own
-#: definition of a closed trade (``research.health_monitor.closed_paper_r_multiples``).
+#: definition of a closed trade (``research.health_monitor.closed_paper_r_multiples``),
+#: which counts MECHANICALLY accepted trades only (``paper_trade.actor ==
+#: "auto_simulate"``): an operator's manual acceptance is never arming evidence.
 MIN_CLOSED_PAPER_TRADES = 20
 
 
@@ -478,8 +480,7 @@ def check_arming_preconditions(
             LimitCheck(
                 "S8",
                 True,
-                f"account {is_paper_proof.observed_account_id} on "
-                f"{is_paper_proof.observed_host}",
+                f"account {is_paper_proof.observed_account_id} on {is_paper_proof.observed_host}",
             )
         )
 
@@ -924,8 +925,7 @@ def _first_disarm_trigger(
     if facts.orders_today is not None and facts.orders_today > armed.max_orders_per_day:
         return (
             DisarmTrigger.ORDER_CAP,
-            f"{facts.orders_today} orders today breached the armed cap "
-            f"{armed.max_orders_per_day}",
+            f"{facts.orders_today} orders today breached the armed cap {armed.max_orders_per_day}",
         )
     if armed.expires_at <= now:
         return (

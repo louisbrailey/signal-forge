@@ -158,9 +158,12 @@
     {% if s.health %}
     <dl class="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-slate-600 sm:grid-cols-4">
       <div><dt class="text-slate-400">Window</dt><dd>{{ s.health.window_label }}</dd></div>
-      <div><dt class="text-slate-400">z-score</dt><dd class="font-mono">{{ s.health.z_score }}</dd></div>
+      {# An 'insufficient' row's z_score is a 0.0 placeholder (NOT NULL column), not a measured z. #}
+      <div><dt class="text-slate-400">z-score</dt><dd class="font-mono">{{ '—' if s.health.action == 'insufficient' else s.health.z_score }}</dd></div>
       <div><dt class="text-slate-400">Action</dt><dd>
-        <span class="rounded px-1.5 py-0.5 {{ 'bg-emerald-100 text-emerald-800' if s.health.action == 'ok' else 'bg-red-100 text-red-700' }}">{{ s.health.action }}</span>
+        <span class="rounded px-1.5 py-0.5 {{ 'bg-emerald-100 text-emerald-800' if s.health.action == 'ok'
+          else 'bg-slate-100 text-slate-600' if s.health.action == 'insufficient'
+          else 'bg-red-100 text-red-700' }}">{{ s.health.action }}</span>
       </dd></div>
       <div><dt class="text-slate-400">Evaluated</dt><dd>{{ s.health.evaluated_at[:16] }}</dd></div>
     </dl>
