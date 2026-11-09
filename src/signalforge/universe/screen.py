@@ -23,6 +23,7 @@ from signalforge.db.models import (
     UniverseScreenRun,
     UniverseTicker,
 )
+from signalforge.db.session import read_phase
 from signalforge.observability import get_logger
 from signalforge.research.promotion import get_or_create_dataset_snapshot
 from signalforge.universe.bulk import DEFAULT_SOURCE, load_bulk_rows
@@ -116,40 +117,32 @@ def run_screen(
 ) -> ScreenReport:
     t0 = time.monotonic()
     now = now or datetime.now(UTC)
-    files = list(
-        session.scalars(
-            select(BulkFile)
-            .where(BulkFile.source == source, BulkFile.status == "ok")
-            .order_by(BulkFile.session_date.desc())
-            .limit(cfg.backfill_sessions)
+    # Parse the archive (hundreds of gzipped sessions, ~1 min on the live
+    # archive) as a PLAIN READER: under the caller's write intent this ran
+    # inside BEGIN IMMEDIATE and held the write lock throughout (incident
+    # 2026-11-08 23:18). The run and its members are written afterwards in one
+    # short transaction.
+    with read_phase(session):
+        files = list(
+            session.scalars(
+                select(BulkFile)
+                .where(BulkFile.source == source, BulkFile.status == "ok")
+                .order_by(BulkFile.session_date.desc())
+                .limit(cfg.backfill_sessions)
+            )
         )
-    )
-    if not files:
-        raise ValueError("no archived bulk sessions — run the backfill first")
-    per, dates = _metrics_from_archive(files)
+        if not files:
+            raise ValueError("no archived bulk sessions — run the backfill first")
+        per, dates = _metrics_from_archive(files)
+        tickers = list(session.scalars(select(UniverseTicker)))
+        continuity: set[str] = set()
+        for cm in session.scalars(select(SymbolContinuityMapping)):
+            for sym in (cm.old_symbol, cm.new_symbol, cm.derived_symbol):
+                if sym:
+                    continuity.add(str(sym).upper())
     screen_date = max(dates)
     sessions_used = len(dates)
-
-    tickers = list(session.scalars(select(UniverseTicker)))
     discovered = len(tickers)
-    continuity: set[str] = set()
-    for cm in session.scalars(select(SymbolContinuityMapping)):
-        for sym in (cm.old_symbol, cm.new_symbol, cm.derived_symbol):
-            if sym:
-                continuity.add(str(sym).upper())
-
-    run = UniverseScreenRun(
-        screen_date=screen_date,
-        started_at=now,
-        status="running",
-        config_json=cfg.model_dump(mode="json"),
-        sessions_used=sessions_used,
-        archive_first=min(dates),
-        archive_last=screen_date,
-        discovered=discovered,
-    )
-    session.add(run)
-    session.flush()
 
     excluded: dict[str, int] = defaultdict(int)
     flags_count: dict[str, int] = defaultdict(int)
@@ -213,7 +206,6 @@ def run_screen(
             flags_count[f] += 1
         members.append(
             UniverseMember(
-                run_id=run.id,
                 ticker=t.ticker,
                 security_type=t.security_type,
                 last_close=last_close,
@@ -251,6 +243,21 @@ def run_screen(
                 mem.exclusion_reasons = [*mem.exclusion_reasons, R_SECTOR]
         excluded[R_SECTOR] += len(dropped)
 
+    # ---- the write phase: everything above touched no write lock ---------- #
+    run = UniverseScreenRun(
+        screen_date=screen_date,
+        started_at=now,
+        status="running",
+        config_json=cfg.model_dump(mode="json"),
+        sessions_used=sessions_used,
+        archive_first=min(dates),
+        archive_last=screen_date,
+        discovered=discovered,
+    )
+    session.add(run)
+    session.flush()
+    for mem in members:
+        mem.run_id = run.id
     session.add_all(members)
     eligible_symbols = sorted(mem.ticker for mem in members if mem.eligible)
     digest = hashlib.sha256(",".join(eligible_symbols).encode()).hexdigest()[:8]

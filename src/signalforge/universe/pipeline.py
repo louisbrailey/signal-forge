@@ -123,6 +123,10 @@ def run_universe_update(
     # 1) discovery (all types counted; CS/ETF in scope)
     disc: DiscoveryReport = refresh_reference(session, client, security_types=cfg.security_types)
     rep.discovery = asdict(disc)
+    # End discovery's short write transaction here rather than letting it run
+    # on into the backfill's reads (every stage below commits before its own
+    # network or parse work; none may inherit an open write transaction).
+    session.commit()
 
     # 2) resumable bulk backfill under runtime + storage budgets
     bf: BackfillReport = backfill(
@@ -153,7 +157,11 @@ def run_universe_update(
     # (resumable, bounded per run; CS only — ETFs have none)
     if time.monotonic() < deadline:
         rep.market_caps_enriched = enrich_market_caps(
-            session, client, sc.eligible_symbols, max_requests=market_cap_requests
+            session,
+            client,
+            sc.eligible_symbols,
+            max_requests=market_cap_requests,
+            deadline=deadline,
         )
 
     # 4) normalize eligible symbols only (+ SPY proxy) under the remaining budget
@@ -161,6 +169,7 @@ def run_universe_update(
         session, sc.eligible_symbols, cfg, source=cfg.normalized_source, deadline=deadline
     )
     rep.normalize = asdict(nz)
+    session.commit()  # normalize's feed-status write; the scans begin their own phases
 
     # 5) post-close scan of the eligible universe on the bulk source — research
     # only; candidates cannot match any approved scope (different snapshot +

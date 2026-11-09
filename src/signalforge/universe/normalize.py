@@ -19,6 +19,7 @@ from signalforge.data.adapters.base import AdapterCapability
 from signalforge.data.ingest import record_feed_success
 from signalforge.data.repository import get_or_create_instrument
 from signalforge.db.models import BulkFile, Instrument, OHLCVDaily, UniverseTicker
+from signalforge.db.session import read_phase
 from signalforge.domain import FeedType, LatencyCategory
 from signalforge.observability import get_logger
 from signalforge.universe.bulk import load_bulk_rows
@@ -63,7 +64,19 @@ def normalize_symbols(
     deadline: float | None = None,
 ) -> NormalizeReport:
     """Write missing (instrument, session_date) bars for ``symbols`` (+ the
-    scan's market proxy) from every archived session. Idempotent."""
+    scan's market proxy) from every archived session. Idempotent.
+
+    Lock discipline (incident 2026-11-08): the reads run as a plain reader,
+    the archive is parsed with no transaction open, and each archived SESSION
+    (one ``BulkFile``) is written in its own short write transaction —
+    inserted in ``_CHUNK``-row statements, committed once at the file
+    boundary — never one write transaction across the whole archive.
+
+    A session is therefore all-or-nothing for a concurrent reader: the grid
+    (or any other reader of this source) sees either every new bar of
+    session D or none of them, never a timing-dependent half. A run cut short
+    (deadline, crash) keeps every committed session, and the next run skips
+    them as ``existing``."""
     t0 = time.monotonic()
     source = source or cfg.normalized_source
     rep = NormalizeReport()
@@ -71,44 +84,63 @@ def normalize_symbols(
     if not wanted:
         return rep
 
-    types: dict[str, str] = {
-        str(tk): str(st)
-        for tk, st in session.execute(
-            select(UniverseTicker.ticker, UniverseTicker.security_type).where(
-                UniverseTicker.ticker.in_(wanted)
+    with read_phase(session):
+        types: dict[str, str] = {
+            str(tk): str(st)
+            for tk, st in session.execute(
+                select(UniverseTicker.ticker, UniverseTicker.security_type).where(
+                    UniverseTicker.ticker.in_(wanted)
+                )
+            ).all()
+        }
+        known: dict[str, int] = {
+            str(sym): int(iid)
+            for sym, iid in session.execute(
+                select(Instrument.symbol, Instrument.id).where(Instrument.symbol.in_(wanted))
+            ).all()
+        }
+        existing: set[tuple[int, date]] = set(
+            session.execute(
+                select(OHLCVDaily.instrument_id, OHLCVDaily.session_date)
+                .join(Instrument, Instrument.id == OHLCVDaily.instrument_id)
+                .where(OHLCVDaily.source == source, Instrument.symbol.in_(wanted))
+            ).all()  # type: ignore[arg-type]
+        )
+        files = list(
+            session.scalars(
+                select(BulkFile)
+                .where(BulkFile.source == cfg.normalized_source, BulkFile.status == "ok")
+                .order_by(BulkFile.session_date)
             )
-        ).all()
-    }
+        )
+
+    # One short write transaction creates only the instruments that are missing.
     inst_ids: dict[str, int] = {}
     for sym in wanted:
-        inst = get_or_create_instrument(
-            session, sym, instrument_type="etf" if types.get(sym) == "ETF" else "stock"
-        )
-        inst_ids[sym] = inst.id
+        iid = known.get(sym)
+        if iid is None:
+            inst = get_or_create_instrument(
+                session, sym, instrument_type="etf" if types.get(sym) == "ETF" else "stock"
+            )
+            iid = inst.id
+        inst_ids[sym] = iid
+    session.commit()
     rep.symbols = len(inst_ids)
 
-    existing: set[tuple[int, date]] = set(
-        session.execute(
-            select(OHLCVDaily.instrument_id, OHLCVDaily.session_date)
-            .join(Instrument, Instrument.id == OHLCVDaily.instrument_id)
-            .where(OHLCVDaily.source == source, Instrument.symbol.in_(wanted))
-        ).all()  # type: ignore[arg-type]
-    )
-
-    files = list(
-        session.scalars(
-            select(BulkFile)
-            .where(BulkFile.source == cfg.normalized_source, BulkFile.status == "ok")
-            .order_by(BulkFile.session_date)
-        )
-    )
     now = datetime.now(UTC)
     batch: list[dict[str, object]] = []
 
-    def _flush() -> None:
-        if batch:
-            session.execute(insert(OHLCVDaily), batch)
-            batch.clear()
+    def _commit_session() -> None:
+        # The file is already parsed and its rows built with no transaction
+        # open; now ONE short write transaction inserts them in _CHUNK-row
+        # statements and commits at the file boundary, so a concurrent reader
+        # never sees part of a session.
+        if not batch:
+            return
+        for i in range(0, len(batch), _CHUNK):
+            session.execute(insert(OHLCVDaily), batch[i : i + _CHUNK])
+        batch.clear()
+        session.commit()
 
     for bf in files:
         if deadline is not None and time.monotonic() > deadline:
@@ -151,9 +183,7 @@ def normalize_symbols(
                 }
             )
             rep.rows_written += 1
-            if len(batch) >= _CHUNK:
-                _flush()
-    _flush()
+        _commit_session()
     if rep.sessions:
         record_feed_success(session, bulk_capability(source))
     session.flush()

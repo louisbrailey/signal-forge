@@ -2844,9 +2844,9 @@ def backtest_report(
             )
 
 
-def _sensitivity_grid_builders() -> (
-    dict[str, tuple[object, dict[str, object], dict[str, list[object]]]]
-):
+def _sensitivity_grid_builders() -> dict[
+    str, tuple[object, dict[str, object], dict[str, list[object]]]
+]:
     """strategy key -> (factory(params)->strategy, baseline params dict, grid)."""
     from dataclasses import asdict
 
@@ -3912,6 +3912,91 @@ def scan_approved_scope_cmd(
             fg=typer.colors.GREEN,
         )
     typer.echo("Research signal only — no order was placed.")
+
+
+@app.command("approved-scope-sessions")
+def approved_scope_sessions_cmd(
+    sessions: Annotated[
+        int,
+        typer.Option("--sessions", "-n", min=1, max=260, help="Closed sessions to list."),
+    ] = 22,
+    gaps_only: Annotated[
+        bool, typer.Option("--gaps-only", help="List only sessions that were not scanned.")
+    ] = False,
+) -> None:
+    """Per-session outcome of every approved scope's scan: one line per
+    completed session — SCANNED, or SKIPPED with its reason (missed,
+    readiness_blocked, data_hold, all_excluded, scan_failed) — so a gap is
+    never silent. A scope that has since left the approved set is listed too
+    while its approved window reaches into the listed sessions.
+
+    Shows the recorded ``approved_scope_scan.session_outcome`` row when there
+    is one; otherwise what the evidence on record says, marked UNRECORDED
+    (sessions older than the scheduler's look-back — those are never
+    recorded — or not yet closed out). Read-only: never writes, never scans a
+    past session.
+    """
+    from sqlalchemy import select
+
+    from signalforge.db.models import Strategy, StrategyVersion
+    from signalforge.db.session import session_scope
+    from signalforge.research.scan_session_outcomes import (
+        NOT_IN_SCOPE,
+        OPEN,
+        SCANNED,
+        session_outcomes,
+    )
+
+    with session_scope() as session:
+        rows = session_outcomes(session, n_sessions=sessions)
+        names = {
+            int(v.id): f"{s.name} v{v.version}"
+            for v, s in session.execute(
+                select(StrategyVersion, Strategy).join(
+                    Strategy, Strategy.id == StrategyVersion.strategy_id
+                )
+            ).all()
+        }
+    if not rows:
+        typer.echo("No approved scope to report (no PAPER_APPROVED version with a usable scope).")
+        return
+    by_scope: dict[str, list[Any]] = {}
+    for o in rows:
+        by_scope.setdefault(o.scope.token, []).append(o)
+    colour = {SCANNED: typer.colors.GREEN, OPEN: typer.colors.CYAN, NOT_IN_SCOPE: None}
+    for scope_rows in by_scope.values():
+        head = scope_rows[-1]
+        versions = ", ".join(
+            f"{names.get(v, '?')} (strategy_version_id={v})" for v in head.strategy_version_ids
+        )
+        typer.secho(
+            f"\n{head.scope.horizon} on snapshot {head.scope.dataset_snapshot_id} "
+            f"({head.dataset_key}, {head.scope.source}) — {versions}"
+            + ("" if head.approved_now else " — no longer in the approved set"),
+            bold=True,
+        )
+        counts: dict[str, int] = {}
+        for o in scope_rows:
+            if o.outcome in (OPEN, NOT_IN_SCOPE):
+                label = o.outcome
+            else:
+                label = f"{o.outcome}:{o.reason}" if o.outcome != SCANNED else SCANNED
+                counts[label] = counts.get(label, 0) + 1
+                if not o.recorded:
+                    counts["unrecorded"] = counts.get("unrecorded", 0) + 1
+            if gaps_only and o.outcome in (SCANNED, NOT_IN_SCOPE):
+                continue
+            typer.secho(
+                f"  {o.session_date.isoformat()}  {o.outcome.upper():<13}{o.reason:<18}"
+                f"{'recorded' if o.recorded else 'UNRECORDED':<11}{o.detail}",
+                fg=colour.get(o.outcome, typer.colors.YELLOW),
+            )
+        totals = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+        typer.echo(f"  totals: {totals or 'none'}")
+    typer.echo(
+        "\nA skipped past session is recorded, never re-scanned: "
+        "paper never acts on a stale signal."
+    )
 
 
 def _echo_options_paper_section(session: Session) -> None:

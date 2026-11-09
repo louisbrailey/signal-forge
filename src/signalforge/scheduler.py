@@ -898,6 +898,46 @@ def job_approved_scope_scan() -> None:
             strategy_version_id=skipped["strategy_version_id"],
             reason=skipped["reason"],
         )
+    # Close out every earlier session that can no longer be scanned: one
+    # outcome row per approved scope (records only — never a past-session scan).
+    record_scan_session_outcomes()
+
+
+def record_scan_session_outcomes(now: datetime | None = None) -> int:
+    """Write the one ``approved_scope_scan.session_outcome`` row each closed
+    session in the look-back still lacks, per approved scope (scanned, or
+    skipped with a reason) — ``research.scan_session_outcomes``. Best-effort:
+    bookkeeping never fails the job that calls it, and the next call (30-min
+    ``catch_up``, next EOD scan) retries; a session is never written twice.
+    The cheap read-only check runs first so the common no-op case never takes
+    the write lock. Returns the number of rows written.
+
+    Bound: only sessions within ``catch_up_lookback_sessions`` are ever
+    written; a session that fell out of the look-back before the worker next
+    ran stays UNRECORDED (visible in ``signalforge approved-scope-sessions``)."""
+    try:
+        from signalforge.config import get_settings
+        from signalforge.db.session import session_scope
+        from signalforge.research.scan_session_outcomes import (
+            pending_session_outcomes,
+            record_session_outcomes,
+        )
+
+        lookback = int(getattr(get_settings(), "catch_up_lookback_sessions", 10))
+        with session_scope() as session:
+            if not pending_session_outcomes(session, now=now, lookback=lookback):
+                return 0
+
+        def _write() -> int:
+            with session_scope(write=True) as session:
+                return len(record_session_outcomes(session, now=now, lookback=lookback))
+
+        return int(
+            retry_on_lock(_write, attempts=3, backoff_s=(0.2, 0.5), label="scan_session_outcomes")
+        )
+    except Exception as exc:
+        _log.warning("scan_session_outcomes.record_failed", error=repr(exc)[:200])
+        return 0
 
 
 # The SIMULATED options paper EOD chain deliberately does NOT live here.
@@ -1174,8 +1214,26 @@ def job_grid_daily() -> None:
     if not cfg.enabled:
         _log.info("grid.skipped_disabled")
         return
-    with session_scope(write=True) as session:
-        res = run_grid_daily(session, cfg=cfg)
+    # Ordered AFTER the universe update (and the EOD unit): both hold
+    # ``_EOD_UPDATE_LOCK`` for their whole run, and the universe update writes
+    # the bulk bars the grid trades on. Its cron slot is 35 min after the
+    # universe update's, but that job can run ~55 min (2026-11-08: 23:15 ->
+    # 00:09 UTC, grid fired at 23:50 inside it). Wait for it to finish rather
+    # than evaluate a snapshot taken mid-refresh; fail closed if it never does.
+    t_wait = time.monotonic()
+    if not _EOD_UPDATE_LOCK.acquire(blocking=False):
+        _log.info("grid.waiting_for_eod_or_universe_update")
+        if not _EOD_UPDATE_LOCK.acquire(timeout=UNIVERSE_WAIT_FOR_EOD_S):
+            raise RuntimeError(
+                f"grid skipped: EOD / universe update still running after "
+                f"{UNIVERSE_WAIT_FOR_EOD_S / 60:g} min"
+            )
+        _log.info("grid.waited", seconds=round(time.monotonic() - t_wait, 1))
+    try:
+        with session_scope(write=True) as session:
+            res = run_grid_daily(session, cfg=cfg)
+    finally:
+        _EOD_UPDATE_LOCK.release()
     _log.info("grid.daily", **res.to_dict())
 
 
@@ -1198,11 +1256,17 @@ def job_universe_update() -> None:
             f"{UNIVERSE_WAIT_FOR_EOD_S / 60:g} min"
         )
     try:
-        with session_scope(write=True) as session:
+        # Read the flag as a plain reader: under the write scope this read
+        # opened BEGIN IMMEDIATE, and the reference walk that follows (14 paced
+        # pages, ~2.5 min) ran inside it (incident 2026-11-08 23:15).
+        with session_scope() as session:
             cfg = effective_research_config(session).universe_pipeline
-            if not cfg.enabled:
-                _log.info("universe.update.skipped_disabled")
-                return
+        if not cfg.enabled:
+            _log.info("universe.update.skipped_disabled")
+            return
+        # Every stage commits before its network / parse work and writes in
+        # short transactions — see universe.pipeline.run_universe_update.
+        with session_scope(write=True) as session:
             run_universe_update(session, cfg=cfg)
     finally:
         _EOD_UPDATE_LOCK.release()
@@ -1456,9 +1520,120 @@ def job_alerts() -> None:
 # --------------------------------------------------------------------------- #
 HEARTBEAT_INTERVAL_S = 30
 WORKER_STALE_AFTER_S = 3 * HEARTBEAT_INTERVAL_S
+# The heartbeat waits for the write lock on its own connection (the shared
+# pool's 5 s is sized for jobs that retry), HEARTBEAT_BUSY_TIMEOUT_MS per
+# attempt, but one beat never keeps the run loop longer than HEARTBEAT_BUDGET_S
+# of WALL time: every attempt's busy timeout is clipped to what is left of the
+# budget, and the caller stops waiting for the beat at the budget whatever
+# SQLite does (on the live worker one lock wait has taken ~2-2.5x its configured
+# timeout, cause not established — each failed attempt's measured wait is
+# logged as worker.heartbeat_lock_wait). Bound: the previous beat's row is at
+# most HEARTBEAT_INTERVAL_S (+ the run loop's 2 s tick) old when a beat starts,
+# so a beat that lands inside its budget leaves the row at most ~62 s old,
+# inside WORKER_STALE_AFTER_S. A beat that cannot land inside its budget is a
+# failed (warned) beat, never a stalled run loop.
+HEARTBEAT_BUDGET_S = float(WORKER_STALE_AFTER_S - 2 * HEARTBEAT_INTERVAL_S)
+HEARTBEAT_BUSY_TIMEOUT_MS = 20_000
+HEARTBEAT_ATTEMPTS = 2
+HEARTBEAT_BACKOFF_S = (1.0,)
+# An attempt with less lock-wait time than this left in the budget is not made.
+HEARTBEAT_MIN_ATTEMPT_MS = 1_000
+# Held by the thread writing a beat; a beat that finds it held is skipped, so a
+# beat still waiting on the lock past its budget never stacks up behind another.
+_HEARTBEAT_IN_FLIGHT = threading.Lock()
 EOD_CRON = (17, 30)  # America/New_York — matches the daily_eod_update JobSpec
 CATCH_UP_RETRY_BACKOFF = timedelta(hours=2)
 WORKER_NAME = "scheduler"
+
+
+def _write_heartbeat_row(
+    *,
+    worker: str,
+    started_at: datetime,
+    next_runs: dict[str, str | None],
+    detail: str,
+    busy_timeout_ms: int,
+) -> None:
+    import os
+    import socket
+
+    from sqlalchemy import select
+
+    from signalforge.db.models import WorkerHeartbeat
+    from signalforge.db.session import isolated_write_scope
+
+    # Its own short-lived connection (closed on exit) with a busy timeout long
+    # enough to ride out another writer's short transaction (incident
+    # 2026-11-08: three beats exhausted their retries while the universe update
+    # held the lock across its ~2 min reference walk).
+    with isolated_write_scope(busy_timeout_ms=busy_timeout_ms) as session:
+        row = session.scalar(select(WorkerHeartbeat).where(WorkerHeartbeat.worker == worker))
+        if row is None:
+            row = WorkerHeartbeat(worker=worker, started_at=started_at, last_beat_at=started_at)
+            session.add(row)
+        row.host = socket.gethostname()[:120]
+        row.pid = os.getpid()
+        row.started_at = started_at
+        row.last_beat_at = datetime.now(UTC)
+        row.next_runs_json = next_runs
+        row.detail = detail[:300]
+
+
+def _beat_within_budget(
+    *, worker: str, started_at: datetime, next_runs: dict[str, str | None], detail: str
+) -> None:
+    """Up to HEARTBEAT_ATTEMPTS lock-bounded writes inside HEARTBEAT_BUDGET_S.
+    Each failed attempt logs its measured wait; raises LockRetryExhausted when
+    no attempt landed."""
+    from sqlalchemy.exc import OperationalError
+
+    t0 = time.monotonic()
+    deadline = t0 + HEARTBEAT_BUDGET_S
+    last: OperationalError | None = None
+    made = 0
+    for attempt in range(1, HEARTBEAT_ATTEMPTS + 1):
+        left_ms = int((deadline - time.monotonic()) * 1000)
+        # Clipped to whole seconds, so the per-timeout isolated engines stay few.
+        timeout_ms = HEARTBEAT_BUSY_TIMEOUT_MS
+        if left_ms < timeout_ms:
+            timeout_ms = (left_ms // 1000) * 1000
+        if timeout_ms < min(HEARTBEAT_MIN_ATTEMPT_MS, HEARTBEAT_BUSY_TIMEOUT_MS):
+            break
+        made = attempt
+        ta = time.monotonic()
+        try:
+            _write_heartbeat_row(
+                worker=worker,
+                started_at=started_at,
+                next_runs=next_runs,
+                detail=detail,
+                busy_timeout_ms=timeout_ms,
+            )
+        except OperationalError as exc:
+            if not is_lock_error(exc):
+                raise
+            last = exc
+            _log.warning(
+                "worker.heartbeat_lock_wait",
+                attempt=attempt,
+                of=HEARTBEAT_ATTEMPTS,
+                busy_timeout_ms=timeout_ms,
+                waited_s=round(time.monotonic() - ta, 2),
+            )
+            if attempt < HEARTBEAT_ATTEMPTS:
+                delay = HEARTBEAT_BACKOFF_S[min(attempt - 1, len(HEARTBEAT_BACKOFF_S) - 1)]
+                time.sleep(max(0.0, min(delay, deadline - time.monotonic())))
+            continue
+        if attempt > 1:
+            _log.info(
+                "worker.heartbeat_recovered",
+                attempt=attempt,
+                elapsed_s=round(time.monotonic() - t0, 2),
+            )
+        return
+    if last is None:  # pragma: no cover - the first attempt always fits the budget
+        raise RuntimeError("heartbeat budget left no time for an attempt")
+    raise LockRetryExhausted(made, last)
 
 
 def record_heartbeat(
@@ -1469,44 +1644,59 @@ def record_heartbeat(
     detail: str = "",
 ) -> None:
     """Upsert this worker's liveness row with the scheduler's real next-run
-    times. Best-effort: a DB hiccup must never stop the worker."""
-    import os
-    import socket
+    times. Best-effort: a DB hiccup must never stop the worker.
 
+    The write runs on a short-lived thread and this call returns after at most
+    HEARTBEAT_BUDGET_S (+1 s) of wall time however long SQLite actually waits,
+    so a slow lock wait never delays the run loop's next beat. Nothing is held
+    open once the write ends: not a transaction, not a connection."""
+    t0 = time.monotonic()
     try:
-        from sqlalchemy import select
-
-        from signalforge.db.models import WorkerHeartbeat
-        from signalforge.db.session import session_scope
-
         next_runs: dict[str, str | None] = {}
         if scheduler is not None:
             for job in scheduler.get_jobs():
                 nrt = getattr(job, "next_run_time", None)
                 next_runs[job.id] = nrt.astimezone(UTC).isoformat() if nrt else None
-
-        def _write() -> None:
-            with session_scope(write=True) as session:
-                row = session.scalar(
-                    select(WorkerHeartbeat).where(WorkerHeartbeat.worker == worker)
-                )
-                if row is None:
-                    row = WorkerHeartbeat(
-                        worker=worker, started_at=started_at, last_beat_at=started_at
-                    )
-                    session.add(row)
-                row.host = socket.gethostname()[:120]
-                row.pid = os.getpid()
-                row.started_at = started_at
-                row.last_beat_at = datetime.now(UTC)
-                row.next_runs_json = next_runs
-                row.detail = detail[:300]
-
-        retry_on_lock(_write, attempts=3, backoff_s=(0.2, 0.5), label="heartbeat")
     except Exception as exc:
-        # WARNING, not debug: a silent heartbeat failure would make /ops report a
-        # live worker as dead with nothing in the log to tell the two apart.
         _log.warning("worker.heartbeat_failed", error=repr(exc)[:200])
+        return
+
+    if not _HEARTBEAT_IN_FLIGHT.acquire(blocking=False):
+        _log.warning("worker.heartbeat_skipped", reason="previous beat still waiting on the lock")
+        return
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            _beat_within_budget(
+                worker=worker, started_at=started_at, next_runs=next_runs, detail=detail
+            )
+        except Exception as exc:
+            # WARNING, not debug: a silent heartbeat failure would make /ops
+            # report a live worker as dead with nothing in the log to tell the
+            # two apart.
+            _log.warning(
+                "worker.heartbeat_failed",
+                error=repr(exc)[:200],
+                elapsed_s=round(time.monotonic() - t0, 2),
+            )
+        finally:
+            _HEARTBEAT_IN_FLIGHT.release()
+            done.set()
+
+    try:
+        threading.Thread(target=_run, name="worker-heartbeat", daemon=True).start()
+    except Exception as exc:
+        _HEARTBEAT_IN_FLIGHT.release()
+        _log.warning("worker.heartbeat_failed", error=repr(exc)[:200])
+        return
+    # +1 s of slack over the budget for the thread's own bookkeeping.
+    if not done.wait(HEARTBEAT_BUDGET_S + 1.0):
+        _log.warning(
+            "worker.heartbeat_over_budget",
+            budget_s=HEARTBEAT_BUDGET_S,
+            note="lock wait overran its configured timeout; the beat continues in the background",
+        )
 
 
 def other_live_worker() -> str | None:
@@ -1720,25 +1910,36 @@ def _lookback_sessions(latest: date, lookback: int) -> list[date]:
 
 
 def missed_sessions(now: datetime | None = None) -> tuple[list[date], str]:
-    """Completed sessions BEFORE the latest one that never got an
-    approved-scope scan and have not been explicitly resolved — oldest first.
+    """Completed sessions BEFORE the latest one that never had an
+    approved-scope scan ATTEMPT and have not been explicitly resolved — oldest
+    first.
 
-    The anchor is the newest readiness-enforced ``approved_scope_scan.completed``
-    audit row: the session that was the last completed one when it was written
-    is the last session known to have had a successful EOD update + scan. Every
-    session after it and before the latest completed one is missed, bounded to
-    ``catch_up_lookback_sessions``, minus the sessions already carrying a
-    ``scan_skipped_missed_session`` row (idempotence). No anchor at all (fresh
-    install, no approved strategy ever scanned) means there is nothing to be
-    "since", so nothing is owed. The latest completed session itself is never
-    in this list — ``catch_up_pending`` owns it.
+    Judged PER SESSION, not from a single anchor (incident 2026-10-14..11-05):
+    the old rule owed only sessions after the NEWEST ``completed`` audit row, so
+    a later session's scan landing first moved the start point past an earlier
+    gap, and a ``completed`` row written with nothing scanned hid the session it
+    was attributed to. Now every session in the window (bounded to
+    ``catch_up_lookback_sessions``) after the OLDEST readiness-enforced
+    ``completed`` row is owed unless it has a readiness-enforced attempt on
+    record (scanned, nothing scanned, readiness-blocked, or a failed scan job —
+    ``research.scan_session_outcomes.attempted_sessions``) or already carries a
+    ``scan_skipped_missed_session`` row (idempotence). An attempt that scanned
+    nothing is not "missed": its per-session outcome record says why
+    (``readiness_blocked`` / ``data_hold`` / ``all_excluded`` / ``scan_failed``).
+    No completed scan at all (fresh install) means there is nothing to be
+    "since". The latest completed session itself is never in this list — ``catch_up_pending`` owns
+    it. Nothing here ever scans a past session.
     """
     from sqlalchemy import select
 
     from signalforge.config import get_settings
-    from signalforge.db.models import AuditLog, JobRun
+    from signalforge.db.models import JobRun
     from signalforge.db.session import session_scope
-    from signalforge.research.approved_scope_scan import AUDIT_COMPLETED
+    from signalforge.research.scan_session_outcomes import (
+        attempt_session,
+        attempted_sessions,
+        first_completed_scan_ts,
+    )
 
     now = now or datetime.now(UTC)
     latest = last_completed_session(now)
@@ -1747,22 +1948,14 @@ def missed_sessions(now: datetime | None = None) -> tuple[list[date], str]:
     if not window:
         return [], "look-back is 0 sessions"
     with session_scope() as session:
-        anchor_ts: datetime | None = None
-        for row in session.scalars(
-            select(AuditLog)
-            .where(AuditLog.action == AUDIT_COMPLETED, AuditLog.ts <= now)
-            .order_by(AuditLog.ts.desc())
-            .limit(50)
-        ):
-            if (row.after_json or {}).get("readiness_enforced", True):
-                anchor_ts = row.ts
-                break
-        if anchor_ts is None:
+        first_ts = first_completed_scan_ts(session, now)
+        if first_ts is None:
             return [], "no completed approved-scope scan on record — nothing to catch up since"
-        anchor = last_completed_session(anchor_ts)
-        owed = [d for d in window if d > anchor]
+        since = attempt_session(first_ts)
+        owed = [d for d in window if d > since]
         if not owed:
-            return [], f"approved-scope scan on record for {anchor.isoformat()} — no gap"
+            return [], f"approved-scope scans on record since {since.isoformat()} — no gap"
+        attempted = attempted_sessions(session, owed, now)
         resolved: set[str] = set()
         for detail in session.scalars(
             select(JobRun.detail).where(
@@ -1773,9 +1966,12 @@ def missed_sessions(now: datetime | None = None) -> tuple[list[date], str]:
             head = str(detail or "").split(":", 1)[0].strip()
             if head.startswith(_SESSION_TAG):
                 resolved.add(head[len(_SESSION_TAG) :])
-        owed = [d for d in owed if d.isoformat() not in resolved]
+        owed = [d for d in owed if d not in attempted and d.isoformat() not in resolved]
         if not owed:
-            return [], f"every session since {anchor.isoformat()} is scanned or explicitly skipped"
+            return [], (
+                f"every session since {since.isoformat()} had an approved-scope scan attempt "
+                "or is explicitly skipped"
+            )
         last_fail = session.scalar(
             select(JobRun)
             .where(JobRun.name.in_(_EOD_FAILURE_JOBS), JobRun.status == "failed")
@@ -1790,7 +1986,7 @@ def missed_sessions(now: datetime | None = None) -> tuple[list[date], str]:
             f"missed sessions ({names}) owed but backing off after a failed attempt at "
             f"{last_fail.started_at.isoformat()}"
         )
-    return owed, f"no approved-scope scan since {anchor.isoformat()}: missed {names}"
+    return owed, f"no approved-scope scan attempt for: {names}"
 
 
 def _covering_ingest(cutoff: datetime) -> tuple[int, datetime] | None:
@@ -1919,8 +2115,13 @@ def job_catch_up_missed_sessions() -> None:
         return
     try:
         _EOD_UNIT_STARTED_AT = _clock()
-        for session_date in owed:
-            _catch_up_missed_session(session_date)
+        try:
+            for session_date in owed:
+                _catch_up_missed_session(session_date)
+        finally:
+            # After the skip rows exist, so each owed session's outcome row
+            # cites its ``scan_skipped_missed_session`` job run.
+            record_scan_session_outcomes()
     finally:
         _EOD_UNIT_STARTED_AT = None
         _EOD_UPDATE_LOCK.release()
@@ -1944,6 +2145,9 @@ def job_catch_up() -> None:
     owed = _safe_missed_sessions()
     pending, reason = catch_up_pending()
     if not pending and not owed:
+        # Sessions that closed since the last EOD scan still get their
+        # explicit per-scope outcome row when nothing else is owed.
+        record_scan_session_outcomes()
         _log.info("catch_up.not_pending", reason=reason)
         return
     # Incident 2026-10-05: this used to call ``job_daily_eod_update()`` after a
@@ -1959,8 +2163,15 @@ def job_catch_up() -> None:
         # ingest and the latest session's ingest share the same budget.
         _EOD_UNIT_STARTED_AT = _clock()
         fetched = False
-        for session_date in owed:
-            fetched = _catch_up_missed_session(session_date) or fetched
+        try:
+            for session_date in owed:
+                fetched = _catch_up_missed_session(session_date) or fetched
+        finally:
+            # After the owed sessions' skip rows are written (not before), so
+            # each one's outcome row cites its ``scan_skipped_missed_session``
+            # job run; also when an owed session's ingest failed, so the
+            # ledger is never held back by a provider problem.
+            record_scan_session_outcomes()
         if pending:
             _log.warning("catch_up.running", reason=reason)
             # A pass made moments ago for a missed session ended today and so

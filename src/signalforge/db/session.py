@@ -23,13 +23,14 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any
 
 from fastapi import Request
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from signalforge.config import get_settings
 
@@ -45,15 +46,18 @@ def sqlite_busy_timeout_ms() -> int:
         return DEFAULT_BUSY_TIMEOUT_MS
 
 
-def _apply_sqlite_pragmas(dbapi_conn: Any, _rec: Any) -> None:
+def _apply_sqlite_pragmas(
+    dbapi_conn: Any, _rec: Any, *, busy_timeout_ms: int | None = None
+) -> None:
     # Disable pysqlite's implicit transaction management: we emit BEGIN /
     # BEGIN IMMEDIATE ourselves in the "begin" event (explicit scope).
     dbapi_conn.isolation_level = None
     cur = dbapi_conn.cursor()
+    timeout = sqlite_busy_timeout_ms() if busy_timeout_ms is None else max(0, busy_timeout_ms)
+    cur.execute(f"PRAGMA busy_timeout={timeout}")  # first: the pragmas below may wait
     cur.execute("PRAGMA journal_mode=WAL")
     cur.execute("PRAGMA synchronous=NORMAL")
     cur.execute("PRAGMA foreign_keys=ON")
-    cur.execute(f"PRAGMA busy_timeout={sqlite_busy_timeout_ms()}")
     cur.close()
 
 
@@ -62,7 +66,7 @@ def _sqlite_begin(conn: Any) -> None:
     conn.exec_driver_sql("BEGIN IMMEDIATE" if write else "BEGIN")
 
 
-def build_engine(url: str) -> Engine:
+def build_engine(url: str, *, busy_timeout_ms: int | None = None, pooled: bool = True) -> Engine:
     """An engine for ``url`` with this project's SQLite discipline attached.
 
     Separated from :func:`get_engine` so a second, explicitly-addressed database
@@ -70,21 +74,26 @@ def build_engine(url: str) -> Engine:
     ``BEGIN`` / ``BEGIN IMMEDIATE`` scoping as the configured one. A bulk run
     against a copy of the live file must not get a *different* concurrency
     contract from the file it will be merged back into.
+
+    ``busy_timeout_ms`` overrides the configured busy timeout for this engine
+    only; ``pooled=False`` closes every connection when it is released, so a
+    caller holds nothing open between uses (see :func:`isolated_write_scope`).
     """
     is_sqlite = url.startswith("sqlite")
+    timeout_ms = sqlite_busy_timeout_ms() if busy_timeout_ms is None else max(0, busy_timeout_ms)
+    extra: dict[str, Any] = {} if pooled else {"poolclass": NullPool}
     engine = create_engine(
         url,
         echo=False,
         future=True,
         pool_pre_ping=not is_sqlite,
         connect_args=(
-            {"check_same_thread": False, "timeout": sqlite_busy_timeout_ms() / 1000.0}
-            if is_sqlite
-            else {}
+            {"check_same_thread": False, "timeout": timeout_ms / 1000.0} if is_sqlite else {}
         ),
+        **extra,
     )
     if is_sqlite:
-        event.listen(engine, "connect", _apply_sqlite_pragmas)
+        event.listen(engine, "connect", partial(_apply_sqlite_pragmas, busy_timeout_ms=timeout_ms))
         event.listen(engine, "begin", _sqlite_begin)
     return engine
 
@@ -124,6 +133,59 @@ def session_scope(*, write: bool = False) -> Iterator[Session]:
         raise
     finally:
         session.close()
+
+
+@lru_cache(maxsize=4)
+def _isolated_engine(url: str, busy_timeout_ms: int) -> Engine:
+    return build_engine(url, busy_timeout_ms=busy_timeout_ms, pooled=False)
+
+
+@contextmanager
+def isolated_write_scope(*, busy_timeout_ms: int) -> Iterator[Session]:
+    """One short write transaction on its OWN connection to the configured
+    database, with its own busy timeout, closed again on exit.
+
+    For tiny bookkeeping writes that must land even while a long job is busy
+    (the worker heartbeat): the shared pool's 5 s busy timeout is sized for
+    jobs that retry, and a pooled connection would stay open between beats.
+    Nothing is held once the block exits — not a transaction, not a connection.
+    """
+    engine = _isolated_engine(get_settings().database_url, max(0, busy_timeout_ms))
+    is_sqlite = engine.url.get_backend_name().startswith("sqlite")
+    bind = engine.execution_options(sqlite_write=True) if is_sqlite else engine
+    session = Session(bind=bind, autoflush=False, expire_on_commit=False, future=True)
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+@contextmanager
+def read_phase(session: Session) -> Iterator[Session]:
+    """Run a slow read/compute block on ``session`` as a plain reader.
+
+    Ends whatever transaction is open (committing it), runs the block under
+    ``BEGIN`` (never ``IMMEDIATE``, so the WAL write lock is NOT held however
+    long the block takes), ends that read transaction and hands the session
+    back with the write intent it arrived with. Its next transaction therefore
+    begins fresh — a writer's ``BEGIN IMMEDIATE`` — never a read->write upgrade.
+    ORM objects loaded inside stay usable (``expire_on_commit=False``).
+    """
+    restore = has_write_intent(session)
+    session.commit()
+    set_write_intent(session, False)
+    try:
+        yield session
+    except Exception:
+        session.rollback()
+        set_write_intent(session, restore)
+        raise
+    session.commit()
+    set_write_intent(session, restore)
 
 
 def set_write_intent(session: Session, write: bool) -> None:
@@ -210,3 +272,4 @@ def reset_engine_cache() -> None:
     """Drop cached engine/sessionmaker (tests that switch DATABASE_URL)."""
     get_engine.cache_clear()
     get_sessionmaker.cache_clear()
+    _isolated_engine.cache_clear()
