@@ -94,9 +94,22 @@ first fills are allowed no sooner than the following session, after a recorded
 forward decision. The collector preserves open positions at each observation
 boundary, retains dividend receivables, and never liquidates merely to generate
 an interim report. Prior fills/marks/decisions must match on the next collection.
-Revised historical inputs, changed code, missing sessions or attempts to rewrite
-records block the study. Failed collection does not authorize retrospective
-backfill labelled as forward evidence.
+A vendor revision of an already-recorded OHLCV bar is quarantined: the study keeps
+the first-recorded bar, and the next collection record lists the revision
+(`vendor_revisions`, cumulative `retained_inputs`) instead of applying it. A split
+or dividend added, removed or changed on or before the last recorded session still
+blocks the study, because share and cash accounting would otherwise be wrong.
+A session that was not collected is recorded in `missed_sessions` (cumulative
+`blocked_entry_sessions`) and does not count toward `observed_sessions`. No entry
+is filled from a signal on the close before a missed session or on a missed
+session's own close (`entry_blocked_signal_days`), so the first session after a gap
+admits no entries either; collection continues and the first new entries are filled
+only after a recorded forward decision. Exits of already-open positions, marks and
+eligibility rows on a missed session are still replayed mechanically from the
+frozen rules. Changed code, a changed raw-input fingerprint or prior decisions after
+quarantine, changed books, strategy specs, cost scenarios or risk limits, or
+attempts to rewrite records still block the study. Failed collection does not
+authorize retrospective backfill labelled as forward evidence.
 
 At least 126 sessions, 30 closed trades per book and two trend regimes are required
 before an evidence review; maximum collection is 252 sessions. These are review
@@ -110,7 +123,19 @@ fetches only when a new completed session is due; repeats are idempotent. Its ca
 has a 2 GiB cap. macOS must be awake with the paths available. Check the isolated
 `status.json`, plan, collection records and dedicated log; this job is not part
 of the existing worker or Kronos study. A code change intentionally stops it;
-start a separately versioned study rather than editing the original plan.
+start a separately versioned study rather than editing the original plan. The one
+exception is an operator amendment limited to the two collection-protocol files
+(`research/prospective_funded.py`, `scripts/funded_forward.py`):
+`funded_forward.py amend /absolute/study --previous-tree /checkout/of/accepted/code
+--reason "..."` writes an append-only `amendments/NNNN.json` only if substituting
+the accepted versions of those files reproduces the accepted code digest. That
+proves only that every other frozen input (strategies, `research/action_replay.py`
+with its cost scenarios and risk limits, data and calendar code) is byte-identical.
+The two protocol files hold the record checks, review counting and kill-switch
+calls, so the amendment stores their full unified diffs for audit; the digest does
+not prove those changes harmless. Each collection must also repeat the last
+record's books, strategy specs, cost scenarios and risk limits exactly. The plan is
+never rewritten; adding a strategy (for example high52) requires a new study.
 
 Research signal only — no order was placed.
 
