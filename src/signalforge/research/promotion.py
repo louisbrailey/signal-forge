@@ -63,7 +63,9 @@ from signalforge import audit
 from signalforge.backtest.costs import CostModel
 from signalforge.backtest.leakage import LookaheadDetected, assert_no_lookahead
 from signalforge.backtest.regime import TREND_LOOKBACK, label_regimes
+from signalforge.config.hashing import config_hash as _identity_hash
 from signalforge.config.research import PromotionThresholds, ResearchConfig
+from signalforge.data.calendar import is_session, sessions
 from signalforge.data.intraday_coverage import intraday_rth_coverage
 from signalforge.data.repository import SourceFilter
 from signalforge.data.series import PriceSeries
@@ -72,6 +74,8 @@ from signalforge.db.models import (
     AuditLog,
     BacktestRun,
     DataSnapshot,
+    Instrument,
+    OHLCVDaily,
     Strategy,
     StrategyPromotionEvaluation,
     StrategySealedTest,
@@ -100,6 +104,7 @@ from signalforge.research.persistence import (
     upsert_strategy_version,
 )
 from signalforge.research.portfolio_metrics import compute_portfolio_metrics
+from signalforge.research.registry import StrategySpec
 from signalforge.research.sensitivity import MAX_GRID_POINTS, run_parameter_sensitivity
 from signalforge.research.strategies.base import BaselineStrategy
 
@@ -1843,6 +1848,152 @@ def _evaluation_gate_evidence(evaluation: StrategyPromotionEvaluation) -> dict[s
     }
 
 
+def _daily_development_calendar(
+    session: Session,
+    evaluation: StrategyPromotionEvaluation,
+    *,
+    spec: StrategySpec,
+    snapshot_id: int,
+    start: date,
+    until: date,
+    symbols: list[str],
+    source: SourceFilter,
+) -> dict[str, Any]:
+    """Calendar identity only; no prices, sealed metrics or backtest queries.
+
+    Both boundaries must imply the SAME final XNYS session. An earlier lock
+    that removes a trading session cannot be repaired by shortening the run.
+    Caller dates are never silently normalized, even with allow_mismatch.
+    """
+    if spec.horizon is Horizon.INTRADAY:
+        raise ValueError("development calendar policy supports daily EOD only; intraday refused")
+    s = StrategySealedTest
+    linked = session.execute(
+        select(
+            s.id, s.strategy_version_id, s.dataset_snapshot_id, s.window_start, s.window_end
+        ).where(s.id == evaluation.sealed_test_id)
+    ).one_or_none()
+    if (
+        linked is None
+        or linked.strategy_version_id != evaluation.strategy_version_id
+        or linked.dataset_snapshot_id != snapshot_id
+        or evaluation.dataset_snapshot_id != snapshot_id
+        or linked.window_end < linked.window_start
+    ):
+        raise ValueError("missing or wrong linked sealed boundary metadata; daily record refused")
+    locks = session.execute(
+        select(s.id, s.window_start)
+        .where(
+            or_(
+                s.strategy_version_id == evaluation.strategy_version_id,
+                s.dataset_snapshot_id == snapshot_id,
+            )
+        )
+        .order_by(s.window_start, s.id)
+    ).all()
+    if not locks:
+        raise ValueError("no applicable locked boundary; daily record refused")
+    earliest = locks[0].window_start
+    if until >= earliest:
+        raise ValueError(f"--until {until} is not before every sealed window ({earliest})")
+    linked_sessions = sessions(evaluation.window_start, linked.window_start - timedelta(days=1))
+    safe_sessions = sessions(evaluation.window_start, earliest - timedelta(days=1))
+    if not linked_sessions or not safe_sessions:
+        raise ValueError("no XNYS development sessions before both locked boundaries")
+    expected = safe_sessions[-1]
+    if expected != linked_sessions[-1]:
+        raise ValueError("conflicting trading boundaries remove an evaluated XNYS session; refused")
+    if not is_session(until) or until != expected:
+        raise ValueError(
+            f"--until must be the exact canonical XNYS session {expected}; got {until}"
+        )
+    data = evaluation.data_provenance_json or {}
+    coverage = data.get("coverage")
+    if not isinstance(coverage, str):
+        raise ValueError("evaluation input coverage unavailable; cannot attest the daily window")
+    try:
+        first, last = (date.fromisoformat(part) for part in coverage.split(".."))
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError(
+            "evaluation input coverage unavailable; cannot attest the daily window"
+        ) from None
+    if (first, last) != (linked_sessions[0], expected):
+        raise ValueError(
+            "evaluation input coverage does not attest the full canonical daily window"
+        )
+    sources = data.get("sources")
+    if (
+        not isinstance(sources, list)
+        or not sources
+        or not all(isinstance(x, str) and x for x in sources)
+    ):
+        raise ValueError("evaluation input sources unavailable; daily window identity unknown")
+    bars = data.get("bars")
+    if isinstance(bars, bool) or not isinstance(bars, int) or bars <= 0:
+        raise ValueError("evaluation input count unavailable; daily window identity unknown")
+    actual_sources = [source] if isinstance(source, str) else list(source or ())
+    expected_identity = {
+        "symbols": list(evaluation.universe_json),
+        "sources": sorted(sources),
+        "start": evaluation.window_start.isoformat(),
+        "first_session": first.isoformat(),
+        "last_session": last.isoformat(),
+    }
+    requested_identity = {
+        "symbols": symbols,
+        "sources": sorted(actual_sources),
+        "start": start.isoformat(),
+        "first_session": safe_sessions[0].isoformat(),
+        "last_session": until.isoformat(),
+    }
+    if _identity_hash(expected_identity) != _identity_hash(requested_identity):
+        raise ValueError(
+            "evaluation symbol/source/window identity differs; daily calendar record refused"
+        )
+    return {
+        "policy": "DAILY-EOD-XNYS-1",
+        "calendar": "XNYS",
+        "frequency": "daily_eod",
+        "linked_lock": {
+            "id": linked.id,
+            "window_start": linked.window_start.isoformat(),
+            "window_end": linked.window_end.isoformat(),
+        },
+        "earliest_locked_boundary": earliest.isoformat(),
+        "earliest_lock_ids": [r.id for r in locks if r.window_start == earliest],
+        "expected_trading_cutoff": expected.isoformat(),
+        "evaluation_coverage": coverage,
+        "evaluation_input_scope_sha256": _identity_hash(expected_identity),
+        "requested_input_scope_sha256": _identity_hash(requested_identity),
+        "xnys_session_grid_sha256": _identity_hash(
+            {"sessions": [d.isoformat() for d in safe_sessions]}
+        ),
+        "historical_price_content_hash": "not recorded; unchanged prices are not attested",
+    }
+
+
+def _require_daily_cutoff_coverage(
+    session: Session, symbols: list[str], source: SourceFilter, until: date, proxy_symbol: str
+) -> None:
+    """Check only the validated final development session, never a
+    sealed bar or a last-observed-row fallback. Missing data is a refusal."""
+    required = {symbol.upper() for symbol in symbols} | {proxy_symbol.upper()}
+    sources = [source] if isinstance(source, str) else list(source or ())
+    found = set(
+        session.scalars(
+            select(Instrument.symbol)
+            .join(OHLCVDaily, OHLCVDaily.instrument_id == Instrument.id)
+            .where(
+                Instrument.symbol.in_(required),
+                OHLCVDaily.session_date == until,
+                OHLCVDaily.source.in_(sources),
+            )
+        )
+    )
+    if missing := sorted(required - found):
+        raise ValueError(f"missing required XNYS cutoff session {until}: {', '.join(missing)}")
+
+
 def record_development_oos_backtest(
     session: Session,
     strategy: BaselineStrategy,
@@ -1862,6 +2013,11 @@ def record_development_oos_backtest(
     ``persist`` is False) record it through ``persist_backtest_result`` so
     the scan's out-of-sample gate and the health monitor have a value.
 
+    Daily EOD only: ``until`` must be the exact common final XNYS session
+    before the linked and earliest applicable locked boundaries. Caller
+    dates are never normalized; intraday, lost coverage and conflicting
+    trading boundaries are refused independently of override flags.
+
     It changes no status and takes no sealed look: ``until`` must fall
     strictly before every sealed window locked on the snapshot or for the
     version, and the run is refused if none has been locked (the boundary
@@ -1877,6 +2033,8 @@ def record_development_oos_backtest(
 
         config = effective_research_config(session)
     spec = strategy.spec()
+    if spec.horizon is Horizon.INTRADAY:
+        raise ValueError("development calendar policy supports daily EOD only; intraday refused")
     snapshot = session.get(DataSnapshot, dataset_snapshot_id)
     if snapshot is None:
         raise ValueError(f"no dataset snapshot with id {dataset_snapshot_id}")
@@ -1939,12 +2097,6 @@ def record_development_oos_backtest(
         source = recorded[0] if len(recorded) == 1 else recorded
     source_json: Any = source if isinstance(source, str) else list(source)
 
-    eval_sealed = (
-        session.get(StrategySealedTest, evaluation.sealed_test_id)
-        if evaluation.sealed_test_id is not None
-        else None
-    )
-    eval_dev_end = None if eval_sealed is None else eval_sealed.window_start - timedelta(days=1)
     eval_sources = (evaluation.data_provenance_json or {}).get("sources") or []
     # Trade order follows symbol order and the bootstrap CI is order-dependent,
     # so reuse the evaluation's own ordering whenever it covers the same set;
@@ -1953,10 +2105,21 @@ def record_development_oos_backtest(
     symbols = list(snapshot.symbols_json)
     if sorted(symbols) == sorted(eval_universe):
         symbols = eval_universe
+    calendar = _daily_development_calendar(
+        session,
+        evaluation,
+        spec=spec,
+        snapshot_id=snapshot.id,
+        start=start,
+        until=until,
+        symbols=symbols,
+        source=source,
+    )
+    _require_daily_cutoff_coverage(session, symbols, source, until, proxy_symbol)
     reproduces = {
         "symbols": symbols == eval_universe,
         "window_start": start == evaluation.window_start,
-        "until": eval_dev_end is not None and until == eval_dev_end,
+        "until": until.isoformat() == calendar["expected_trading_cutoff"],
         "source": sorted([source] if isinstance(source, str) else source) == sorted(eval_sources),
         "config_hash": config.config_hash == evaluation.config_hash,
     }
@@ -1971,6 +2134,17 @@ def record_development_oos_backtest(
         source=source,
         config=config,
     )
+    measured = evaluation.data_provenance_json or {}
+    if (
+        result.data.first is None
+        or result.data.last != until
+        or f"{result.data.first}..{result.data.last}" != measured.get("coverage")
+        or result.data.bars != measured.get("bars")
+        or sorted(result.data.sources) != sorted(eval_sources)
+    ):
+        raise ValueError(
+            "computed daily input coverage/source/count differs from evaluation; refused"
+        )
     provenance: dict[str, Any] = {
         "purpose": "development_oos",
         "dataset_snapshot": {"id": snapshot.id, "key": snapshot.key},
@@ -1980,6 +2154,7 @@ def record_development_oos_backtest(
         "proxy_symbol": proxy_symbol,
         "promotion_evaluation_id": evaluation.id,
         "reproduces_evaluation": reproduces,
+        "development_calendar": calendar,
         "spec_json_hash": current_hash,
         "code_git_sha": spec.git_sha,
         "is_oos_split": "per-symbol fraction (backtest_runner._is_boundary)",
@@ -2057,7 +2232,9 @@ def persist_development_oos_record(
     is refused unless ``allow_mismatch`` — it would unlock candidates on a
     metric gates 1-8 never measured — and the override is written into the
     provenance and audit event. A run identical to one already recorded is
-    refused unless ``allow_duplicate``."""
+    refused unless ``allow_duplicate``. Daily calendar, linked-boundary and
+    required-session coverage checks are independently repeated here and
+    can never be waived by either override flag."""
     mismatched = sorted(k for k, ok in record.reproduces_evaluation.items() if not ok)
     if mismatched and not allow_mismatch:
         raise ValueError(
@@ -2087,6 +2264,35 @@ def persist_development_oos_record(
             f"refusing to record: --until {record.until} is not before the sealed window "
             f"({boundary or 'unknown'})"
         )
+    # Independent short-writer recheck: an intervening lock, lost cutoff
+    # coverage or stripped calendar provenance cannot be bypassed by override.
+    evaluation = session.get(StrategyPromotionEvaluation, record.evaluation_id)
+    if (
+        evaluation is None
+        or evaluation.strategy_version_id != record.strategy_version_id
+        or spec_json_hash(record.result.spec) != evaluation.spec_json_hash
+    ):
+        raise ValueError("daily record evaluation identity changed; recompute before recording")
+    calendar = _daily_development_calendar(
+        session,
+        evaluation,
+        spec=record.result.spec,
+        snapshot_id=record.dataset_snapshot_id,
+        start=record.start,
+        until=record.until,
+        symbols=record.result.symbols,
+        source=record.provenance.get("source"),
+    )
+    _require_daily_cutoff_coverage(
+        session,
+        record.result.symbols,
+        record.provenance.get("source"),
+        record.until,
+        str(record.provenance.get("proxy_symbol", "SPY")),
+    )
+    if provenance.get("development_calendar") not in (None, calendar):
+        raise ValueError("daily calendar boundary provenance changed; recompute before recording")
+    provenance["development_calendar"] = calendar
     version = session.get(StrategyVersion, record.strategy_version_id)
     if version is None:
         raise ValueError(f"strategy_version {record.strategy_version_id} no longer exists")
