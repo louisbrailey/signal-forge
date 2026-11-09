@@ -1,0 +1,378 @@
+{
+  "cache_cap_bytes": 2147483648,
+  "capital_per_book_usd": "10000",
+  "code_digest": "56d7a55be871f22b04cfd3499247c2fefb41c6fda17b996ba310e28f181043c9", "_fixture_note": "# pragma: allowlist secret - historical code digest, not a credential",
+  "created_at": "2026-11-03T19:38:18.154204+00:00",
+  "disclaimer": "Research signal only \u2014 no order was placed.",
+  "first_entry_session": "2026-11-05",
+  "first_observation_session": "2026-11-04",
+  "history_start": "2016-10-17",
+  "maximum_sessions": 252,
+  "metadata": {
+    "AAPL": {
+      "instrument_type": "stock",
+      "sector": "Technology"
+    },
+    "AMZN": {
+      "instrument_type": "stock",
+      "sector": "Consumer Discretionary"
+    },
+    "DIA": {
+      "instrument_type": "etf",
+      "listing_date": "1998-01-13",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:28:20.754535+00:00\", \"endpoint\": \"/v3/reference/tickers/DIA\", \"list_date\": \"1998-01-13\", \"sha256\": \"b7516622bdabb7053361937287c8fa66fd624cf2f94256eb5e17c5b14afb9cc7\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "ETF:DIA"
+    },
+    "GOOGL": {
+      "instrument_type": "stock",
+      "sector": "Technology"
+    },
+    "HD": {
+      "instrument_type": "stock",
+      "sector": "Consumer Discretionary"
+    },
+    "IWM": {
+      "instrument_type": "etf",
+      "listing_date": "2000-05-22",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:28:08.652125+00:00\", \"endpoint\": \"/v3/reference/tickers/IWM\", \"list_date\": \"2000-05-22\", \"sha256\": \"c0ccec6018dc1f22ee5be9c1ec2d021cacac44bf8f1a1872318630c0eff863eb\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "ETF:IWM"
+    },
+    "JPM": {
+      "instrument_type": "stock",
+      "sector": "Financials"
+    },
+    "META": {
+      "instrument_type": "stock",
+      "sector": "Technology"
+    },
+    "MSFT": {
+      "instrument_type": "stock",
+      "sector": "Technology"
+    },
+    "NVDA": {
+      "instrument_type": "stock",
+      "sector": "Technology"
+    },
+    "QQQ": {
+      "instrument_type": "etf",
+      "listing_date": "1999-03-10",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:27:56.515094+00:00\", \"endpoint\": \"/v3/reference/tickers/QQQ\", \"list_date\": \"1999-03-10\", \"sha256\": \"882cf17c1fba9411b409149568530e74e4c72cbf6ba73a977bdd346c12fd386c\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "ETF:QQQ"
+    },
+    "SPY": {
+      "instrument_type": "etf",
+      "listing_date": "1993-01-22",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:27:44.354158+00:00\", \"endpoint\": \"/v3/reference/tickers/SPY\", \"list_date\": \"1993-01-22\", \"sha256\": \"7b413e685d2d9d12a0a3c0fd90d6ecd17e49cde93b7474229b951c45c646fc8d\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "ETF:SPY"
+    },
+    "UNH": {
+      "instrument_type": "stock",
+      "sector": "Financials"
+    },
+    "XLB": {
+      "instrument_type": "etf",
+      "listing_date": "1998-12-16",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:29:57.988453+00:00\", \"endpoint\": \"/v3/reference/tickers/XLB\", \"list_date\": \"1998-12-16\", \"sha256\": \"c12ce677f2b5ea9510e6ba5da2e66d90751805a6724e83a7c7729acf63fae3f8\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "Materials"
+    },
+    "XLC": {
+      "instrument_type": "etf",
+      "listing_date": "2018-06-18",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:30:34.407836+00:00\", \"endpoint\": \"/v3/reference/tickers/XLC\", \"list_date\": \"2018-06-18\", \"sha256\": \"5cd0e1121809df5a9fd3ebb1c989ce6c9bd6c4d43cc5d23ec8bc921b6efe3e5a\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "Communication Services"
+    },
+    "XLE": {
+      "instrument_type": "etf",
+      "listing_date": "1998-12-16",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:28:57.189269+00:00\", \"endpoint\": \"/v3/reference/tickers/XLE\", \"list_date\": \"1998-12-16\", \"sha256\": \"d97380c963e19131877cd0ce3a38d93ffac40a0d552f06e0da8a946f81471fab\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "Energy"
+    },
+    "XLF": {
+      "instrument_type": "etf",
+      "listing_date": "1998-12-16",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:28:45.099852+00:00\", \"endpoint\": \"/v3/reference/tickers/XLF\", \"list_date\": \"1998-12-16\", \"sha256\": \"4bb595bab368fdc9e77b365bdd94002ab89357d6d7f65938b5de26b7ca36ec3d\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "Financials"
+    },
+    "XLI": {
+      "instrument_type": "etf",
+      "listing_date": "1998-12-16",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:29:45.823840+00:00\", \"endpoint\": \"/v3/reference/tickers/XLI\", \"list_date\": \"1998-12-16\", \"sha256\": \"ee29eb131bd7fa8d4cd883d08acca2ffd1dd1a1b9d265b83ad1e77eb6935cce1\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "Industrials"
+    },
+    "XLK": {
+      "instrument_type": "etf",
+      "listing_date": "1998-12-16",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:28:32.965913+00:00\", \"endpoint\": \"/v3/reference/tickers/XLK\", \"list_date\": \"1998-12-16\", \"sha256\": \"f103f0bc6e7a2849b282f0987cac58aeb1b6edab161c0e4004f2d0ea6cf1e7aa\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "Technology"
+    },
+    "XLP": {
+      "instrument_type": "etf",
+      "listing_date": "1998-12-16",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:29:33.647767+00:00\", \"endpoint\": \"/v3/reference/tickers/XLP\", \"list_date\": \"1998-12-16\", \"sha256\": \"ca66ddbf1363dcddc76ec36e7fe6a7a97ea1e0e7f8afedd062a5d95c89fc8187\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "Consumer Staples"
+    },
+    "XLRE": {
+      "instrument_type": "etf",
+      "listing_date": "2015-10-07",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:30:22.234445+00:00\", \"endpoint\": \"/v3/reference/tickers/XLRE\", \"list_date\": \"2015-10-07\", \"sha256\": \"65c95e8ed858722431746d3a835bf6b14f405ea78d6827a7df489ce31832033e\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "Real Estate"
+    },
+    "XLU": {
+      "instrument_type": "etf",
+      "listing_date": "1998-12-16",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:30:10.118796+00:00\", \"endpoint\": \"/v3/reference/tickers/XLU\", \"list_date\": \"1998-12-16\", \"sha256\": \"5117480802f77b33571ee6538d49acc7b45ba39f04705cda28780cd29de26477\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "Utilities"
+    },
+    "XLV": {
+      "instrument_type": "etf",
+      "listing_date": "1998-12-16",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:29:09.394969+00:00\", \"endpoint\": \"/v3/reference/tickers/XLV\", \"list_date\": \"1998-12-16\", \"sha256\": \"4e55941d13b4fa472fdb2f0313760c3b84d55771d9b6471a98774744bcfa2dd8\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "Health Care"
+    },
+    "XLY": {
+      "instrument_type": "etf",
+      "listing_date": "1998-12-16",
+      "listing_reference": "{\"checked_at\": \"2026-11-03T19:29:21.539062+00:00\", \"endpoint\": \"/v3/reference/tickers/XLY\", \"list_date\": \"1998-12-16\", \"sha256\": \"f55fc58397f044d79c4f3aa73c9385ebd8fe992597ff0948a21118eb0a062244\", \"source\": \"massive\", \"type\": \"ETF\"}",
+      "sector": "Consumer Discretionary"
+    },
+    "XOM": {
+      "instrument_type": "stock",
+      "sector": "Energy"
+    }
+  },
+  "minimum_closed_trades_per_book": 30,
+  "minimum_sessions_before_review": 126,
+  "minimum_trades_per_regime": 10,
+  "minimum_trend_regimes": 2,
+  "policy": "All five daily baselines; base/stress costs; no tuning or auto-promotion.",
+  "schema": "funded-forward-v1",
+  "strategies": [
+    {
+      "assumed_transaction_costs": "ResearchConfig commission model (default 0)",
+      "entry_conditions": "trend alignment + volume confirmation + regime gate",
+      "event_filters": "excluded earnings window from ResearchConfig.events",
+      "exit_logic": "target = entry + 3.0 * ATR(14)",
+      "feature_definitions": [
+        "sma_fast=SMA(close,20)",
+        "sma_slow=SMA(close,50)",
+        "vol_ratio=volume(t)/mean(volume,20)",
+        "atr=ATR(14)"
+      ],
+      "git_sha": "a611b53",
+      "horizon": "SHORT_SWING",
+      "in_sample_period": "first 60% of the available history",
+      "invalidation_conditions": "close back below SMA(slow)",
+      "known_failure_modes": [
+        "whipsaw in range-bound regimes",
+        "volume spike on news that reverses",
+        "gap through the stop"
+      ],
+      "liquidity_requirements": "see ResearchConfig.liquidity (price / ADDV / spread)",
+      "name": "trend_continuation.short_swing",
+      "notes": "",
+      "out_of_sample_period": "last 40% of the available history",
+      "permits_long": true,
+      "permits_short": true,
+      "required_data_sources": [
+        "BAR_DAILY"
+      ],
+      "rule_definition": "LONG when close > SMA(slow), SMA(fast) > SMA(slow), close > SMA(fast), and today's volume >= 1.3x the 20-day average, with the market regime not risk-off. SHORT is the mirror image and only when shorts are enabled and the regime is risk-off.",
+      "slippage_model": "ResearchConfig slippage_bps + half spread",
+      "status": "experimental",
+      "stop_logic": "stop = entry - 1.5 * ATR(14)",
+      "test_date_range": "set per backtest run",
+      "time_stop": "10 sessions",
+      "version": "0.1.0",
+      "walkforward_result_ref": "reports/trend_continuation.short_swing-0.1.0.md"
+    },
+    {
+      "assumed_transaction_costs": "ResearchConfig commission model (default 0)",
+      "entry_conditions": "trend alignment + volume confirmation + regime gate",
+      "event_filters": "excluded earnings window from ResearchConfig.events",
+      "exit_logic": "target = entry + 3.0 * ATR(14)",
+      "feature_definitions": [
+        "sma_fast=SMA(close,20)",
+        "sma_slow=SMA(close,50)",
+        "vol_ratio=volume(t)/mean(volume,20)",
+        "atr=ATR(14)"
+      ],
+      "git_sha": "a611b53",
+      "horizon": "MEDIUM_SWING",
+      "in_sample_period": "first 60% of the available history",
+      "invalidation_conditions": "close back below SMA(slow)",
+      "known_failure_modes": [
+        "whipsaw in range-bound regimes",
+        "volume spike on news that reverses",
+        "gap through the stop"
+      ],
+      "liquidity_requirements": "see ResearchConfig.liquidity (price / ADDV / spread)",
+      "name": "trend_continuation.medium_swing",
+      "notes": "",
+      "out_of_sample_period": "last 40% of the available history",
+      "permits_long": true,
+      "permits_short": true,
+      "required_data_sources": [
+        "BAR_DAILY"
+      ],
+      "rule_definition": "LONG when close > SMA(slow), SMA(fast) > SMA(slow), close > SMA(fast), and today's volume >= 1.3x the 20-day average, with the market regime not risk-off. SHORT is the mirror image and only when shorts are enabled and the regime is risk-off.",
+      "slippage_model": "ResearchConfig slippage_bps + half spread",
+      "status": "experimental",
+      "stop_logic": "stop = entry - 1.5 * ATR(14)",
+      "test_date_range": "set per backtest run",
+      "time_stop": "40 sessions",
+      "version": "0.1.0",
+      "walkforward_result_ref": "reports/trend_continuation.medium_swing-0.1.0.md"
+    },
+    {
+      "assumed_transaction_costs": "ResearchConfig commission model (default 0)",
+      "entry_conditions": "z_ret <= -2.0 and close < sma and close > trend and regime not BEAR",
+      "event_filters": "excluded earnings window from ResearchConfig.events",
+      "exit_logic": "target = SMA(20) at entry",
+      "feature_definitions": [
+        "z_ret = (r_t - mean(r,20)) / std(r,20)",
+        "sma = SMA(close,20)",
+        "atr = ATR(14)",
+        "trend = SMA(close,200)"
+      ],
+      "git_sha": "a611b53",
+      "horizon": "SHORT_SWING",
+      "in_sample_period": "first 60% of the available history",
+      "invalidation_conditions": "a second large down-day (z stays extended), or the trade is closed",
+      "known_failure_modes": [
+        "catching a falling knife in a real downtrend",
+        "gap-down through the stop after a news shock",
+        "regime filter too permissive near a top"
+      ],
+      "liquidity_requirements": "see ResearchConfig.liquidity",
+      "name": "mean_reversion.short_swing",
+      "notes": "",
+      "out_of_sample_period": "last 40% of the available history",
+      "permits_long": true,
+      "permits_short": false,
+      "required_data_sources": [
+        "BAR_DAILY"
+      ],
+      "rule_definition": "LONG when the 1-day return's z-score over 20 days is <= -2.0 and price is below SMA(20) but above its own SMA(200), unless the regime is strongly bearish. Target is a reversion to that SMA.",
+      "slippage_model": "ResearchConfig slippage_bps + half spread",
+      "status": "experimental",
+      "stop_logic": "stop = entry - 2.0 * ATR(14)",
+      "test_date_range": "set per backtest run",
+      "time_stop": "6 sessions",
+      "version": "0.2.0",
+      "walkforward_result_ref": "reports/mean_reversion.short_swing-0.2.0.md"
+    },
+    {
+      "assumed_transaction_costs": "ResearchConfig commission model (default 0)",
+      "entry_conditions": "ret - market_ret >= excess_return_min and close > sma and regime BULL",
+      "event_filters": "excluded earnings window from ResearchConfig.events",
+      "exit_logic": "target = entry + 5.0 * ATR(14)",
+      "feature_definitions": [
+        "ret = rolling_return(close, 63)",
+        "market_ret = regime.market_ret_63d",
+        "sma = SMA(close, 100)",
+        "atr = ATR(14)"
+      ],
+      "git_sha": "a611b53",
+      "horizon": "MEDIUM_SWING",
+      "in_sample_period": "first 60% of the available history",
+      "invalidation_conditions": "close back below SMA(window) or relative strength decays",
+      "known_failure_modes": [
+        "momentum crash / sharp mean reversion of winners",
+        "proxy-relative strength is not cross-sectional rank",
+        "regime flips bull->bear mid-hold"
+      ],
+      "liquidity_requirements": "see ResearchConfig.liquidity",
+      "name": "relative_strength.medium_swing",
+      "notes": "",
+      "out_of_sample_period": "last 40% of the available history",
+      "permits_long": true,
+      "permits_short": false,
+      "required_data_sources": [
+        "BAR_DAILY"
+      ],
+      "rule_definition": "LONG when the 63-session return exceeds the market proxy's return over the same window by at least 5%, price is above SMA(100), and the regime trend is BULL. Long only.",
+      "slippage_model": "ResearchConfig slippage_bps + half spread",
+      "status": "experimental",
+      "stop_logic": "stop = entry - 2.5 * ATR(14)",
+      "test_date_range": "set per backtest run",
+      "time_stop": "40 sessions",
+      "version": "0.1.0",
+      "walkforward_result_ref": "reports/relative_strength.medium_swing-0.1.0.md"
+    },
+    {
+      "assumed_transaction_costs": "ResearchConfig commission model (default 0)",
+      "entry_conditions": "contraction(t - squeeze_lag) <= contraction_max and TR(t) >= release_min * ATR(50, t-1) and close beyond the Donchian edge",
+      "event_filters": "excluded earnings window from ResearchConfig.events",
+      "exit_logic": "target = entry +/- 3.5 * ATR(14)",
+      "feature_definitions": [
+        "contraction = ATR(10) / ATR(50), evaluated at t - 5",
+        "release = true_range(t) / ATR(50, t - 1), required >= 1.0",
+        "donchian_high(20) / donchian_low(20) (excluding today)",
+        "atr = ATR(14)"
+      ],
+      "git_sha": "a611b53",
+      "horizon": "SHORT_SWING",
+      "in_sample_period": "first 60% of the available history",
+      "invalidation_conditions": "close back inside the channel",
+      "known_failure_modes": [
+        "false breakout / immediate reversal back into the range",
+        "contraction filter admits low-volume drift that fails to follow through",
+        "gap through the stop"
+      ],
+      "liquidity_requirements": "see ResearchConfig.liquidity",
+      "name": "volatility_breakout.short_swing",
+      "notes": "",
+      "out_of_sample_period": "last 40% of the available history",
+      "permits_long": true,
+      "permits_short": true,
+      "required_data_sources": [
+        "BAR_DAILY"
+      ],
+      "rule_definition": "When ATR(10)/ATR(50) at t - 5 was <= 0.75 (volatility was contracting BEFORE the break) and the break bar's true range is at least 1.0 x ATR(50) measured at t - 1 (the release), and price closes above the 20-day Donchian high, go LONG (SHORT on a break of the Donchian low when shorts are enabled and the regime is BEAR). ATR stop and target.",
+      "slippage_model": "ResearchConfig slippage_bps + half spread",
+      "status": "experimental",
+      "stop_logic": "stop = entry -/+ 1.75 * ATR(14)",
+      "test_date_range": "set per backtest run",
+      "time_stop": "10 sessions",
+      "version": "0.2.0",
+      "walkforward_result_ref": "reports/volatility_breakout.short_swing-0.2.0.md"
+    }
+  ],
+  "symbols": [
+    "SPY",
+    "QQQ",
+    "AAPL",
+    "AMZN",
+    "DIA",
+    "GOOGL",
+    "HD",
+    "IWM",
+    "JPM",
+    "META",
+    "FB",
+    "MSFT",
+    "NVDA",
+    "UNH",
+    "XLB",
+    "XLC",
+    "XLE",
+    "XLF",
+    "XLI",
+    "XLK",
+    "XLP",
+    "XLRE",
+    "XLU",
+    "XLV",
+    "XLY",
+    "XOM"
+  ],
+  "ticker_changes": [
+    {
+      "effective": "2022-06-09",
+      "evidence": "{\"passed\": true, \"checks\": [{\"name\": \"dates_ordered_no_duplicates\", \"passed\": true, \"detail\": \"last FB session 2022-06-08 < first META session 2022-06-09, zero overlapping dates\"}, {\"name\": \"no_unexplained_session_gap\", \"passed\": true, \"detail\": \"no NYSE session falls strictly between the two legs\"}, {\"name\": \"price_continuity\", \"passed\": true, \"detail\": \"FB close 196.6400 -> META open 194.2800 (+1.20% move; tolerance 15%)\"}, {\"name\": \"volume_sane\", \"passed\": true, \"detail\": \"FB volume 22,267,154, META volume 23,501,579\"}, {\"name\": \"split_factor_unity\", \"passed\": true, \"detail\": \"FB split_factor=1.0, META split_factor=1.0 (need both == 1.0)\"}, {\"name\": \"same_source_provenance\", \"passed\": true, \"detail\": \"FB source='massive', META source='massive', expected 'massive' for both\"}], \"diagnostics\": {\"pre_transition_contamination\": {\"found\": true, \"n_bars\": 148, \"first_date\": \"2021-06-30\", \"last_date\": \"2022-01-28\", \"note\": \"148 bar(s) exist under META dated on/before FB's last session (2022-06-08) \\u2014 evidence the META ticker was held by a different, unrelated entity before this corporate action. EXCLUDED from the bridge, which uses only META bars strictly after 2022-06-08. Those raw bars remain in META's own instrument, untouched \\u2014 the derived/bridged instrument never includes them.\"}}}",
+      "new": "META",
+      "old": "FB",
+      "source": "massive"
+    }
+  ]
+}

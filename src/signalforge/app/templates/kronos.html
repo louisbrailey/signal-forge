@@ -6,12 +6,15 @@
 {{ page_intro('Research on Kronos, an open-source AI model that forecasts price paths. It runs in shadow: forecasts are recorded and scored later, but never used to trade.') }}
 <section id="collection-panel" class="my-4 border rounded p-4 overflow-x-auto" hx-get="/kronos" hx-trigger="every 60s" hx-select="#collection-panel" hx-swap="outerHTML" aria-labelledby="collection-title">
 <h2 id="collection-title" class="text-xl font-semibold">Comparison books · automatic collection</h2>
+<p>Generation {{ collection.generation or 'unavailable' }} · {{ 'Active studies' if collection.mode == 'active' else 'Legacy configuration' }}{% if collection.release_sha %} · Release {{ collection.release_sha[:12] }}{% endif %}</p>
 <p role="status"><strong>{{ collection.health }}</strong> · Last collector check: {{ collection.checked_at or 'Unavailable' }} UTC</p>
 <p class="text-sm">Checks every minute while this Mac is awake. Collects once after a successful approved daily scan. Waiting outside the eligible window is normal.</p>
 <table class="w-full text-left text-sm"><thead><tr><th>Book</th><th>Collection status</th><th>Last successful collection (UTC)</th><th>Market session</th></tr></thead><tbody>
-{% for book in collection.books %}<tr class="border-t"><td>{{ book.name }}</td><td>{{ book.status }}</td><td>{{ book.last_success or 'No successful collection in retained metadata' }}</td><td>{{ book.session or '—' }}</td></tr>{% else %}<tr><td colspan="4">Collection metadata unavailable. This does not establish a successful collection.</td></tr>{% endfor %}
+{% for book in collection.books %}<tr class="border-t"><td>{{ book.name }}{% if book.start %}<br>Future study from {{ book.start }} · Lineage {{ book.request_hash[:12] }}{% endif %}</td><td>{{ book.status }}</td><td>{{ book.last_success or 'No successful collection in retained metadata' }}</td><td>{{ book.session or '—' }}</td></tr>{% else %}<tr><td colspan="4">Collection metadata unavailable. This does not establish a successful collection.</td></tr>{% endfor %}
 </tbody></table>
 <p class="text-sm">Operational status only. Frozen study rules and interim performance are not displayed. Research signal only — no order was placed.</p>
+{% if collection.forward %}<h3>Active forward study · {{ collection.forward.name }}</h3><p>{{ collection.forward.health }} · Future study from {{ collection.forward.start }} · Last check {{ collection.forward.checked_at or 'Unavailable' }}</p>{% endif %}
+{% if collection.archive %}<details id="archived-study-status"><summary>Archived generations · separate operational metadata</summary>{% for archived in collection.archive %}<h3>Archived generation {{ archived.generation }}</h3><p>{{ archived.health }} · Last check {{ archived.checked_at or 'Unavailable' }}</p><ul>{% for book in archived.books %}<li>{{ book.name }} · {{ book.status }} · Last collection {{ book.last_success or 'Unavailable' }}</li>{% endfor %}</ul>{% endfor %}<p>Archived status does not establish active study health. Results are not combined.</p></details>{% endif %}
 </section>
 <section id="shadow-panel" class="my-4 border rounded p-4 overflow-x-auto" hx-get="/kronos" hx-trigger="every 60s" hx-select="#shadow-panel" hx-swap="outerHTML">
 <h2 class="text-xl font-semibold">Background research queue</h2>

@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from signalforge import study_registry as registry
 from signalforge.data.calendar import last_closed_session, rth_bounds_utc
 from signalforge.db.models import AuditLog, JobRun, ScanRun
 from signalforge.experiments.comparison import ROOT, advance, open_books, source_engine
@@ -201,9 +202,18 @@ def poll(
     return results
 
 
-def save_status(path: Path, results: list[dict]) -> None:
+def save_status(path: Path, results: list[dict], snapshot: dict | None = None) -> None:
     """Bounded atomic status plus last 64 transitions; no outcomes or secrets."""
     previous = json.loads(path.read_text()) if path.exists() else {}
+    if (
+        snapshot is not None
+        and previous
+        and (
+            previous.get("generation") != snapshot["generation"]
+            or previous.get("registry_hash") != snapshot["hash"]
+        )
+    ):
+        raise ValueError("Active collector state belongs to another generation")
     history = previous.get("transitions", [])
     brief = [{k: v for k, v in r.items() if k != "checked_at"} for r in results]
     old = [{k: v for k, v in r.items() if k != "checked_at"} for r in previous.get("results", [])]
@@ -225,6 +235,11 @@ def save_status(path: Path, results: list[dict]) -> None:
                     "results": results,
                     "transitions": history,
                     "last_success": successes,
+                    **(
+                        {"generation": snapshot["generation"], "registry_hash": snapshot["hash"]}
+                        if snapshot
+                        else {}
+                    ),
                 },
                 f,
                 indent=2,
@@ -236,6 +251,49 @@ def save_status(path: Path, results: list[dict]) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def run_poll(
+    directories: list[Path],
+    state_dir: Path,
+    *,
+    collect: bool = True,
+    registry_path: Path | None = None,
+    generation: int | None = None,
+) -> list[dict]:
+    snapshot = None
+    if registry_path is not None:
+        if generation is None:
+            raise ValueError("Active collector requires --expected-generation")
+        snapshot = registry.pin_collector(registry_path, generation, "kronos", directories)
+        if (state_dir / "status.json").resolve() != Path(snapshot["status_path"]).resolve():
+            raise ValueError("Active collector state path mismatch")
+    elif any((d / "refresh-lineage.json").exists() for d in directories):
+        raise ValueError("Versioned studies require an active registry")
+    state_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    with (state_dir / "collector.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        status_path = state_dir / "status.json"
+        old = registry.read_json(status_path, limit=262144) if status_path.exists() else {}
+        if (
+            snapshot
+            and old
+            and (
+                old.get("generation") != snapshot["generation"]
+                or old.get("registry_hash") != snapshot["hash"]
+            )
+        ):
+            raise ValueError("Active collector state belongs to another generation")
+        previous = {r["experiment"]: r for r in old.get("results", [])}
+        result = poll(directories, collect=collect, previous=previous)
+        if snapshot is not None:
+            assert registry_path is not None
+            registry.publish_current(
+                registry_path, snapshot, lambda: save_status(status_path, result, snapshot)
+            )
+        else:
+            save_status(status_path, result)
+        return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkout", type=Path, required=True)
@@ -243,6 +301,8 @@ def main() -> int:
     parser.add_argument("--env-file", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument("--registry", type=Path)
+    parser.add_argument("--expected-generation", type=int)
     args = parser.parse_args()
     if ROOT.resolve() != args.checkout.resolve():
         raise ValueError("Frozen import path mismatch")
@@ -251,19 +311,18 @@ def main() -> int:
     from dotenv import load_dotenv
 
     load_dotenv(args.env_file, override=False)
-    args.state_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
-    with (args.state_dir / "collector.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return 0
-        status_path = args.state_dir / "status.json"
-        old = json.loads(status_path.read_text()) if status_path.exists() else {}
-        previous = {r["experiment"]: r for r in old.get("results", [])}
-        result = poll(args.experiment, collect=not args.check_only, previous=previous)
-        save_status(args.state_dir / "status.json", result)
-        print(json.dumps(result))
-        return 1 if any(r["status"].startswith("blocked") for r in result) else 0
+    try:
+        result = run_poll(
+            args.experiment,
+            args.state_dir,
+            collect=not args.check_only,
+            registry_path=args.registry,
+            generation=args.expected_generation,
+        )
+    except BlockingIOError:
+        return 0
+    print(json.dumps(result))
+    return 1 if any(r["status"].startswith("blocked") for r in result) else 0
 
 
 if __name__ == "__main__":

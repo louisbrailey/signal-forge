@@ -22,11 +22,11 @@ from signalforge.backtest.costs import CostModel
 from signalforge.backtest.funded import run_funded_replay
 from signalforge.config.research import EventFilters, LiquidityFilters, RiskLimits
 from signalforge.data.series import PriceSeries
-from signalforge.domain import Horizon
 from signalforge.research.funded_diagnostics import diagnose
 from signalforge.research.historical_eligibility import HistoricalEligibility
 from signalforge.research.regime import regime_from_proxy
-from signalforge.research.strategies import default_strategies, signal_fn_for
+from signalforge.research.strategies import signal_fn_for
+from signalforge.research.strategy_scope import resolve_strategy_scope
 
 
 @dataclass
@@ -191,6 +191,7 @@ def compare(
     entry_start: date | None = None,
     evaluation_start: date | None = None,
     prospective: bool = False,
+    strategy_specs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """All unchanged daily baselines; same cash/costs/eligibility; no winner selection.
 
@@ -198,6 +199,7 @@ def compare(
     ETFs are exempt from corporate earnings. Current sector metadata remains a
     disclosed limitation. OOS approval is NOT retroactively applied to history.
     """
+    selected = resolve_strategy_scope(strategy_specs)
     metadata = {s: metadata[s] for s in dataset.series}
     listing_gaps = {}
     for symbol, bars in dataset.series.items():
@@ -228,9 +230,7 @@ def compare(
         for t, day in enumerate(proxy.dates)
     }
     results = {}
-    for strategy in default_strategies():
-        if strategy.spec().horizon is Horizon.INTRADAY:
-            continue
+    for strategy in selected:
         spec = strategy.spec()
         by_cost = {}
         for label, (costs, spread) in scenarios.items():
