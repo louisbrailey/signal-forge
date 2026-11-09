@@ -338,6 +338,9 @@ def test_absent_schema_fields_are_unknown_and_liquidity_unvalidated(tmp_path):
 
 def test_inception_gaps_and_missing_boundaries_reported():
     s = series(days=4, start=START + timedelta(days=3))
+    before_inception = study.coverage(s, START, START + timedelta(days=2))
+    assert before_inception["breach"] == "not yet incepted"
+    assert before_inception["expected"] == before_inception["missing"] == 0
     c = study.coverage(s, START, START + timedelta(days=6))
     assert c["missing"] == 0 and c["expected"] == 4
     c = study.coverage(s, START, START + timedelta(days=10))

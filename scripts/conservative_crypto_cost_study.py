@@ -213,6 +213,17 @@ def load_bounded(path: Path, pairs: list[str]) -> tuple[dict[str, PriceSeries], 
 
 def coverage(series: PriceSeries, start: date, end: date) -> dict[str, Any]:
     inside = [d for d in series.dates if start <= d <= end]
+    if len(series) and series.dates[0] > end:
+        return {
+            "first": None,
+            "last": None,
+            "observed": 0,
+            "expected": 0,
+            "missing": 0,
+            "longest_gap": 0,
+            "breach": "not yet incepted",
+            "gaps": [],
+        }
     begin = max(start, series.dates[0]) if len(series) else start
     profile = gap_profile(inside, timedelta(days=1), start=begin, end=end)
     breach = continuity_breach(inside, timedelta(days=1), start=begin, end=end)
@@ -665,6 +676,20 @@ def run_study(panel: dict[str, PriceSeries], meta: dict[str, Any]) -> dict[str, 
 
 
 def render(result: dict[str, Any], evidence: Path, evidence_hash: str) -> str:
+    unique = [r for r in result["runs"] if r["schedule"] == "variant"]
+    positive = sum(r["portfolio"]["metrics"]["net_return_pct"] > 0 for r in unique)
+    beats_matched = sum(
+        r["portfolio"]["metrics"]["net_return_pct"]
+        > r["exposure_matched"]["metrics"]["net_return_pct"]
+        for r in unique
+    )
+    follows = [r for r in unique if r["window"] == "followup_SEEN"]
+    follow_intervals = sum(
+        r["excess_annual_mean_90pct_block_interval_pp"][0]
+        <= 0
+        <= r["excess_annual_mean_90pct_block_interval_pp"][1]
+        for r in follows
+    )
     lines = [
         "# Conservative crypto cost study — 2026-11-08",
         "",
@@ -678,6 +703,15 @@ def render(result: dict[str, Any], evidence: Path, evidence_hash: str) -> str:
         "24 fixed portfolio runs, each $10,000; 5% all-in entry allocation, 20% crypto theme,",
         "60% gross, 0.5% trade / 1.5% aggregate modeled all-in stop risk; 10% DD entry halt.",
         "Limits apply at admission; price drift and stop gaps can exceed them afterward.",
+        "",
+        f"Outcome: {positive}/{len(unique)} distinct long-only window/cost portfolios had positive",
+        f"net returns; {beats_matched}/{len(unique)} exceeded the exposure-matched basket's point",
+        f"return. {follow_intervals}/{len(follows)} followup excess-return intervals include zero.",
+        "Every parent LONG-leg schedule and full account path equals its CRYPTO-5 variant here:",
+        "24 runs represent 12 distinct accounts, not 24 independent confirmations.",
+        "Fully funded buy-and-hold has higher absolute returns in every comparison and much",
+        "larger drawdowns. Conservative sizing reduces losses; it does not remove cost drag",
+        "or establish reliable future excess returns.",
         "",
         "Costs: base Coinbase Intro 90 bps taker + estimated half-spread (BTC 2, ETH 3,",
         "SOL 10, other pairs 15 bps) + 1 bp slippage, each side. Stress doubles fee and",
@@ -716,11 +750,24 @@ def render(result: dict[str, Any], evidence: Path, evidence_hash: str) -> str:
             )
     lines += [
         "",
+        "Stored daily volume is present for all accepted bars in this snapshot. Venue spreads,",
+        "depth and market impact were not measured: liquidity remains UNVALIDATED.",
+        "Not-yet-incepted symbols have zero expected days, rather than a continuity failure.",
+        "",
         "Warmup resets signal eligibility after any gap; entries require the next actual",
         "calendar open. No synthetic bars. Missing holding marks use the last real close",
         "for accounting only and block entries; exits still follow the harness's surviving",
         "bars, so missing-interval stop paths remain unknown. Each window starts flat, with",
         "no carry-in; harness EOD exits liquidate at the last actual window close.",
+        "",
+        "| Window/rule | First eligible actual benchmark opens (after warmup) |",
+        "|---|---|",
+    ]
+    for row in unique:
+        if row["stress"] == 1:
+            entries = ", ".join(f"{e['pair']} {e['entry']}" for e in row["buy_hold"]["entries"])
+            lines.append(f"| {row['window']}/{row['strategy']} | {entries} |")
+    lines += [
         "",
         "## Results",
         "",
@@ -752,6 +799,21 @@ def render(result: dict[str, Any], evidence: Path, evidence_hash: str) -> str:
             f"{m['trades']}/{m['candidates']} | "
             f"{b['net_return_pct']:.2f}/{b['max_drawdown_pct']:.2f} | "
             f"{x['net_return_pct']:.3f}/{x['max_drawdown_pct']:.3f} |"
+        )
+    lines += [
+        "",
+        "| Distinct variant window/rule/cost | Ending equity $ | Losing trades / total | "
+        "Total losing P&L $ | Largest trade loss $ |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for row in unique:
+        portfolio = row["portfolio"]
+        losses = [dec(t["net_pnl"]) for t in portfolio["trades"] if dec(t["net_pnl"]) < 0]
+        label = f"{row['window']}/{row['strategy']}/{row['stress']}x"
+        lines.append(
+            f"| {label} | {portfolio['metrics']['ending_equity']:.2f} | "
+            f"{len(losses)}/{len(portfolio['trades'])} | {sum(losses, ZERO):.2f} | "
+            f"{min(losses, default=ZERO):.2f} |"
         )
     lines += [
         "",
@@ -813,8 +875,8 @@ def render(result: dict[str, Any], evidence: Path, evidence_hash: str) -> str:
         "",
         "These are fixed seen-history comparisons, not a strategy search or a new sealed look.",
         "The registered surviving pair lists, earliest available stored bars and historical",
-        "quality filters are not a point-in-time exchange universe. Missing volume/venue",
-        "spread measurements, order increments, minimum sizes, impact, queueing, trading",
+        "quality filters are not a point-in-time exchange universe. Venue spread/depth",
+        "measurements, order increments, minimum sizes, impact, queueing, trading",
         "availability and intraday mark paths are unvalidated. Stops can gap beyond reserved",
         "risk. The 10% DD control only halts entries at observed opens/closes; it cannot",
         "guarantee a maximum loss. Zero yield is assumed on idle cash. No guarantee of",
