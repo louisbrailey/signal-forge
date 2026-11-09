@@ -2844,9 +2844,9 @@ def backtest_report(
             )
 
 
-def _sensitivity_grid_builders() -> dict[
-    str, tuple[object, dict[str, object], dict[str, list[object]]]
-]:
+def _sensitivity_grid_builders() -> (
+    dict[str, tuple[object, dict[str, object], dict[str, list[object]]]]
+):
     """strategy key -> (factory(params)->strategy, baseline params dict, grid)."""
     from dataclasses import asdict
 
