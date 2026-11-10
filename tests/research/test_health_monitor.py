@@ -379,3 +379,26 @@ def test_a_later_cycles_insufficient_row_never_masks_an_earlier_real_assessment(
     assert latest.id == max(
         r.id for r in session.scalars(select(StrategyHealth)) if r.action == "none"
     )
+
+
+@pytest.mark.parametrize("old_action", ["none", "downgrade", "disable"])
+def test_current_insufficient_supersedes_older_version_assessment(
+    session: Session, old_action: str
+) -> None:
+    strat = _seed(
+        session,
+        status=StrategyStatus.PAPER_APPROVED,
+        oos_expectancy_r=0.30,
+        paper_returns_r=[-0.4, -0.6] * 12 + [-0.5],
+    )
+    evaluate_strategy_health(session)
+    old = session.scalars(select(StrategyHealth)).one()
+    old.action = old_action
+    session.flush()
+    # A stricter evidence requirement makes the current sample insufficient.
+    evaluate_strategy_health(session, config=HealthMonitorConfig(min_paper_trades=100))
+    latest = hm.latest_health_by_version(session)[old.strategy_version_id]
+    assert latest.action == hm.INSUFFICIENT_ACTION
+    assert latest.id != old.id
+    assert hm.latest_health_by_strategy(session)[strat.name].id == latest.id
+    assert session.get(StrategyHealth, old.id).action == old_action

@@ -534,17 +534,20 @@ def run_health_monitor(
 def _newest_preferring_assessments[K](
     rows: list[tuple[K, StrategyHealth]],
 ) -> dict[K, StrategyHealth]:
-    """First row per key from newest-first ``rows``, where an ``insufficient``
-    row is used only when the key has no real assessment at all.
+    """Summarize current per-version assessments from newest-first rows.
 
-    Every short-of-trades version writes an ``insufficient`` row each cycle, so
-    "newest wins" would let a sibling version's (or a later cycle's)
-    placeholder hide a real downgrade/disable from the operator. A real
-    assessment always outranks a placeholder; its ``evaluated_at`` shows its age.
+    First discard superseded assessments of each version, including favorable
+    assessments superseded by insufficient evidence. Among different versions,
+    prefer an actual assessment so an empty sibling cannot hide a downgrade.
+    Historical actions remain in strategy_health; they are not current evidence.
     """
     real: dict[K, StrategyHealth] = {}
     placeholder: dict[K, StrategyHealth] = {}
+    seen_versions: set[int] = set()
     for key, health in rows:
+        if health.strategy_version_id in seen_versions:
+            continue
+        seen_versions.add(health.strategy_version_id)
         bucket = placeholder if health.action == INSUFFICIENT_ACTION else real
         bucket.setdefault(key, health)
     for key, health in placeholder.items():
@@ -553,9 +556,7 @@ def _newest_preferring_assessments[K](
 
 
 def latest_health_by_strategy(session: Session) -> dict[str, StrategyHealth]:
-    """Most recent real StrategyHealth row per strategy name (for Strategy Lab),
-    falling back to the newest ``insufficient`` row only when the strategy has
-    no real assessment for any version."""
+    """Summarize the latest assessment of each version for Strategy Lab."""
     rows = session.execute(
         select(Strategy.name, StrategyHealth)
         .join(StrategyVersion, StrategyHealth.strategy_version_id == StrategyVersion.id)
@@ -566,8 +567,7 @@ def latest_health_by_strategy(session: Session) -> dict[str, StrategyHealth]:
 
 
 def latest_health_by_version(session: Session) -> dict[int, StrategyHealth]:
-    """Most recent real StrategyHealth row per strategy_version_id, with the
-    same ``insufficient`` fallback (for pages that render one row per version)."""
+    """Latest assessment per version, including current insufficient evidence."""
     rows = session.scalars(
         select(StrategyHealth).order_by(
             StrategyHealth.evaluated_at.desc(), StrategyHealth.id.desc()
