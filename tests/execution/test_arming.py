@@ -165,8 +165,10 @@ def test_fewer_than_twenty_closed_trades_refuses(
         session.delete(row)
     from signalforge.db.models import PaperPosition
 
+    # paper_trade is immutable (S9), so a position with its ACCEPTED trade cannot
+    # be deleted; detaching it from the version removes it from the count instead.
     positions = list(session.scalars(select(PaperPosition)))
-    session.delete(positions[0])
+    positions[0].strategy_version_id = None
     session.flush()
 
     checks = _checks(session, strategy_version.id)
@@ -198,7 +200,7 @@ def test_arm_raises_when_the_evidence_gate_fails(
     from signalforge.db.models import PaperPosition
 
     for row in session.scalars(select(PaperPosition)):
-        session.delete(row)
+        row.strategy_version_id = None  # detach: paper_trade (S9) forbids the delete
     session.flush()
 
     with pytest.raises(arming.ArmingRefused, match="S4"):
@@ -223,7 +225,7 @@ def test_override_records_the_observed_evidence(
     from signalforge.db.models import PaperPosition
 
     for row in list(session.scalars(select(PaperPosition)))[:15]:
-        session.delete(row)
+        row.strategy_version_id = None  # detach: paper_trade (S9) forbids the delete
     session.flush()
 
     reason = "operator: arming the 5-trade sample deliberately, at minimum size"
@@ -274,6 +276,50 @@ def test_superseding_the_limits_row_resets_the_evidence_counter(
     after = arming.evaluate_evidence(session, strategy_version.id, limits_created_at=created_at)
     assert after.n_closed == 20
     assert after.sufficient
+
+
+def test_manual_acceptances_are_never_decision_10_evidence(
+    session: Session, strategy_version: StrategyVersion, account: object
+) -> None:
+    """Decision 10 counts the strategy's OWN mechanically accepted trades. An
+    operator's manual acceptances (actor ``local-user``) neither top up the
+    count nor rescue a negative expectancy."""
+    created_at = NOW + timedelta(minutes=5)  # a fresh window, past the fixture's 20
+    closed_at = created_at + timedelta(hours=1)
+    add_closed_paper_positions(
+        session,
+        account=account,  # type: ignore[arg-type]
+        strategy_version=strategy_version,
+        n=19,
+        pnl_per_trade=-0.1,
+        closed_at=closed_at,
+    )
+    add_closed_paper_positions(
+        session,
+        account=account,  # type: ignore[arg-type]
+        strategy_version=strategy_version,
+        n=10,
+        pnl_per_trade=2.0,
+        closed_at=closed_at + timedelta(minutes=1),
+        actor="local-user",
+    )
+    short = arming.evaluate_evidence(session, strategy_version.id, limits_created_at=created_at)
+    assert short.n_closed == 19
+    assert not short.sufficient
+
+    add_closed_paper_positions(
+        session,
+        account=account,  # type: ignore[arg-type]
+        strategy_version=strategy_version,
+        n=1,
+        pnl_per_trade=-0.1,
+        closed_at=closed_at + timedelta(minutes=2),
+    )
+    negative = arming.evaluate_evidence(session, strategy_version.id, limits_created_at=created_at)
+    assert negative.n_closed == 20
+    assert negative.expectancy_r == pytest.approx(-0.1)
+    assert not negative.sufficient
+    assert "negative" in negative.detail
 
 
 # ---------------------------------------------------------------------------

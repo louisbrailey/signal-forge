@@ -176,8 +176,8 @@
       <dt class="text-slate-400">Approved-scope scan</dt>
       <dd class="col-span-2">
         {% if approved_scan %}
-          {{ pill(approved_scan.outcome == 'completed', 'completed', 'blocked') }} {{ approved_scan.at[:16] }}
-          {% if approved_scan.outcome == 'blocked' %}<span class="text-red-700">{{ approved_scan.payload.reason }}</span>
+          {{ pill(approved_scan.outcome == 'completed', 'completed', approved_scan.outcome | replace('_', ' ')) }} {{ approved_scan.at[:16] }}
+          {% if approved_scan.outcome != 'completed' %}<span class="text-red-700">{{ approved_scan.payload.reason }}</span>
           {% else %}snapshot #{{ approved_scan.payload.dataset_snapshot_id }} {{ approved_scan.payload.dataset_key }} · {{ approved_scan.payload.n_symbols }} symbols{% for r in approved_scan.payload.runs %} · {{ r.horizon }}: {{ r.candidates }} qualified / {{ r.no_trade }} no-trade{% endfor %}{% endif %}
         {% else %}never{% endif %}
       </dd>

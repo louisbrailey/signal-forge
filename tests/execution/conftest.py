@@ -399,6 +399,7 @@ def add_closed_paper_positions(
     n: int,
     pnl_per_trade: float,
     closed_at: datetime | None = None,
+    actor: str = AUTO_SIM_ACTOR,
 ) -> None:
     """``n`` closed positions with a fixed R, for decision 10's counter.
 
@@ -406,6 +407,10 @@ def add_closed_paper_positions(
     IS the R-multiple the health monitor computes. Keeping that arithmetic
     trivial is deliberate: a test of the >=20/non-negative rule should fail on
     the rule, never on its own fixture's R arithmetic.
+
+    Each position gets the ACCEPTED ``paper_trade`` that opened it, by ``actor``
+    (default: the automatic actor). Only mechanically accepted trades count as
+    decision-10 evidence; pass ``actor="local-user"`` for a manual acceptance.
     """
     inst = session.scalar(select(Instrument).where(Instrument.symbol == "SPY"))
     if inst is None:
@@ -414,19 +419,30 @@ def add_closed_paper_positions(
         session.flush()
     when = closed_at or (NOW - timedelta(days=1))
     for i in range(n):
+        position = PaperPosition(
+            account_id=account.id,
+            instrument_id=inst.id,
+            strategy_version_id=strategy_version.id,
+            horizon=Horizon.SHORT_SWING,
+            side=PositionSide.LONG,
+            qty=1,
+            avg_price=Decimal("100"),
+            stop_level=99.0,
+            opened_at=when - timedelta(days=2),
+            closed_at=when + timedelta(seconds=i),
+            realized_pnl=Decimal(str(pnl_per_trade)),
+        )
+        session.add(position)
+        session.flush()
         session.add(
-            PaperPosition(
+            PaperTrade(
                 account_id=account.id,
-                instrument_id=inst.id,
-                strategy_version_id=strategy_version.id,
-                horizon=Horizon.SHORT_SWING,
-                side=PositionSide.LONG,
-                qty=1,
-                avg_price=Decimal("100"),
-                stop_level=99.0,
-                opened_at=when - timedelta(days=2),
-                closed_at=when + timedelta(seconds=i),
-                realized_pnl=Decimal(str(pnl_per_trade)),
+                position_id=position.id,
+                decision=PaperDecision.ACCEPTED,
+                signal_snapshot_json={"decision": {"actor": actor}},
+                plan_json={},
+                actor=actor,
+                created_at=when - timedelta(days=2),
             )
         )
     session.flush()

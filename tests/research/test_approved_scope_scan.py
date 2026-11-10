@@ -37,6 +37,7 @@ from signalforge.research import approved_scope_scan as mod
 from signalforge.research.approved_scope_scan import (
     AUDIT_BLOCKED,
     AUDIT_COMPLETED,
+    AUDIT_NOTHING_SCANNED,
     INGEST_NOTE,
     INGEST_PROVENANCE_KEY,
     approved_horizons,
@@ -382,7 +383,10 @@ def test_a_version_whose_scope_can_never_match_is_skipped_with_a_reason(
 ) -> None:
     snap = _snapshot(session, "u4", SYMS)
     ver = _approve(
-        session, name="a", horizon=Horizon.SHORT_SWING, **{"snapshot": snap, **kwargs}  # type: ignore[arg-type]
+        session,
+        name="a",
+        horizon=Horizon.SHORT_SWING,
+        **{"snapshot": snap, **kwargs},  # type: ignore[arg-type]
     )
     groups, skipped = approved_scan_groups(session)
     assert groups == []
@@ -414,9 +418,13 @@ def test_approved_universes_collapse_horizons_of_one_dataset(session: Session) -
 
 
 class _FakeResult:
-    def __init__(self, horizon: Horizon, symbols: list[str], source: str) -> None:
+    def __init__(
+        self, horizon: Horizon, symbols: list[str], source: str, *, stale: bool = False
+    ) -> None:
         self.horizon = horizon
-        self.scanned = list(symbols)
+        # ``stale``: the scan's own required-bar gate excluded every symbol
+        self.scanned = [] if stale else list(symbols)
+        self.excluded = {"stale_or_unavailable_feed": list(symbols)} if stale else {}
         self.universe = list(symbols)
         self.source = source
 
@@ -432,7 +440,7 @@ class _FakeRun:
 
 
 def _fake_scan(
-    monkeypatch: pytest.MonkeyPatch, snapshots: dict[frozenset[str], int]
+    monkeypatch: pytest.MonkeyPatch, snapshots: dict[frozenset[str], int], *, stale: bool = False
 ) -> list[_FakeResult]:
     """Record every run_scan call and persist it onto the snapshot its exact
     symbol set resolves to — what the real get_or_create_dataset_snapshot does."""
@@ -442,7 +450,7 @@ def _fake_scan(
     def fake_run_scan(
         sess: Session, horizon: Horizon, *, symbols: list[str], source: str
     ) -> _FakeResult:
-        res = _FakeResult(horizon, symbols, source)
+        res = _FakeResult(horizon, symbols, source, stale=stale)
         seen.append(res)
         return res
 
@@ -514,9 +522,37 @@ def test_run_scans_exact_dataset_when_ready(
         "n_symbols": 4,
         "source": SRC,
         "strategy_version_ids": [ver.id],
+        "excluded": {},
     }
+    assert report.outcome == "scanned"
     row = session.scalar(select(AuditLog).where(AuditLog.action == AUDIT_COMPLETED))
     assert row is not None and row.after_json["runs"][0]["horizon"] == "SHORT_SWING"
+
+
+def test_a_scan_that_excludes_every_symbol_is_nothing_scanned_never_completed(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Incident 2026-10-14..22: the readiness gate passed but the scan's own
+    stale-data gate excluded all 24 symbols, and a ``completed`` row was still
+    written — so ``missed_sessions`` saw that session as scanned. It now writes
+    a distinct ``nothing_scanned`` row and offers nothing to paper."""
+    _ready(session)
+    snap = _snapshot(session, "u4", SYMS)
+    _approve(session, name="a", horizon=Horizon.SHORT_SWING, snapshot=snap)
+    _fake_scan(monkeypatch, {frozenset(SYMS): snap.id}, stale=True)
+
+    report = run_approved_scope_scan(session, now=NOW)
+    assert report.ran is False and report.outcome == "nothing_scanned"
+    assert report.runs and report.runs[0]["scanned"] == 0
+    assert report.runs[0]["excluded"] == {"stale_or_unavailable_feed": 4}
+    assert report.blocked_reason == (
+        "nothing scanned: the scan's own gates excluded every symbol (stale_or_unavailable_feed=4)"
+    )
+    actions = {r.action for r in session.scalars(select(AuditLog))}
+    assert AUDIT_COMPLETED not in actions
+    row = session.scalar(select(AuditLog).where(AuditLog.action == AUDIT_NOTHING_SCANNED))
+    assert row is not None and row.after_json["reason"] == report.blocked_reason
+    assert row.after_json["readiness_enforced"] is True
 
 
 def test_two_snapshots_are_each_scanned_on_their_own_symbols(

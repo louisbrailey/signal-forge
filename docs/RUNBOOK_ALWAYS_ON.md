@@ -369,6 +369,53 @@ asleep or a worker that is not running still runs nothing (see "Why a sleeping
 laptop cannot run scheduled jobs"); the gap check makes that visible, it does
 not prevent it.
 
+**Superseded 2026-11-08 — per-session outcomes.** `trend_continuation.short_swing`
+(snapshot 3) was scanned on 13 of 22 sessions from 2026-10-08 to 11-06. Of the
+nine gaps, 10-12, 10-13 and 10-15 had a `scan_skipped_missed_session` row and
+10-27 a failed scan job, but 10-14, 10-19 and 10-20 carried a `completed` row
+with nothing scanned and 10-21 and 11-05 left no record at all. (Counted by the
+bar each scan required, `last_closed_session(ts)`; an earlier count by UTC date
+said 14 of 22 with 10-22 missing.) Two causes. First,
+`approved_scope_scan.completed` was written even when the scan's own stale-bar
+gate excluded every symbol (`scanned=0`). Second, the gap was measured from the
+*newest* completed row, so 11-06's scan hid 11-05, which was never attempted.
+Now:
+
+* A scan that excludes every symbol writes `approved_scope_scan.nothing_scanned`,
+  never `completed`. Nothing from it reaches auto-simulation.
+* `missed_sessions` judges each session in the look-back on its own. A session is
+  owed if it has no readiness-enforced attempt (scanned, nothing scanned,
+  blocked, or a failed scan job) and no skip row.
+* Each approved scope gets one `approved_scope_scan.session_outcome` audit row
+  per closed session in its approved window, **within the last
+  `CATCH_UP_LOOKBACK_SESSIONS` sessions (default 10)**. If the worker is stopped
+  or kill-switched for longer than that (about two weeks), the older sessions
+  never get a row; the CLI below still shows them as `UNRECORDED`. A row is
+  written once that session's bar is no longer the one a scan requires. It says
+  `scanned` or `skipped` with a reason: `missed`, `readiness_blocked`,
+  `data_hold` (nothing scanned, mostly stale or missing data), `all_excluded`
+  (nothing scanned, emptied by liquidity, earnings-window or no-strategy gates)
+  or `scan_failed`. It is derived from existing evidence and **never** runs a
+  scan for a past session. It is written by the EOD approved-scope step and the
+  30-minute `catch_up`, after any owed session's skip row so it cites that row.
+* A scope's approved window runs from the first attempt that lists it to the
+  first full attempt that does not. A scope revoked since is still closed out
+  for the sessions in its window. A session with no attempt between its last
+  listing and the attempt that dropped it counts as in the window and is
+  recorded `missed`, because the revoke time is not on record. Sessions between
+  a re-approval and the scope's first attempt after it are not owed.
+* Gaps are visible with `signalforge approved-scope-sessions [-n 22] [--gaps-only]`.
+  This command is read-only.
+* To get rows for the whole incident window, set
+  `CATCH_UP_LOOKBACK_SESSIONS=22` for one worker run. That also widens
+  `missed_sessions`, so catch-up will owe 10-21 as well as 11-05: each gets a
+  `scan_skipped_missed_session` row and a covering-ingest check. On 2026-11-08
+  daily-bar ingestion run #90 already covers both (25/25 bars), so no provider
+  call is made. No session is scanned.
+* An attempt belongs to `data.calendar.last_closed_session(ts)`, the bar the
+  scan's own gate required. So a scan at 17:28 ET counts for that day, not for
+  the day before.
+
 ### 2026-10-05 — host slept mid-ingest: wall-clock deadline, in-flight trace
 
 **Incident.** The Mac was running on battery and went to sleep while the

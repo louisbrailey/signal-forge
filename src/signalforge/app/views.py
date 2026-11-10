@@ -764,7 +764,11 @@ def ops_status_context(session: Session) -> dict[str, Any]:
     )
     from signalforge.gitinfo import git_branch, git_sha
     from signalforge.research.approval_scope import approved_scopes
-    from signalforge.research.approved_scope_scan import AUDIT_BLOCKED, AUDIT_COMPLETED
+    from signalforge.research.approved_scope_scan import (
+        AUDIT_BLOCKED,
+        AUDIT_COMPLETED,
+        AUDIT_NOTHING_SCANNED,
+    )
     from signalforge.scheduler import MANUAL_JOBS, default_job_specs
 
     now = datetime.now(UTC)
@@ -951,13 +955,16 @@ def ops_status_context(session: Session) -> dict[str, Any]:
 
     last_approved = session.scalar(
         select(AuditLog)
-        .where(AuditLog.action.in_((AUDIT_COMPLETED, AUDIT_BLOCKED)))
+        .where(AuditLog.action.in_((AUDIT_COMPLETED, AUDIT_BLOCKED, AUDIT_NOTHING_SCANNED)))
         .order_by(AuditLog.ts.desc())
         .limit(1)
     )
     approved_scan = (
         {
-            "outcome": "completed" if last_approved.action == AUDIT_COMPLETED else "blocked",
+            "outcome": {
+                AUDIT_COMPLETED: "completed",
+                AUDIT_NOTHING_SCANNED: "nothing_scanned",
+            }.get(last_approved.action, "blocked"),
             "at": last_approved.ts.isoformat(),
             "payload": last_approved.after_json or {},
         }

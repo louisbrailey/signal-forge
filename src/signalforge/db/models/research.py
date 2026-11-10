@@ -226,7 +226,9 @@ class StrategyHealth(Base, IntPK, CreatedAt):
     paper_expectancy: Mapped[float] = mapped_column(Float)
     backtest_expectancy: Mapped[float] = mapped_column(Float)
     z_score: Mapped[float] = mapped_column(Float)
-    action: Mapped[str] = mapped_column(String(12), default="none")  # none | downgrade | disable
+    # none | downgrade | disable | insufficient — every value must fit String(12)
+    # (Postgres enforces it); tests pin that.
+    action: Mapped[str] = mapped_column(String(12), default="none")
     note: Mapped[str] = mapped_column(Text, default="")
     evaluated_at: Mapped[datetime] = mapped_column(UTCDateTime)
 

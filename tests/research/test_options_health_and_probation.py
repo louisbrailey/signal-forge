@@ -32,12 +32,14 @@ from signalforge.db.models import (
     JobRun,
     OptionsPosition,
     OptionsReconcileReport,
+    OptionsTrade,
     PaperAccount,
     PaperPosition,
+    PaperTrade,
     Strategy,
     StrategyVersion,
 )
-from signalforge.domain import Horizon, PositionSide, StrategyStatus
+from signalforge.domain import Horizon, PaperDecision, PositionSide, StrategyStatus
 
 EQUITY_ACCOUNT = "default"
 OPTIONS_ACCOUNT = "options"
@@ -90,19 +92,31 @@ def _equity_trades(session: Session, ver: StrategyVersion, r_values: list[float]
     session.flush()
     opened = datetime(2024, 1, 2, tzinfo=UTC)
     for i, r in enumerate(r_values):
+        position = PaperPosition(
+            account_id=acct.id,
+            instrument_id=inst.id,
+            strategy_version_id=ver.id,
+            horizon=Horizon.SHORT_SWING,
+            side=PositionSide.LONG,
+            qty=10,
+            avg_price=Decimal("100"),
+            stop_level=98.0,
+            opened_at=opened + timedelta(days=i),
+            closed_at=opened + timedelta(days=i, hours=6),
+            realized_pnl=Decimal(str(round(r * 20.0, 2))),
+        )
+        session.add(position)
+        session.flush()
+        # The mechanical acceptance that opened it: only these count as evidence.
         session.add(
-            PaperPosition(
+            PaperTrade(
                 account_id=acct.id,
-                instrument_id=inst.id,
-                strategy_version_id=ver.id,
-                horizon=Horizon.SHORT_SWING,
-                side=PositionSide.LONG,
-                qty=10,
-                avg_price=Decimal("100"),
-                stop_level=98.0,
-                opened_at=opened + timedelta(days=i),
-                closed_at=opened + timedelta(days=i, hours=6),
-                realized_pnl=Decimal(str(round(r * 20.0, 2))),
+                position_id=position.id,
+                decision=PaperDecision.ACCEPTED,
+                signal_snapshot_json={},
+                plan_json={},
+                actor=hm.MECHANICAL_EQUITY_ACTOR,
+                created_at=opened + timedelta(days=i),
             )
         )
     session.flush()
@@ -115,6 +129,7 @@ def _options_structures(
     *,
     r_dollars: float = 200.0,
     closed: bool = True,
+    actor: str = hm.MECHANICAL_OPTIONS_ACTOR,
 ) -> PaperAccount:
     acct = session.scalar(select(PaperAccount).where(PaperAccount.name == OPTIONS_ACCOUNT))
     if acct is None:
@@ -123,28 +138,44 @@ def _options_structures(
         )
         session.add(acct)
         session.flush()
-    inst = Instrument(symbol="SPY", instrument_type="etf")
-    session.add(inst)
-    session.flush()
+    inst = session.scalar(select(Instrument).where(Instrument.symbol == "SPY"))
+    if inst is None:
+        inst = Instrument(symbol="SPY", instrument_type="etf")
+        session.add(inst)
+        session.flush()
     opened = datetime(2026, 1, 5, tzinfo=UTC)
     for i, r in enumerate(r_values):
+        position = OptionsPosition(
+            account_id=acct.id,
+            strategy_version_id=ver.id,
+            underlying_instrument_id=inst.id,
+            underlying_symbol="SPY",
+            structure_type="vertical_credit",
+            contracts=1,
+            entry_net_premium=Decimal("50"),
+            r_dollars=Decimal(str(r_dollars)),
+            collateral_reserved=Decimal(str(r_dollars)),
+            expiration_date=date(2026, 3, 20),
+            opened_at=opened + timedelta(days=i),
+            closed_at=(opened + timedelta(days=i, hours=6)) if closed else None,
+            realized_pnl=Decimal(str(round(r * r_dollars, 6))),
+            pnl_r=r,
+            r_clamped=r < -1.0,
+        )
+        session.add(position)
+        session.flush()
         session.add(
-            OptionsPosition(
+            OptionsTrade(
                 account_id=acct.id,
+                options_position_id=position.id,
                 strategy_version_id=ver.id,
-                underlying_instrument_id=inst.id,
-                underlying_symbol="SPY",
+                decision=PaperDecision.ACCEPTED,
                 structure_type="vertical_credit",
-                contracts=1,
-                entry_net_premium=Decimal("50"),
+                underlying_symbol="SPY",
+                signal_snapshot_json={},
                 r_dollars=Decimal(str(r_dollars)),
-                collateral_reserved=Decimal(str(r_dollars)),
-                expiration_date=date(2026, 3, 20),
-                opened_at=opened + timedelta(days=i),
-                closed_at=(opened + timedelta(days=i, hours=6)) if closed else None,
-                realized_pnl=Decimal(str(round(r * r_dollars, 6))),
-                pnl_r=r,
-                r_clamped=r < -1.0,
+                actor=actor,
+                created_at=opened + timedelta(days=i),
             )
         )
     session.flush()
@@ -193,8 +224,10 @@ def test_the_equity_path_is_unchanged_on_a_database_with_no_options_rows(
     assert row["paper"]["shortfall_vs_expected_r"] == 0.1
 
     # the StrategyHealth note is the equity sentence and nothing else
-    note = pp.latest_health_by_strategy(session)["trend_continuation"].note
-    assert note == "paper +0.400R vs backtest +0.300R over 25 trades (z=+0.40)"
+    note = hm.latest_health_by_strategy(session)["trend_continuation"].note
+    # Sample (n-1) variance: SS=38.5, var=38.5/24, se=sqrt(var/25)=0.2533, z=0.1/se=+0.39.
+    # (The population-variance z this pinned before the correction was +0.40.)
+    assert note == "paper +0.400R vs backtest +0.300R over 25 trades (z=+0.39)"
 
 
 def test_an_equity_version_is_not_an_options_family_even_beside_an_options_one(
@@ -252,7 +285,7 @@ def test_the_health_monitor_downgrades_an_options_family_on_its_own_evidence(
     assert assessed.action == "downgrade"
     assert assessed.to_status == "experimental"
 
-    health = pp.latest_health_by_strategy(session)["options_short_vertical.position"]
+    health = hm.latest_health_by_strategy(session)["options_short_vertical.position"]
     assert "25 closed options structure(s) included" in health.note
     assert "0 clamped at -1R" in health.note
 
@@ -384,3 +417,14 @@ def test_the_activation_preconditions_report_options_and_never_gate_on_it(db_url
     for label, ok, _note in checks:
         if "options" in label:
             assert ok is True, f"{label} must report, never gate"
+
+
+def test_manual_options_acceptances_are_not_health_evidence(session: Session) -> None:
+    """The options series applies the same mechanical-only rule as the equity
+    one: a structure the operator accepted by hand is not the strategy's."""
+    ver = _version(session, name="options_manual")
+    _options_structures(session, ver, [0.5, -0.5])
+    _options_structures(session, ver, [0.9, 0.9, 0.9], actor="local-user")
+    series = hm.closed_options_r_multiples(session, ver.id)
+    assert sorted(series.r_multiples) == [-0.5, 0.5]
+    assert hm.is_options_strategy_version(session, ver.id) is True

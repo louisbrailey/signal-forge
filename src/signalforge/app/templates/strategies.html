@@ -71,8 +71,12 @@ A human may move a strategy <em>down</em> (experimental or disabled) here at any
   <div class="mt-2 rounded border px-2 py-1 text-xs
     {{ 'border-red-200 bg-red-50 text-red-700' if s.health.action in ('downgrade', 'disable')
        else 'border-slate-200 bg-slate-50 text-slate-600' }}">
+    {% if s.health.action == 'insufficient' %}
+    Health ({{ s.health.window }}): {{ s.health.note }}
+    {% else %}
     Health ({{ s.health.window }}): live {{ '%+.3f' | format(s.health.paper_expectancy_r) }}R vs
     OOS {{ '%+.3f' | format(s.health.backtest_expectancy_r) }}R · z {{ '%+.2f' | format(s.health.z_score) }}
+    {% endif %}
     {% if s.health.action in ('downgrade', 'disable') %}· <strong>auto-{{ s.health.action }}d</strong>{% endif %}
     <span class="text-slate-400">· {{ s.health.evaluated_at[:16] }}</span>
   </div>

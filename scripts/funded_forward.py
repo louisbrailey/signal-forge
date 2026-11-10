@@ -18,10 +18,15 @@ from signalforge.backtest.actions import TickerChange
 from signalforge.data.accounting_snapshot import fetch_accounting_snapshot
 from signalforge.data.adapters.massive import MassiveAdapter, completed_session_cutoff
 from signalforge.killswitch import ensure_not_engaged
-from signalforge.research.action_replay import compare, load_dataset
+from signalforge.research.action_replay import load_dataset
 from signalforge.research.prospective_funded import (
+    COLLECTOR_PROTOCOL_FILES,
+    amend_collector,
+    collection_state,
+    forward_compare,
     freeze,
     record_collection,
+    retain_recorded_inputs,
     review_readiness,
     validate_plan,
     write_once,
@@ -44,6 +49,8 @@ def _collect(root, env_file, *, check_only=False):
         }
     if (root / "collections" / f"{through}.json").exists():
         return {"status": "ALREADY_COLLECTED", "through": str(through)}
+    # Missed sessions are recorded and blocked from entries, never backfilled.
+    state = collection_state(root, through)
     if check_only:
         return {"status": "READY_FOR_COLLECTION", "through": str(through)}
     if sum(p.stat().st_size for p in root.rglob("*") if p.is_file()) > plan["cache_cap_bytes"]:
@@ -74,22 +81,41 @@ def _collect(root, env_file, *, check_only=False):
         )
         for c in plan["ticker_changes"]
     )
+    dataset = load_dataset(cache, changes)
+    revisions = []
+    if state["previous_through"]:
+        # Vendor revisions of already-recorded inputs are quarantined, not applied.
+        previous = root / "cache" / state["previous_through"]
+        if not (previous / "manifest.json").exists():
+            raise ValueError("Previous collection snapshot is unavailable")
+        dataset, revisions = retain_recorded_inputs(
+            dataset,
+            load_dataset(previous, changes),
+            state["retained"],
+            date.fromisoformat(state["previous_through"]),
+        )
     ensure_not_engaged()
-    report = compare(
-        load_dataset(cache, changes),
-        plan["metadata"],
-        entry_start=date.fromisoformat(plan["first_entry_session"]),
-        evaluation_start=date.fromisoformat(plan["first_observation_session"]),
-        prospective=True,
-        strategy_specs=plan["strategies"],
-    )
+    # The frozen compare; no entry from a signal on or just before a missed session.
+    report = forward_compare(dataset, plan, state["blocked"])
     ensure_not_engaged()
-    saved = record_collection(root, through, report)
+    saved = record_collection(root, through, report, vendor_revisions=revisions)
     return {
         "status": saved["status"],
         "through": saved["through"],
         "books": len(report["books"]) * 2,
         "observed_sessions": saved["observed_sessions"],
+        "missed_sessions": saved["missed_sessions"],
+        "vendor_revisions": len(saved["vendor_revisions"]),
+    }
+
+
+def previous_collector_sources(tree):
+    """Collector protocol files of the accepted (currently frozen) checkout."""
+    return {
+        name: (
+            tree / (name if name.startswith("scripts/") else f"src/signalforge/{name}")
+        ).read_bytes()
+        for name in COLLECTOR_PROTOCOL_FILES
     }
 
 
@@ -139,13 +165,15 @@ def run_collection(root, env_file, *, registry_path=None, generation=None, check
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("command", choices=["freeze", "collect", "status"])
+    p.add_argument("command", choices=["freeze", "collect", "status", "amend"])
     p.add_argument("root", type=Path)
     p.add_argument("--env-file", type=Path)
     p.add_argument("--database", type=Path)
     p.add_argument("--since", type=date.fromisoformat, default=date(2016, 10, 17))
     p.add_argument("--symbols", nargs="+")
     p.add_argument("--listing-evidence", type=Path)
+    p.add_argument("--previous-tree", type=Path, help="checkout of the accepted frozen code")
+    p.add_argument("--reason")
     p.add_argument("--registry", type=Path)
     p.add_argument("--expected-generation", type=int)
     p.add_argument("--check-only", action="store_true")
@@ -162,6 +190,12 @@ if __name__ == "__main__":
         )
     elif a.command == "status":
         print(json.dumps(review_readiness(a.root), indent=2))
+    elif a.command == "amend":
+        # Operator-only: accepts a collection-protocol code change for this study.
+        if not a.previous_tree or not a.reason:
+            p.error("amend requires --previous-tree and --reason")
+        amendment = amend_collector(a.root, previous_collector_sources(a.previous_tree), a.reason)
+        print(json.dumps(amendment, indent=2))
     else:
         if not a.env_file:
             p.error("collect requires --env-file")
@@ -180,6 +214,9 @@ if __name__ == "__main__":
             categories = {
                 "Frozen forward code": "code_changed",
                 "Missing prospective session": "missed_session",
+                "Missed sessions": "missed_session_unblocked",
+                "Out-of-order": "out_of_order_collection",
+                "Previous collection snapshot": "previous_snapshot_missing",
                 "Previously collected": "input_or_decision_revision",
                 "Snapshot storage": "storage_cap",
                 "Study storage": "storage_cap",

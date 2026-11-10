@@ -8,6 +8,7 @@ this is NOT a survivorship-free membership history."""
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
@@ -50,7 +51,11 @@ def refresh_reference(
     today = today or datetime.now(UTC).date()
     rep = DiscoveryReport()
     # Network FIRST: page through the reference list with no transaction open,
-    # then apply everything in one short write transaction.
+    # then apply everything in one short write transaction. "No transaction
+    # open" includes the CALLER's: a write-intent session that has read
+    # anything (e.g. its config) is inside BEGIN IMMEDIATE, and the paced walk
+    # (~12 s a page) would hold the write lock for minutes (incident 2026-11-08).
+    session.commit()
     pages: list[dict[str, Any]] = []
     path: str | None = _LIST_PATH
     while path and rep.pages < _MAX_PAGES:
@@ -112,16 +117,27 @@ def enrich_market_caps(
     tickers: list[str],
     *,
     max_requests: int,
+    deadline: float | None = None,
 ) -> int:
     """Fill ``market_cap`` (current value only) for up to ``max_requests``
-    tickers that don't have one yet — resumable across runs. Returns the
-    number of tickers updated."""
+    common stocks that don't have one yet — resumable across runs, stopping at
+    ``deadline`` (a ``time.monotonic()`` value). Returns the number of tickers
+    updated.
+
+    Common stocks only: the provider publishes no market cap for an ETF, so an
+    ETF stays ``None`` forever and was re-requested every run. Incident
+    2026-10-27..11-08: 250 ETF requests at the shared key's ~12 s pacing spent
+    ~50 min of every universe update, so normalize wrote nothing and the scan
+    never ran ("runtime budget reached before scan")."""
     done = 0
     for tk in tickers:
         if done >= max_requests:
             break
+        if deadline is not None and time.monotonic() > deadline:
+            _log.warning("universe.market_cap_runtime_budget", enriched=done)
+            break
         row = session.scalar(select(UniverseTicker).where(UniverseTicker.ticker == tk))
-        if row is None or row.market_cap is not None:
+        if row is None or row.market_cap is not None or row.security_type != "CS":
             continue
         session.commit()  # close the read snapshot before the network call
         try:

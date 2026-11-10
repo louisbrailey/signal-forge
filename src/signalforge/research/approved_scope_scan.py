@@ -77,6 +77,14 @@ MAX_BAR_AGE_DAYS = 5
 MIN_BAR_COVERAGE = 0.90
 AUDIT_COMPLETED = "approved_scope_scan.completed"
 AUDIT_BLOCKED = "approved_scope_scan.blocked"
+# The scan ran, but its own gates (e.g. the stale-feed / required-bar
+# exclusion in ``research.scan``) excluded every symbol of every group: nothing
+# was scanned, so it must NOT read as ``completed`` (incident 2026-10-14..22:
+# ``completed`` rows with ``scanned=0`` hid four unscanned sessions).
+AUDIT_NOTHING_SCANNED = "approved_scope_scan.nothing_scanned"
+OUTCOME_SCANNED = "scanned"
+OUTCOME_NOTHING_SCANNED = "nothing_scanned"
+OUTCOME_BLOCKED = "blocked"
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,8 +120,11 @@ class ApprovedUniverse:
 
 @dataclass(slots=True)
 class ApprovedScopeScanReport:
+    # True only when at least one group actually scanned a symbol.
     ran: bool
     blocked_reason: str | None = None
+    # scanned | nothing_scanned | blocked — the audit action written says the same.
+    outcome: str = OUTCOME_BLOCKED
     horizons: list[str] = field(default_factory=list)
     # Report-level snapshot identity stays populated for the common
     # single-universe case; with more than one approved universe it is None
@@ -251,7 +262,7 @@ def approved_scan_groups(
             _skip(
                 strat,
                 ver,
-                f"approved dataset snapshot {scope.dataset_snapshot_id} no longer " "exists",
+                f"approved dataset snapshot {scope.dataset_snapshot_id} no longer exists",
             )
             continue
         symbols = [str(s) for s in (snap.symbols_json or ())]
@@ -780,23 +791,43 @@ def run_approved_scope_scan(
                 "n_symbols": len(g.symbols),
                 "source": g.source,
                 "strategy_version_ids": list(g.strategy_version_ids),
+                "excluded": {k: len(v) for k, v in sorted(result.excluded.items())},
             }
         )
+    payload: dict[str, Any] = {
+        "dataset_snapshot_id": report.dataset_snapshot_id,
+        "dataset_key": report.dataset_key,
+        "n_symbols": report.n_symbols,
+        "live_config_hash": report.live_config_hash,
+        "readiness_enforced": enforce_readiness,
+        "runs": report.runs,
+        "blocked_universes": report.blocked_universes,
+        "skipped_versions": report.skipped_versions,
+    }
+    if not any(int(r["scanned"]) > 0 for r in report.runs):
+        # Every group ran but scanned nothing: a distinct outcome, never
+        # ``completed`` — no candidate exists and nothing is offered to paper.
+        excluded: dict[str, int] = {}
+        for r in report.runs:
+            for k, n in r["excluded"].items():
+                excluded[k] = excluded.get(k, 0) + int(n)
+        report.outcome = OUTCOME_NOTHING_SCANNED
+        report.blocked_reason = "nothing scanned: the scan's own gates excluded every symbol" + (
+            " (" + ", ".join(f"{k}={n}" for k, n in sorted(excluded.items())) + ")"
+            if excluded
+            else ""
+        )
+        payload["reason"] = report.blocked_reason
+        _audit(session, AUDIT_NOTHING_SCANNED, payload)
+        _log.warning(
+            "approved_scope_scan.nothing_scanned",
+            reason=report.blocked_reason,
+            groups=len(report.runs),
+        )
+        return report
     report.ran = True
-    _audit(
-        session,
-        AUDIT_COMPLETED,
-        {
-            "dataset_snapshot_id": report.dataset_snapshot_id,
-            "dataset_key": report.dataset_key,
-            "n_symbols": report.n_symbols,
-            "live_config_hash": report.live_config_hash,
-            "readiness_enforced": enforce_readiness,
-            "runs": report.runs,
-            "blocked_universes": report.blocked_universes,
-            "skipped_versions": report.skipped_versions,
-        },
-    )
+    report.outcome = OUTCOME_SCANNED
+    _audit(session, AUDIT_COMPLETED, payload)
     _log.info(
         "approved_scope_scan.done",
         horizons=report.horizons,

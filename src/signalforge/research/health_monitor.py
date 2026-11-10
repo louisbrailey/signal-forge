@@ -29,7 +29,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
 from signalforge import audit
@@ -40,19 +40,39 @@ from signalforge.db.models import (
     BacktestRun,
     Candidate,
     OptionsPosition,
+    OptionsTrade,
     PaperPosition,
+    PaperTrade,
     Strategy,
     StrategyHealth,
     StrategyVersion,
 )
 from signalforge.db.paper_voids import voided_position_ids
 from signalforge.db.types import utcnow
-from signalforge.domain import StrategyStatus
+from signalforge.domain import PaperDecision, StrategyStatus
 from signalforge.observability import get_logger
 
 _log = get_logger("health_monitor")
 
 _NO_ACTION = "none"
+
+#: Persisted (and reported) when a version has too few closed mechanically
+#: accepted paper trades to compare. Deliberately <= 12 characters:
+#: ``strategy_health.action`` is ``String(12)`` and Postgres (docker-compose)
+#: enforces the length — a longer value would abort the whole monitor cycle.
+INSUFFICIENT_ACTION = "insufficient"
+
+#: The automatic acceptance actors. Literals rather than imports of
+#: ``paper.auto_simulate.AUTO_SIM_ACTOR`` / ``paper.options_auto_simulate.
+#: OPTIONS_AUTO_SIM_ACTOR`` because those modules pull in the whole paper write
+#: stack, and read-only readers (agents/, the dashboard) import this module — a
+#: pinning test asserts the literals stay equal to those constants.
+MECHANICAL_EQUITY_ACTOR = "auto_simulate"
+MECHANICAL_OPTIONS_ACTOR = "options_auto_simulate"
+
+#: A sample standard error needs at least two observations (n - 1 > 0). Whatever
+#: ``HealthMonitorConfig.min_paper_trades`` says, fewer than this is never compared.
+_MIN_TRADES_FOR_SAMPLE_VARIANCE = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +84,7 @@ class HealthAssessment:
     paper_expectancy_r: float
     backtest_expectancy_r: float
     z_score: float
-    action: str  # none | downgrade | disable | insufficient_data | no_backtest | disabled
+    action: str  # none | downgrade | disable | insufficient | no_backtest | disabled
     from_status: str
     to_status: str
 
@@ -92,10 +112,26 @@ def closed_paper_r_multiples(
     instant. D6 §7b rule 3 uses it: superseding an ``execution_limits`` row
     resets the live-evidence counter, because evidence accumulated under a
     different set of execution parameters is evidence about a different system.
+
+    MECHANICAL ACCEPTANCES ONLY. A position counts only when the ACCEPTED
+    ``paper_trade`` that opened it carries ``actor == "auto_simulate"`` (the
+    indexed column D6 §5.3 P6 already trusts for order authorisation). An
+    operator's manual ``accept_candidate`` (actor ``local-user``) is the
+    operator's selection, not the strategy's — counting it would let hand-picked
+    trades both shield a strategy from a downgrade and manufacture decision-10
+    arming evidence. A position with no ACCEPTED trade at all is not provably
+    mechanical either, so it is excluded too (fail closed: the inclusion test is
+    positive, never "not known to be manual").
     """
+    mechanically_accepted = exists().where(
+        PaperTrade.position_id == PaperPosition.id,
+        PaperTrade.decision == PaperDecision.ACCEPTED,
+        PaperTrade.actor == MECHANICAL_EQUITY_ACTOR,
+    )
     stmt = select(PaperPosition).where(
         PaperPosition.strategy_version_id == strategy_version_id,
         PaperPosition.closed_at.is_not(None),
+        mechanically_accepted,
     )
     if closed_since is not None:
         stmt = stmt.where(PaperPosition.closed_at >= closed_since)
@@ -207,11 +243,19 @@ def closed_options_r_multiples(
     rather than absorbed (D3 open question 16).
 
     ``closed_since`` mirrors :func:`closed_paper_r_multiples` so the arming
-    ceremony's evidence window means the same thing on both asset classes.
+    ceremony's evidence window means the same thing on both asset classes, and
+    so does the mechanical-only rule: a structure counts only when its ACCEPTED
+    ``options_trade`` carries ``actor == "options_auto_simulate"``.
     """
+    mechanically_accepted = exists().where(
+        OptionsTrade.options_position_id == OptionsPosition.id,
+        OptionsTrade.decision == PaperDecision.ACCEPTED,
+        OptionsTrade.actor == MECHANICAL_OPTIONS_ACTOR,
+    )
     stmt = select(OptionsPosition).where(
         OptionsPosition.strategy_version_id == strategy_version_id,
         OptionsPosition.closed_at.is_not(None),
+        mechanically_accepted,
     )
     if closed_since is not None:
         stmt = stmt.where(OptionsPosition.closed_at >= closed_since)
@@ -289,7 +333,9 @@ def evaluate_strategy_health(
         return assessments
 
     rows = session.execute(
-        select(StrategyVersion, Strategy).join(Strategy, StrategyVersion.strategy_id == Strategy.id)
+        select(StrategyVersion, Strategy)
+        .join(Strategy, StrategyVersion.strategy_id == Strategy.id)
+        .order_by(StrategyVersion.id)
     ).all()
 
     for ver, strat in rows:
@@ -323,7 +369,29 @@ def evaluate_strategy_health(
         n = len(returns)
         window = f"last_{n}_paper_trades"
 
-        if n < cfg.min_paper_trades:
+        min_trades = max(cfg.min_paper_trades, _MIN_TRADES_FOR_SAMPLE_VARIANCE)
+        if n < min_trades:
+            # Recorded, not just returned: a strategy_health row per cycle is
+            # how the dashboard/status can tell "monitor ran, nothing to
+            # compare yet" from "monitor never ran". Placeholder 0.0 numbers
+            # (the columns are NOT NULL); the action and note say they are not
+            # measurements. No status change, no audit_log row.
+            session.add(
+                StrategyHealth(
+                    strategy_version_id=ver.id,
+                    window_label=window,
+                    paper_expectancy=0.0,
+                    backtest_expectancy=0.0,
+                    z_score=0.0,
+                    action=INSUFFICIENT_ACTION,
+                    note=(
+                        f"{n} closed mechanically accepted paper trade(s) < {min_trades} "
+                        "required; not compared (manual acceptances excluded)"
+                    ),
+                    evaluated_at=utcnow(),
+                )
+            )
+            session.flush()
             assessments.append(
                 HealthAssessment(
                     strat.name,
@@ -333,7 +401,7 @@ def evaluate_strategy_health(
                     0.0,
                     0.0,
                     0.0,
-                    "insufficient_data",
+                    INSUFFICIENT_ACTION,
                     from_status,
                     from_status,
                 )
@@ -359,7 +427,11 @@ def evaluate_strategy_health(
             )
             continue
 
-        variance = sum((r - paper_exp) ** 2 for r in returns) / n
+        # SAMPLE variance (Bessel, n - 1): the paper mean is itself estimated
+        # from these n trades, so dividing by n understates the spread, shrinks
+        # the standard error and inflates |z| — biased toward a downgrade on
+        # small samples. n >= 2 is guaranteed by the min_trades gate above.
+        variance = sum((r - paper_exp) ** 2 for r in returns) / (n - 1)
         std_err = math.sqrt(variance / n) or 1e-9
         z = (paper_exp - bt_exp) / std_err
 
@@ -459,15 +531,46 @@ def run_health_monitor(
     return result
 
 
+def _newest_preferring_assessments[K](
+    rows: list[tuple[K, StrategyHealth]],
+) -> dict[K, StrategyHealth]:
+    """Summarize current per-version assessments from newest-first rows.
+
+    First discard superseded assessments of each version, including favorable
+    assessments superseded by insufficient evidence. Among different versions,
+    prefer an actual assessment so an empty sibling cannot hide a downgrade.
+    Historical actions remain in strategy_health; they are not current evidence.
+    """
+    real: dict[K, StrategyHealth] = {}
+    placeholder: dict[K, StrategyHealth] = {}
+    seen_versions: set[int] = set()
+    for key, health in rows:
+        if health.strategy_version_id in seen_versions:
+            continue
+        seen_versions.add(health.strategy_version_id)
+        bucket = placeholder if health.action == INSUFFICIENT_ACTION else real
+        bucket.setdefault(key, health)
+    for key, health in placeholder.items():
+        real.setdefault(key, health)
+    return real
+
+
 def latest_health_by_strategy(session: Session) -> dict[str, StrategyHealth]:
-    """Most recent StrategyHealth row per strategy name (for Strategy Lab)."""
+    """Summarize the latest assessment of each version for Strategy Lab."""
     rows = session.execute(
         select(Strategy.name, StrategyHealth)
         .join(StrategyVersion, StrategyHealth.strategy_version_id == StrategyVersion.id)
         .join(Strategy, StrategyVersion.strategy_id == Strategy.id)
         .order_by(StrategyHealth.evaluated_at.desc(), StrategyHealth.id.desc())
     ).all()
-    out: dict[str, StrategyHealth] = {}
-    for name, health in rows:
-        out.setdefault(name, health)
-    return out
+    return _newest_preferring_assessments([(name, health) for name, health in rows])
+
+
+def latest_health_by_version(session: Session) -> dict[int, StrategyHealth]:
+    """Latest assessment per version, including current insufficient evidence."""
+    rows = session.scalars(
+        select(StrategyHealth).order_by(
+            StrategyHealth.evaluated_at.desc(), StrategyHealth.id.desc()
+        )
+    ).all()
+    return _newest_preferring_assessments([(h.strategy_version_id, h) for h in rows])
