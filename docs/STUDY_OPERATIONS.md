@@ -16,7 +16,7 @@ prevent this physical closed-lid condition. Neither historical outcomes nor froz
 parameters should be rewritten to hide the missing Kronos session.
 
 For an always-on Mac, install the optional `com.signalforge.study-awake.plist`
-from `deploy/launchd` into `~/Library/LaunchAgents` with mode 600 and use
+from `deploy/launchd/templates` into `~/Library/LaunchAgents` with mode 600 and use
 `launchctl bootstrap gui/$(id -u) <absolute-plist-path>`. It runs the macOS
 `caffeinate -i` assertion while loaded, preventing idle system sleep. It does
 not prevent deliberate sleep, closed-lid sleep, power loss or shutdown, and

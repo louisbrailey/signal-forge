@@ -244,7 +244,7 @@ def test_idle_sleep_guard_does_not_override_explicit_sleep():
     import plistlib
     from pathlib import Path
 
-    path = Path(__file__).parents[2] / "deploy/launchd/com.signalforge.study-awake.plist"
+    path = Path(__file__).parents[2] / "deploy/launchd/templates/com.signalforge.study-awake.plist"
     job = plistlib.loads(path.read_bytes())
     assert job["ProgramArguments"] == ["/usr/bin/caffeinate", "-i"]
     assert job["KeepAlive"] is True and job["RunAtLoad"] is True
