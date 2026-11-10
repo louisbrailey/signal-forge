@@ -192,9 +192,28 @@ def test_captured_batch_can_resume_without_retriggering_scan(experiment):
 def test_after_utc_deadline_does_not_create_new_batch(experiment, monkeypatch):
     _, directory = ready_source(experiment)
     monkeypatch.setattr(collector, "advance", lambda *args: pytest.fail("late new admission"))
+    result = collector.poll([directory], now=NOW.replace(day=27, hour=1))[0]
+    assert result["status"] == "blocked"
+    assert result["error_category"] == "MissedUTCCollectionWindow"
+
+
+def test_completed_session_stays_complete_after_utc_deadline(experiment):
+    _, directory = ready_source(experiment)
+    with sqlite3.connect(directory / "books.sqlite") as db:
+        db.execute("INSERT INTO comparison_batch VALUES (?,?,?)", ("2026-10-26", "complete", "{}"))
     assert (
-        collector.poll([directory], now=NOW.replace(day=27, hour=1))[0]["status"]
-        == "waiting_for_postclose_window"
+        collector.trigger(directory, NOW.replace(day=27, hour=1))["status"] == "already_collected"
+    )
+
+
+def test_deadline_is_utc_even_when_caller_uses_local_timezone(experiment):
+    from zoneinfo import ZoneInfo
+
+    _, directory = ready_source(experiment)
+    late = NOW.replace(day=27, hour=1)
+    assert (
+        collector.trigger(directory, late.astimezone(ZoneInfo("America/Los_Angeles")))["status"]
+        == "blocked"
     )
 
 
@@ -219,3 +238,14 @@ def test_launch_agent_is_separate_and_uses_pinned_imports():
     assert not any("KEY" in k or "TOKEN" in k for k in job["EnvironmentVariables"])
     assert "--check-only" not in args
     assert args.count("--experiment") == 2
+
+
+def test_idle_sleep_guard_does_not_override_explicit_sleep():
+    import plistlib
+    from pathlib import Path
+
+    path = Path(__file__).parents[2] / "deploy/launchd/com.signalforge.study-awake.plist"
+    job = plistlib.loads(path.read_bytes())
+    assert job["ProgramArguments"] == ["/usr/bin/caffeinate", "-i"]
+    assert job["KeepAlive"] is True and job["RunAtLoad"] is True
+    assert "EnvironmentVariables" not in job

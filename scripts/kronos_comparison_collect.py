@@ -50,13 +50,21 @@ def trigger(directory: Path, now: datetime) -> dict[str, Any]:
                 return {"status": "ready", "reason": "resume_captured_batch", "day": pending}
             origin = last_closed_session(now)
             day = str(origin)
-            if day < manifest["study_days"][0] or origin != now.date():
+            if day < manifest["study_days"][0]:
                 return {"status": "waiting_for_postclose_window"}
             if books.scalar(
                 text("SELECT COUNT(*) FROM comparison_batch WHERE day=:day AND status='complete'"),
                 {"day": day},
             ):
                 return {"status": "already_collected", "day": day}
+            if origin != now.astimezone(UTC).date():
+                # Preserve the frozen UTC admission deadline. An uncaptured
+                # session cannot become prospective evidence after a late scan.
+                return {
+                    "status": "blocked",
+                    "error_category": "MissedUTCCollectionWindow",
+                    "day": day,
+                }
         bounds = rth_bounds_utc(origin)
         assert bounds is not None
         close = max(bounds[1], datetime.fromisoformat(manifest["frozen_at"]))
