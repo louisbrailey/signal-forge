@@ -14,7 +14,9 @@ from sqlalchemy.orm import Session
 from signalforge.db.models import (
     BacktestMetric,
     BacktestRun,
+    DataSnapshot,
     Strategy,
+    StrategyPromotionEvaluation,
     StrategyVersion,
 )
 from signalforge.research.backtest_runner import StrategyBacktestResult
@@ -227,3 +229,166 @@ def latest_oos_metric(session: Session, spec: StrategySpec) -> BacktestMetric | 
         .order_by(BacktestRun.created_at.desc(), BacktestMetric.id.desc())
         .limit(1)
     )
+
+
+def oos_scope_failures(
+    session: Session,
+    metric: BacktestMetric | None,
+    spec: StrategySpec,
+    *,
+    config_hash: str,
+    dataset_snapshot_id: int | None,
+    source: str,
+    symbols: object,
+) -> list[str]:
+    """Validate the ACTUAL latest row against actual scan scope, never select
+    another row. SELECT-only even with a caller's pending ORM changes.
+
+    Scope membership uses sets; the saved record separately retains its linked
+    evaluation's exact bootstrap/input order. Unknown legacy scope is ineligible.
+    """
+    from signalforge.research.approval_scope import ApprovedScope, scan_scope_matches
+
+    def refuse(reason: str) -> list[str]:
+        return [f"OOS scope mismatch: {reason}"]
+
+    def symbol_list(value: object) -> list[str] | None:
+        if not isinstance(value, (list, tuple, set, frozenset)) or not value:
+            return None
+        if not all(isinstance(s, str) and s and s == s.strip() for s in value):
+            return None
+        return [s.upper() for s in value]
+
+    def positive_id(value: object) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+    with session.no_autoflush:
+        if metric is None or metric.run is None:
+            return refuse("no recorded run")
+        run = metric.run
+        params = run.params_json
+        if not isinstance(params, dict):
+            return refuse("saved provenance missing or malformed")
+        if failures := oos_provenance_failures(params):
+            return failures
+        if "allow_mismatch" in params and params["allow_mismatch"] is not False:
+            return refuse("override flag must be absent or literally False")
+        if "mismatched_inputs" in params and (
+            not isinstance(params["mismatched_inputs"], list) or params["mismatched_inputs"]
+        ):
+            return refuse("mismatched_inputs must be absent or an empty list")
+        flags = params.get("reproduces_evaluation")
+        required = {"symbols", "window_start", "until", "source", "config_hash"}
+        if (
+            not isinstance(flags, dict)
+            or set(flags) != required
+            or not all(v is True for v in flags.values())
+        ):
+            return refuse("complete five literal-True reproduction flags required")
+        if not config_hash or run.config_hash != config_hash:
+            return refuse("saved run config_hash does not match actual scan config")
+        if not positive_id(dataset_snapshot_id) or not isinstance(source, str) or not source:
+            return refuse("actual scan dataset/source identity is missing")
+        scan_symbols = symbol_list(symbols)
+        saved_symbols = symbol_list(params.get("symbols"))
+        if scan_symbols is None or saved_symbols is None:
+            return refuse("scan or saved universe is missing or malformed")
+        if params.get("purpose") != "development_oos":
+            return refuse("saved purpose is not development_oos")
+        saved_snapshot = params.get("dataset_snapshot")
+        if (
+            not isinstance(saved_snapshot, dict)
+            or not positive_id(saved_snapshot.get("id"))
+            or saved_snapshot["id"] != dataset_snapshot_id
+            or not isinstance(saved_snapshot.get("key"), str)
+            or not saved_snapshot["key"]
+        ):
+            return refuse("saved dataset identity does not match actual scan dataset")
+        saved_source = params.get("source")
+        source_values = [saved_source] if isinstance(saved_source, str) else saved_source
+        if (
+            not isinstance(source_values, (list, tuple))
+            or not source_values
+            or not all(isinstance(s, str) and s for s in source_values)
+        ):
+            return refuse("saved source is missing or malformed")
+        if set(source_values) != {source} or set(saved_symbols) != set(scan_symbols):
+            return refuse("saved source/universe does not match actual scan scope")
+        data = params.get("data_provenance")
+        if isinstance(data, dict) and "sources" in data:
+            measured_sources = data["sources"]
+            if (
+                not isinstance(measured_sources, list)
+                or not all(isinstance(s, str) for s in measured_sources)
+                or set(measured_sources) != {source}
+            ):
+                return refuse("measured input source contradicts saved scan scope")
+        executable_hash = spec_json_hash(spec)
+        if params.get("spec_json_hash") != executable_hash:
+            return refuse("saved executable spec hash differs from current strategy")
+        identity = session.execute(
+            select(Strategy.name, StrategyVersion.version)
+            .join(StrategyVersion, StrategyVersion.strategy_id == Strategy.id)
+            .where(StrategyVersion.id == run.strategy_version_id)
+        ).one_or_none()
+        if identity is None or tuple(identity) != (spec.name, spec.version):
+            return refuse("run belongs to a different strategy/version")
+        evaluation_id = params.get("promotion_evaluation_id")
+        if not positive_id(evaluation_id):
+            return refuse("linked evaluation identity is missing or malformed")
+        e = StrategyPromotionEvaluation
+        row = session.execute(
+            select(
+                e.id,
+                e.strategy_version_id,
+                e.dataset_snapshot_id,
+                e.passed,
+                e.config_hash,
+                e.spec_json_hash,
+                e.universe_json,
+                e.data_provenance_json,
+                DataSnapshot.key,
+                DataSnapshot.symbols_json.label("snapshot_symbols"),
+            )
+            .join(DataSnapshot, DataSnapshot.id == e.dataset_snapshot_id)
+            .where(e.id == evaluation_id)
+        ).one_or_none()
+        if (
+            row is None
+            or row.strategy_version_id != run.strategy_version_id
+            or row.passed is not True
+        ):
+            return refuse("linked evaluation is not a passing approval for this version")
+        approved_symbols = symbol_list(row.universe_json)
+        approved_data = row.data_provenance_json
+        approved_sources = approved_data.get("sources") if isinstance(approved_data, dict) else None
+        if (
+            approved_symbols is None
+            or not isinstance(approved_sources, list)
+            or not approved_sources
+            or not all(isinstance(s, str) and s for s in approved_sources)
+        ):
+            return refuse("linked approved scope is missing or malformed")
+        snapshot_symbols = symbol_list(row.snapshot_symbols)
+        if snapshot_symbols is None or set(snapshot_symbols) != set(scan_symbols):
+            return refuse("dataset snapshot universe differs from actual scan scope")
+        if row.key != saved_snapshot["key"] or saved_symbols != approved_symbols:
+            return refuse("saved dataset key/input order differs from linked evaluation")
+        scope = ApprovedScope(
+            row.id,
+            row.dataset_snapshot_id,
+            row.config_hash,
+            row.spec_json_hash,
+            frozenset(approved_symbols),
+            frozenset(approved_sources),
+        )
+        if not scan_scope_matches(
+            [scope],
+            dataset_snapshot_id=dataset_snapshot_id,
+            config_hash=config_hash,
+            spec_json_hash=executable_hash,
+            source=source,
+            universe=frozenset(scan_symbols),
+        ):
+            return refuse("latest evidence and linked approval do not bind to actual scan scope")
+        return []

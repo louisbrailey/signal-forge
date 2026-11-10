@@ -63,15 +63,20 @@ from signalforge import audit
 from signalforge.backtest.costs import CostModel
 from signalforge.backtest.leakage import LookaheadDetected, assert_no_lookahead
 from signalforge.backtest.regime import TREND_LOOKBACK, label_regimes
+from signalforge.config.hashing import config_hash as _identity_hash
 from signalforge.config.research import PromotionThresholds, ResearchConfig
+from signalforge.data.calendar import is_session, sessions
 from signalforge.data.intraday_coverage import intraday_rth_coverage
 from signalforge.data.repository import SourceFilter
 from signalforge.data.series import PriceSeries
 from signalforge.data.validate import validate_daily
 from signalforge.db.models import (
+    AppSetting,
     AuditLog,
     BacktestRun,
     DataSnapshot,
+    Instrument,
+    OHLCVDaily,
     Strategy,
     StrategyPromotionEvaluation,
     StrategySealedTest,
@@ -100,6 +105,7 @@ from signalforge.research.persistence import (
     upsert_strategy_version,
 )
 from signalforge.research.portfolio_metrics import compute_portfolio_metrics
+from signalforge.research.registry import StrategySpec
 from signalforge.research.sensitivity import MAX_GRID_POINTS, run_parameter_sensitivity
 from signalforge.research.strategies.base import BaselineStrategy
 
@@ -1843,6 +1849,246 @@ def _evaluation_gate_evidence(evaluation: StrategyPromotionEvaluation) -> dict[s
     }
 
 
+def _daily_development_calendar(
+    session: Session,
+    evaluation: StrategyPromotionEvaluation,
+    *,
+    spec: StrategySpec,
+    snapshot_id: int,
+    start: date,
+    until: date,
+    symbols: list[str],
+    source: SourceFilter,
+) -> dict[str, Any]:
+    """Calendar identity only; no prices, sealed metrics or backtest queries.
+
+    Both boundaries must imply the SAME final XNYS session. An earlier lock
+    that removes a trading session cannot be repaired by shortening the run.
+    Caller dates are never silently normalized, even with allow_mismatch.
+    """
+    if spec.horizon is Horizon.INTRADAY:
+        raise ValueError("development calendar policy supports daily EOD only; intraday refused")
+    s = StrategySealedTest
+    linked = session.execute(
+        select(
+            s.id, s.strategy_version_id, s.dataset_snapshot_id, s.window_start, s.window_end
+        ).where(s.id == evaluation.sealed_test_id)
+    ).one_or_none()
+    if (
+        linked is None
+        or linked.strategy_version_id != evaluation.strategy_version_id
+        or linked.dataset_snapshot_id != snapshot_id
+        or evaluation.dataset_snapshot_id != snapshot_id
+        or linked.window_end < linked.window_start
+    ):
+        raise ValueError("missing or wrong linked sealed boundary metadata; daily record refused")
+    locks = session.execute(
+        select(s.id, s.window_start)
+        .where(
+            or_(
+                s.strategy_version_id == evaluation.strategy_version_id,
+                s.dataset_snapshot_id == snapshot_id,
+            )
+        )
+        .order_by(s.window_start, s.id)
+    ).all()
+    if not locks:
+        raise ValueError("no applicable locked boundary; daily record refused")
+    earliest = locks[0].window_start
+    if until >= earliest:
+        raise ValueError(f"--until {until} is not before every sealed window ({earliest})")
+    linked_sessions = sessions(evaluation.window_start, linked.window_start - timedelta(days=1))
+    safe_sessions = sessions(evaluation.window_start, earliest - timedelta(days=1))
+    if not linked_sessions or not safe_sessions:
+        raise ValueError("no XNYS development sessions before both locked boundaries")
+    expected = safe_sessions[-1]
+    if expected != linked_sessions[-1]:
+        raise ValueError("conflicting trading boundaries remove an evaluated XNYS session; refused")
+    if not is_session(until) or until != expected:
+        raise ValueError(
+            f"--until must be the exact canonical XNYS session {expected}; got {until}"
+        )
+    data = evaluation.data_provenance_json or {}
+    coverage = data.get("coverage")
+    if not isinstance(coverage, str):
+        raise ValueError("evaluation input coverage unavailable; cannot attest the daily window")
+    try:
+        first, last = (date.fromisoformat(part) for part in coverage.split(".."))
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError(
+            "evaluation input coverage unavailable; cannot attest the daily window"
+        ) from None
+    if (first, last) != (linked_sessions[0], expected):
+        raise ValueError(
+            "evaluation input coverage does not attest the full canonical daily window"
+        )
+    sources = data.get("sources")
+    if (
+        not isinstance(sources, list)
+        or not sources
+        or not all(isinstance(x, str) and x for x in sources)
+    ):
+        raise ValueError("evaluation input sources unavailable; daily window identity unknown")
+    bars = data.get("bars")
+    if isinstance(bars, bool) or not isinstance(bars, int) or bars <= 0:
+        raise ValueError("evaluation input count unavailable; daily window identity unknown")
+    actual_sources = [source] if isinstance(source, str) else list(source or ())
+    expected_identity = {
+        "symbols": list(evaluation.universe_json),
+        "sources": sorted(sources),
+        "start": evaluation.window_start.isoformat(),
+        "first_session": first.isoformat(),
+        "last_session": last.isoformat(),
+    }
+    requested_identity = {
+        "symbols": symbols,
+        "sources": sorted(actual_sources),
+        "start": start.isoformat(),
+        "first_session": safe_sessions[0].isoformat(),
+        "last_session": until.isoformat(),
+    }
+    if _identity_hash(expected_identity) != _identity_hash(requested_identity):
+        raise ValueError(
+            "evaluation symbol/source/window identity differs; daily calendar record refused"
+        )
+    return {
+        "policy": "DAILY-EOD-XNYS-1",
+        "calendar": "XNYS",
+        "frequency": "daily_eod",
+        "linked_lock": {
+            "id": linked.id,
+            "window_start": linked.window_start.isoformat(),
+            "window_end": linked.window_end.isoformat(),
+        },
+        "earliest_locked_boundary": earliest.isoformat(),
+        "earliest_lock_ids": [r.id for r in locks if r.window_start == earliest],
+        "expected_trading_cutoff": expected.isoformat(),
+        "evaluation_coverage": coverage,
+        "evaluation_input_scope_sha256": _identity_hash(expected_identity),
+        "requested_input_scope_sha256": _identity_hash(requested_identity),
+        "xnys_session_grid_sha256": _identity_hash(
+            {"sessions": [d.isoformat() for d in safe_sessions]}
+        ),
+        "historical_price_content_hash": "not recorded; unchanged prices are not attested",
+    }
+
+
+def _require_daily_cutoff_coverage(
+    session: Session, symbols: list[str], source: SourceFilter, until: date, proxy_symbol: str
+) -> None:
+    """Check only the validated final development session, never a
+    sealed bar or a last-observed-row fallback. Missing data is a refusal."""
+    required = {symbol.upper() for symbol in symbols} | {proxy_symbol.upper()}
+    sources = [source] if isinstance(source, str) else list(source or ())
+    found = set(
+        session.scalars(
+            select(Instrument.symbol)
+            .join(OHLCVDaily, OHLCVDaily.instrument_id == Instrument.id)
+            .where(
+                Instrument.symbol.in_(required),
+                OHLCVDaily.session_date == until,
+                OHLCVDaily.source.in_(sources),
+            )
+        )
+    )
+    if missing := sorted(required - found):
+        raise ValueError(f"missing required XNYS cutoff session {until}: {', '.join(missing)}")
+
+
+def _current_record_config(session: Session) -> ResearchConfig:
+    """Fresh DB overlay, not a cached ORM setting or caller historical config."""
+    from signalforge.config import get_settings
+    from signalforge.settings_store import _deep_merge
+
+    overlay = session.scalar(
+        select(AppSetting.value_json).where(AppSetting.key == "research_overrides")
+    )
+    if overlay is None:
+        overlay = {}
+    if not isinstance(overlay, dict):
+        raise ValueError("current research configuration overlay is malformed")
+    return ResearchConfig.model_validate(
+        _deep_merge(get_settings().research.model_dump(mode="json"), overlay)
+    )
+
+
+def _approved_record_evaluation(
+    session: Session,
+    evaluation: StrategyPromotionEvaluation,
+    *,
+    version: StrategyVersion,
+    spec: StrategySpec,
+    config_hash: str,
+    snapshot_id: int,
+    source: SourceFilter,
+    symbols: list[str],
+) -> None:
+    """Identity pin to latest matching APPROVED metadata; never rank results."""
+    from signalforge.research.approval_scope import ApprovedScope, scan_scope_matches
+
+    status = session.execute(
+        select(Strategy.status, StrategyVersion.status)
+        .join(StrategyVersion, StrategyVersion.strategy_id == Strategy.id)
+        .where(StrategyVersion.id == version.id)
+    ).one()
+    if any(s is not StrategyStatus.PAPER_APPROVED for s in status):
+        raise ValueError(
+            "explicit/current ordinary record requires current PAPER_APPROVED statuses"
+        )
+    source_values = [source] if isinstance(source, str) else list(source or ())
+    if len(source_values) != 1:
+        raise ValueError("explicit/current approved scope requires exactly one source")
+    e = StrategyPromotionEvaluation
+    rows = session.execute(
+        select(
+            e.id,
+            e.strategy_version_id,
+            e.dataset_snapshot_id,
+            e.config_hash,
+            e.spec_json_hash,
+            e.universe_json,
+            e.data_provenance_json,
+        )
+        .where(e.strategy_version_id == version.id, e.passed.is_(True))
+        .order_by(e.evaluated_at.desc(), e.id.desc())
+    )
+    matches = []
+    for row in rows:
+        data = row.data_provenance_json
+        sources = data.get("sources") if isinstance(data, dict) else None
+        if (
+            not isinstance(sources, list)
+            or not sources
+            or not all(isinstance(s, str) and s for s in sources)
+            or not isinstance(row.universe_json, list)
+            or not row.universe_json
+            or not all(isinstance(s, str) and s for s in row.universe_json)
+        ):
+            continue
+        scope = ApprovedScope(
+            row.id,
+            row.dataset_snapshot_id,
+            row.config_hash,
+            row.spec_json_hash,
+            frozenset(s.upper() for s in row.universe_json),
+            frozenset(sources),
+        )
+        if scan_scope_matches(
+            [scope],
+            dataset_snapshot_id=snapshot_id,
+            config_hash=config_hash,
+            spec_json_hash=spec_json_hash(spec),
+            source=source_values[0],
+            universe=frozenset(symbols),
+        ):
+            matches.append(row.id)
+    if not matches or evaluation.id != matches[0] or evaluation.strategy_version_id != version.id:
+        raise ValueError(
+            "evaluation_id is not the latest approved metadata match "
+            "for the intended config/scan scope"
+        )
+
+
 def record_development_oos_backtest(
     session: Session,
     strategy: BaselineStrategy,
@@ -1856,11 +2102,18 @@ def record_development_oos_backtest(
     persist: bool = True,
     allow_mismatch: bool = False,
     allow_duplicate: bool = False,
+    evaluation_id: int | None = None,
+    require_current_scope: bool = False,
 ) -> DevelopmentOOSRecord:
     """Re-run the pre-sealed development backtest a promotion evaluation of
     this strategy version on this dataset snapshot measured, and (unless
     ``persist`` is False) record it through ``persist_backtest_result`` so
     the scan's out-of-sample gate and the health monitor have a value.
+
+    Daily EOD only: ``until`` must be the exact common final XNYS session
+    before the linked and earliest applicable locked boundaries. Caller
+    dates are never normalized; intraday, lost coverage and conflicting
+    trading boundaries are refused independently of override flags.
 
     It changes no status and takes no sealed look: ``until`` must fall
     strictly before every sealed window locked on the snapshot or for the
@@ -1871,12 +2124,22 @@ def record_development_oos_backtest(
     what that evaluation recorded. Raises ``ValueError`` on any refusal;
     ``allow_mismatch``/``allow_duplicate`` are passed to
     :func:`persist_development_oos_record`.
+
+    ``evaluation_id=None`` retains the historical selector. An explicit ID
+    pins the newest passing approved metadata for the supplied scope, before
+    data access. ``require_current_scope`` additionally requires the actual
+    current config and is independently repeated by the CLI's short writer.
+    Historical research config never establishes eligibility for another scan.
     """
     if config is None:
         from signalforge.settings_store import effective_research_config
 
         config = effective_research_config(session)
+    if require_current_scope and config.config_hash != _current_record_config(session).config_hash:
+        raise ValueError("caller config does not match actual effective CURRENT research config")
     spec = strategy.spec()
+    if spec.horizon is Horizon.INTRADAY:
+        raise ValueError("development calendar policy supports daily EOD only; intraday refused")
     snapshot = session.get(DataSnapshot, dataset_snapshot_id)
     if snapshot is None:
         raise ValueError(f"no dataset snapshot with id {dataset_snapshot_id}")
@@ -1888,23 +2151,39 @@ def record_development_oos_backtest(
     if version is None:
         raise ValueError(f"{spec.name} v{spec.version} has never been registered or evaluated")
 
-    evaluations = list(
-        session.scalars(
-            select(StrategyPromotionEvaluation)
-            .where(
-                StrategyPromotionEvaluation.strategy_version_id == version.id,
-                StrategyPromotionEvaluation.dataset_snapshot_id == snapshot.id,
+    if evaluation_id is None:
+        evaluations = list(
+            session.scalars(
+                select(StrategyPromotionEvaluation)
+                .where(
+                    StrategyPromotionEvaluation.strategy_version_id == version.id,
+                    StrategyPromotionEvaluation.dataset_snapshot_id == snapshot.id,
+                )
+                .order_by(StrategyPromotionEvaluation.id.desc())
             )
-            .order_by(StrategyPromotionEvaluation.id.desc())
         )
-    )
-    if not evaluations:
-        raise ValueError(
-            f"{spec.name} v{spec.version} (strategy_version {version.id}) has no promotion "
-            f"evaluation on dataset snapshot {snapshot.id} ({snapshot.key!r}) — there is no "
-            f"development backtest to reproduce"
-        )
-    evaluation = next((e for e in evaluations if e.passed), evaluations[0])
+        if not evaluations:
+            raise ValueError(
+                f"{spec.name} v{spec.version} (strategy_version {version.id}) has no promotion "
+                f"evaluation on dataset snapshot {snapshot.id} ({snapshot.key!r}) — there is no "
+                f"development backtest to reproduce"
+            )
+        evaluation = next((e for e in evaluations if e.passed), evaluations[0])
+    else:
+        if (
+            isinstance(evaluation_id, bool)
+            or not isinstance(evaluation_id, int)
+            or evaluation_id <= 0
+        ):
+            raise ValueError("evaluation_id must be a positive integer")
+        selected = session.get(StrategyPromotionEvaluation, evaluation_id)
+        if (
+            selected is None
+            or selected.strategy_version_id != version.id
+            or selected.dataset_snapshot_id != snapshot.id
+        ):
+            raise ValueError("evaluation_id belongs to a different strategy/version or snapshot")
+        evaluation = selected
     current_hash = spec_json_hash(spec)
     if evaluation.spec_json_hash != current_hash:
         raise ValueError(
@@ -1939,12 +2218,6 @@ def record_development_oos_backtest(
         source = recorded[0] if len(recorded) == 1 else recorded
     source_json: Any = source if isinstance(source, str) else list(source)
 
-    eval_sealed = (
-        session.get(StrategySealedTest, evaluation.sealed_test_id)
-        if evaluation.sealed_test_id is not None
-        else None
-    )
-    eval_dev_end = None if eval_sealed is None else eval_sealed.window_start - timedelta(days=1)
     eval_sources = (evaluation.data_provenance_json or {}).get("sources") or []
     # Trade order follows symbol order and the bootstrap CI is order-dependent,
     # so reuse the evaluation's own ordering whenever it covers the same set;
@@ -1953,10 +2226,34 @@ def record_development_oos_backtest(
     symbols = list(snapshot.symbols_json)
     if sorted(symbols) == sorted(eval_universe):
         symbols = eval_universe
+    if evaluation_id is not None or require_current_scope:
+        _approved_record_evaluation(
+            session,
+            evaluation,
+            version=version,
+            spec=spec,
+            config_hash=config.config_hash,
+            snapshot_id=snapshot.id,
+            source=source,
+            symbols=symbols,
+        )
+        if start != evaluation.window_start:
+            raise ValueError("explicit/current evaluation window start differs")
+    calendar = _daily_development_calendar(
+        session,
+        evaluation,
+        spec=spec,
+        snapshot_id=snapshot.id,
+        start=start,
+        until=until,
+        symbols=symbols,
+        source=source,
+    )
+    _require_daily_cutoff_coverage(session, symbols, source, until, proxy_symbol)
     reproduces = {
         "symbols": symbols == eval_universe,
         "window_start": start == evaluation.window_start,
-        "until": eval_dev_end is not None and until == eval_dev_end,
+        "until": until.isoformat() == calendar["expected_trading_cutoff"],
         "source": sorted([source] if isinstance(source, str) else source) == sorted(eval_sources),
         "config_hash": config.config_hash == evaluation.config_hash,
     }
@@ -1971,6 +2268,17 @@ def record_development_oos_backtest(
         source=source,
         config=config,
     )
+    measured = evaluation.data_provenance_json or {}
+    if (
+        result.data.first is None
+        or result.data.last != until
+        or f"{result.data.first}..{result.data.last}" != measured.get("coverage")
+        or result.data.bars != measured.get("bars")
+        or sorted(result.data.sources) != sorted(eval_sources)
+    ):
+        raise ValueError(
+            "computed daily input coverage/source/count differs from evaluation; refused"
+        )
     provenance: dict[str, Any] = {
         "purpose": "development_oos",
         "dataset_snapshot": {"id": snapshot.id, "key": snapshot.key},
@@ -1980,6 +2288,15 @@ def record_development_oos_backtest(
         "proxy_symbol": proxy_symbol,
         "promotion_evaluation_id": evaluation.id,
         "reproduces_evaluation": reproduces,
+        "development_calendar": calendar,
+        "evaluation_selection": {
+            "mode": (
+                "current_scope"
+                if require_current_scope
+                else "explicit_approved" if evaluation_id is not None else "historical_research"
+            ),
+            "requested_evaluation_id": evaluation_id,
+        },
         "spec_json_hash": current_hash,
         "code_git_sha": spec.git_sha,
         "is_oos_split": "per-symbol fraction (backtest_runner._is_boundary)",
@@ -2002,7 +2319,11 @@ def record_development_oos_backtest(
     if not persist:
         return record
     return persist_development_oos_record(
-        session, record, allow_mismatch=allow_mismatch, allow_duplicate=allow_duplicate
+        session,
+        record,
+        allow_mismatch=allow_mismatch,
+        allow_duplicate=allow_duplicate,
+        require_current_scope=require_current_scope,
     )
 
 
@@ -2045,6 +2366,7 @@ def persist_development_oos_record(
     *,
     allow_mismatch: bool = False,
     allow_duplicate: bool = False,
+    require_current_scope: bool = False,
 ) -> DevelopmentOOSRecord:
     """Write a computed :class:`DevelopmentOOSRecord` as a ``BacktestRun``.
 
@@ -2054,10 +2376,12 @@ def persist_development_oos_record(
 
     The scan's OOS gate reads the newest such row, so a run whose inputs
     differ from the evaluation's (any ``reproduces_evaluation`` flag false)
-    is refused unless ``allow_mismatch`` — it would unlock candidates on a
-    metric gates 1-8 never measured — and the override is written into the
-    provenance and audit event. A run identical to one already recorded is
-    refused unless ``allow_duplicate``."""
+    is refused unless ``allow_mismatch``, and the override is written into
+    provenance and audit. Forced research rows remain ineligible candidate
+    evidence. A run identical to one already recorded is
+    refused unless ``allow_duplicate``. Daily calendar, linked-boundary and
+    required-session coverage checks are independently repeated here and
+    can never be waived by either override flag."""
     mismatched = sorted(k for k, ok in record.reproduces_evaluation.items() if not ok)
     if mismatched and not allow_mismatch:
         raise ValueError(
@@ -2087,6 +2411,81 @@ def persist_development_oos_record(
             f"refusing to record: --until {record.until} is not before the sealed window "
             f"({boundary or 'unknown'})"
         )
+    # Independent short-writer recheck: an intervening lock, lost cutoff
+    # coverage or stripped calendar provenance cannot be bypassed by override.
+    evaluation = session.get(StrategyPromotionEvaluation, record.evaluation_id)
+    if (
+        evaluation is None
+        or evaluation.strategy_version_id != record.strategy_version_id
+        or spec_json_hash(record.result.spec) != evaluation.spec_json_hash
+    ):
+        raise ValueError("daily record evaluation identity changed; recompute before recording")
+    selection = record.provenance.get("evaluation_selection", {})
+    current_intent = require_current_scope or (
+        isinstance(selection, dict) and selection.get("mode") == "current_scope"
+    )
+    explicit_intent = isinstance(selection, dict) and selection.get("mode") == "explicit_approved"
+    if current_intent or explicit_intent:
+        version = session.get(StrategyVersion, record.strategy_version_id)
+        if version is None:
+            raise ValueError("ordinary record strategy version disappeared")
+        cfg = _current_record_config(session) if current_intent else None
+        if current_intent and (cfg is None or record.result.config_hash != cfg.config_hash):
+            raise ValueError("effective CURRENT config changed before persistence; recompute")
+        if current_intent:
+            from signalforge.research.strategies import default_strategies
+
+            current_spec = next(
+                (
+                    s.spec()
+                    for s in default_strategies()
+                    if s.spec().name == record.result.spec.name
+                    and s.spec().version == record.result.spec.version
+                ),
+                None,
+            )
+            if current_spec is None or spec_json_hash(current_spec) != spec_json_hash(
+                record.result.spec
+            ):
+                raise ValueError(
+                    "current executable strategy changed before persistence; recompute"
+                )
+        expected_hash = cfg.config_hash if cfg is not None else record.result.config_hash
+        # Historical API mode does not establish current eligibility. A hash
+        # is identity only, never a reconstructed historical config body.
+        _approved_record_evaluation(
+            session,
+            evaluation,
+            version=version,
+            spec=record.result.spec,
+            config_hash=expected_hash,
+            snapshot_id=record.dataset_snapshot_id,
+            source=record.provenance.get("source"),
+            symbols=record.result.symbols,
+        )
+    calendar = _daily_development_calendar(
+        session,
+        evaluation,
+        spec=record.result.spec,
+        snapshot_id=record.dataset_snapshot_id,
+        start=record.start,
+        until=record.until,
+        symbols=record.result.symbols,
+        source=record.provenance.get("source"),
+    )
+    _require_daily_cutoff_coverage(
+        session,
+        record.result.symbols,
+        record.provenance.get("source"),
+        record.until,
+        str(record.provenance.get("proxy_symbol", "SPY")),
+    )
+    if (
+        not isinstance(provenance.get("development_calendar"), dict)
+        or provenance["development_calendar"] != calendar
+    ):
+        raise ValueError("daily calendar boundary provenance changed; recompute before recording")
+    provenance["development_calendar"] = calendar
     version = session.get(StrategyVersion, record.strategy_version_id)
     if version is None:
         raise ValueError(f"strategy_version {record.strategy_version_id} no longer exists")

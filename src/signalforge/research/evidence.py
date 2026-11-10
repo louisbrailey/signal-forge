@@ -18,6 +18,7 @@ from signalforge.db.models import BacktestMetric, Strategy, StrategyVersion
 from signalforge.research.persistence import (
     latest_oos_metric,
     oos_provenance_failures,
+    oos_scope_failures,
     spec_json_hash,
 )
 from signalforge.research.registry import StrategySpec
@@ -32,7 +33,9 @@ def _finite(value: object) -> float | None:
     return float(value) if math.isfinite(value) else None
 
 
-def metric_evidence(metric: BacktestMetric | None, spec: StrategySpec) -> dict[str, Any]:
+def metric_evidence(
+    metric: BacktestMetric | None, spec: StrategySpec, *, scope_failures: list[str] | None = None
+) -> dict[str, Any]:
     """Display exactly the saved values without turning missing metrics into 0.
 
     Provenance is reported as unknown on legacy runs. It is deliberately not
@@ -65,6 +68,15 @@ def metric_evidence(metric: BacktestMetric | None, spec: StrategySpec) -> dict[s
     warnings = oos_provenance_failures(params)
     if warnings:
         state, label = "ambiguous_provenance", "Ambiguous OOS evidence: forced or mismatched inputs"
+    if scope_failures:
+        if not warnings:
+            state, label = (
+                "ambiguous_scope",
+                "Ambiguous OOS evidence: config or approved dataset scope differs",
+            )
+        warnings.extend(f for f in scope_failures if f not in warnings)
+    elif scope_failures is None:
+        warnings.append("Full evidence scope has not been verified against a current scan context.")
     raw_data = params.get("data_provenance")
     data = raw_data if isinstance(raw_data, dict) else {}
     sources = data.get("sources")
@@ -121,6 +133,9 @@ def metric_evidence(metric: BacktestMetric | None, spec: StrategySpec) -> dict[s
         "data": data,
         "costs": run.costs_json or {},
         "warnings": warnings,
+        "scope_state": (
+            "unverified" if scope_failures is None else "ambiguous" if scope_failures else "matched"
+        ),
     }
 
 
@@ -130,7 +145,11 @@ def evidence_inventory(session: Session) -> dict[str, Any]:
     Options/crypto families outside the equity baseline registry are listed as
     unlisted, not labelled retired or counted as failed equity strategies.
     """
+    from signalforge.research.approval_scope import approved_scopes
+    from signalforge.settings_store import effective_research_config
+
     specs = [s.spec() for s in default_strategies()]
+    current_config_hash = effective_research_config(session).config_hash
     names = {s.name for s in specs}
     active = {(s.name, s.version) for s in specs}
     rows = list(
@@ -142,7 +161,39 @@ def evidence_inventory(session: Session) -> dict[str, Any]:
     )
     current = []
     for spec in specs:
-        evidence = metric_evidence(latest_oos_metric(session, spec), spec)
+        metric = latest_oos_metric(session, spec)
+        scope = None
+        if metric is not None:
+            scope = next(
+                (
+                    s
+                    for s in approved_scopes(session, metric.run.strategy_version_id)
+                    if s.config_hash == current_config_hash
+                    and s.spec_json_hash == spec_json_hash(spec)
+                    and s.dataset_snapshot_id is not None
+                    and len(s.sources) == 1
+                ),
+                None,
+            )
+        failures = (
+            oos_scope_failures(
+                session,
+                metric,
+                spec,
+                config_hash=current_config_hash,
+                dataset_snapshot_id=scope.dataset_snapshot_id if scope else None,
+                source=next(iter(scope.sources)) if scope else "",
+                symbols=scope.universe if scope else None,
+            )
+            if metric is not None
+            else []
+        )
+        evidence = metric_evidence(metric, spec, scope_failures=failures)
+        evidence["scope_notice"] = (
+            "Bound only to the displayed current-config approved scope; "
+            "each actual scan is independently checked."
+        )
+        evidence["expected_scope_snapshot_id"] = scope.dataset_snapshot_id if scope else None
         current.append(
             {"name": spec.name, "version": spec.version, "horizon": spec.horizon.value, **evidence}
         )

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from tests.app.conftest import _csrf
+from tests.support import bind_matching_oos_scope
 
 
 @pytest.fixture
@@ -45,6 +46,7 @@ def seeded(registered_client: TestClient) -> TestClient:
             )
             s.add(run)
             s.flush()
+            bind_matching_oos_scope(s, run, strat.spec(), symbols=syms)
             s.add(
                 BacktestMetric(
                     run_id=run.id,

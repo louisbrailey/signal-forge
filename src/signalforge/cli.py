@@ -3578,6 +3578,13 @@ def record_oos_backtest_cmd(
         bool,
         typer.Option("--force", help="Record even if an identical run is already on record."),
     ] = False,
+    evaluation_id: Annotated[
+        int | None,
+        typer.Option(
+            "--evaluation-id",
+            help="Pin an approved current-config evaluation identity; never choose by returns.",
+        ),
+    ] = None,
 ) -> None:
     """Record the development-window out-of-sample backtest for one strategy
     version on one dataset snapshot.
@@ -3624,6 +3631,8 @@ def record_oos_backtest_cmd(
                 until=until_d,
                 since=since_d,
                 persist=False,
+                evaluation_id=evaluation_id,
+                require_current_scope=True,
             )
         except ValueError as exc:
             typer.secho(str(exc), fg=typer.colors.RED)
@@ -3674,7 +3683,11 @@ def record_oos_backtest_cmd(
     with session_scope(write=True) as session:
         try:
             rec = persist_development_oos_record(
-                session, rec, allow_mismatch=allow_mismatch, allow_duplicate=force
+                session,
+                rec,
+                allow_mismatch=allow_mismatch,
+                allow_duplicate=force,
+                require_current_scope=True,
             )
         except ValueError as exc:
             typer.secho(str(exc), fg=typer.colors.RED)
