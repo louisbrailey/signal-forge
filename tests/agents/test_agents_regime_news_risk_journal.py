@@ -370,3 +370,50 @@ def test_journal_review_agent_seeded(session: Session) -> None:
     assert (
         "Education only — this review does not change any rule, size, or signal." in result.summary
     )
+
+
+def test_news_report_rejects_evidence_unavailable_at_cutoff(session: Session) -> None:
+    cutoff = datetime(2024, 7, 3, 17, tzinfo=UTC)
+    before = cutoff - timedelta(hours=1)
+    after = cutoff + timedelta(minutes=1)
+    for key, published, retrieved, created in (
+        ("known", before, before, cutoff),
+        ("legacy", before, None, before),
+        ("late_retrieval", before, after, before),
+        ("late_insert", before, before, after),
+        ("future_publication", after, before, before),
+    ):
+        session.add(
+            NewsItem(
+                headline=key,
+                dedupe_key=key,
+                source="Benzinga",
+                provider="massive_benzinga_news",
+                published_at=published,
+                retrieved_at=retrieved,
+                created_at=created,
+                url=f"https://example.com/{key}",
+            )
+        )
+    session.add(
+        EntitlementCheck(
+            batch_id="future",
+            subscription="benzinga_news",
+            feed="benzinga_news",
+            endpoint="/benzinga/v2/news",
+            source="benzinga",
+            checked_at=after,
+            available=True,
+        )
+    )
+    result = NewsResearchAgent().run(session, as_of=cutoff)
+    assert result.status == "ok"
+    assert result.evidence["as_of"] == cutoff.isoformat()
+    assert result.evidence["entitlement"] is None
+    citations = {item["headline"]: item for item in result.citations}
+    assert set(citations) == {"known", "legacy"}
+    assert citations["known"]["available_at"] == cutoff.isoformat()
+    assert citations["known"]["retrieved_at"] == before.isoformat()
+    assert citations["legacy"]["availability_basis"] == "local record"
+    assert citations["legacy"]["retrieved_at"] is None
+    assert citations["known"]["record_id"] > 0

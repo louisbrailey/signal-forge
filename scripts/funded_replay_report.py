@@ -54,6 +54,8 @@ DEFAULT_STRATEGY = "trend_continuation.short_swing"
 DEFAULT_MAX_OPEN_RISK_PCT = 1.5
 DEFAULT_MAX_GROSS_PCT = 60.0
 TRADING_SESSIONS_PER_YEAR = 252
+REPLAY_WARMUP_BARS = 50
+MAX_PRIOR_VOLUME_FRACTION = 0.01
 SHARPE_POLICY = (
     "Annualised Sharpe: mean / sample stdev of session-to-session simple returns of the "
     f"modeled liquidation value (first from initial cash), x sqrt({TRADING_SESSIONS_PER_YEAR}); "
@@ -594,8 +596,11 @@ def replay(
     replay_dividends = tuple(d for s in selected for d in dividends[s])
     dividend_reference = hashlib.sha256(
         json.dumps(
-            [[d.symbol, str(d.ex_date), str(d.pay_date), str(d.amount)] for d in replay_dividends]
-            + [[d.symbol, str(d.ex_date), str(d.amount)] for d in dividends["SPY"]],
+            sorted(
+                (d.symbol, str(d.ex_date), str(d.pay_date), str(d.amount), d.source, d.currency)
+                for symbol in selected.keys() | {"SPY"}
+                for d in dividends[symbol]
+            ),
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
@@ -618,6 +623,8 @@ def replay(
             spread_bps=spread,
             initial_cash=initial_cash,
             dividends=replay_dividends,
+            warmup=REPLAY_WARMUP_BARS,
+            max_volume_participation=MAX_PRIOR_VOLUME_FRACTION,
             max_position_ceiling_pct=max_position_pct,
             max_sector_ceiling_pct=max_sector_pct,
             max_gross_ceiling_pct=max_gross_pct,
@@ -710,6 +717,26 @@ def replay(
         "initial_cash_usd": str(money(initial_cash)),
         "window": [str(start), str(end)],
         "dataset_sha256_by_symbol": hashes,
+        "replay_assumptions": {
+            "source_reference_sha256": source_reference,
+            "source": "massive",
+            "price_basis": "split-adjusted daily bars",
+            "calendar": "XNYS",
+            "first_session": str(dates[0]),
+            "last_session": str(dates[-1]),
+            "session_count": len(dates),
+            "warmup_bars": REPLAY_WARMUP_BARS,
+            "max_prior_volume_fraction": MAX_PRIOR_VOLUME_FRACTION,
+            "entry_timing": "Session close signal, earliest fill next session open",
+            "exit_priority": "Gap stop at open, then stop, target, time stop and final close",
+            "fill_model": "Whole shares, cent rounding adverse to the book, modeled costs",
+            "liquidity_model": "The model has no partial-fill queue.",
+            "benchmark_treatment": (
+                "SPY total return uses the same sessions, modeled costs and dividend basis. "
+                "The constant-exposure SPY reference is frictionless. "
+                "The separate passive basket excludes dividends."
+            ),
+        },
         "sector_snapshot": {s: sectors[s] for s in sorted(selected)},
         "cost_model": asdict(costs),
         "spread_bps": int(spread_bps) if spread_bps == int(spread_bps) else spread_bps,
@@ -776,6 +803,7 @@ def replay(
 
 def markdown(report: dict) -> str:
     cfg = report["run_config"]
+    receipt = report["replay_assumptions"]
     lines = [
         f"# Funded replay: {report['strategy']}",
         "",
@@ -790,6 +818,31 @@ def markdown(report: dict) -> str:
         f"- Symbols replayed: {cfg['symbols_replayed']}"
         + (f" (snapshot {cfg['snapshot_id']})" if cfg["snapshot_id"] is not None else ""),
         f"- Skipped (incomplete bars): {', '.join(sorted(cfg['skipped_symbols'])) or 'none'}",
+        "",
+        "## Replay assumptions",
+        "",
+        f"- Input SHA-256 `{receipt['source_reference_sha256']}` (bars and dividends)",
+        f"- {receipt['source']} {receipt['price_basis']}, {receipt['calendar']} "
+        f"{receipt['first_session']} through {receipt['last_session']} "
+        f"({receipt['session_count']} sessions)",
+        f"- Engine warmup {receipt['warmup_bars']} bars before evaluation. Individual "
+        "strategy lookbacks can delay signals further.",
+        f"- {receipt['entry_timing']}. {receipt['exit_priority']}.",
+        f"- {receipt['fill_model']}. Sizing cap {receipt['max_prior_volume_fraction']:.0%} "
+        f"of prior-session volume. {receipt['liquidity_model']}",
+        f"- {receipt['benchmark_treatment']}",
+        "",
+        "| Cost case | Spread (bps) | Slippage (bps) | Fee per share | Minimum fee | Half spread |",
+        "|---|---:|---:|---:|---:|---|",
+    ]
+    for label, scenario in report["scenario_diagnostics"].items():
+        model = scenario["cost_model"]
+        lines.append(
+            f"| {label} | {scenario['spread_bps']:g} | {model['slippage_bps']:g} "
+            f"| {model['commission_per_share']:g} | {model['commission_min_per_order']:g} "
+            f"| {'yes' if model['half_spread_fill_penalty'] else 'no'} |"
+        )
+    lines += [
         "",
         "## Scenarios",
         "",

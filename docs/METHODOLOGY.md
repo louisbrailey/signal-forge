@@ -112,3 +112,44 @@ Full detail: [`reports/EXTENDED_HISTORY_RESULTS.md`](../reports/EXTENDED_HISTORY
 bull-market phenomenon (bear/high-vol regimes are unprofitable or barely
 traded). Every strategy remains `experimental`, alert-ineligible, and
 non-promotable.
+
+## Funded replay and advisory evidence
+
+`scripts/funded_replay_report.py` generates a read-only JSON record and Markdown
+report. Give it a SQLite market-data snapshot and a pre-sealed date window.
+`--cost-scenarios` runs the same inputs at zero explicit costs, base costs and
+higher modeled costs. The receipt records the first and last exchange sessions,
+bar and dividend fingerprints, strategy versions, capital, risk limits and
+cost parameters. SPY total return uses the same sessions and modeled costs.
+The exposure-matched SPY reference is frictionless, and the separate passive
+basket excludes dividends. Even the zero-explicit-cost case retains cent
+rounding. The prior-session volume cap limits order size. Daily bars cannot
+establish queue position, partial-fill timing or observed spreads.
+
+```bash
+uv run python scripts/funded_replay_report.py /path/to/market-data.sqlite \
+  --snapshot-id 3 --since 2023-01-03 --until 2024-12-31 \
+  --strategy trend_continuation.short_swing,relative_strength.medium_swing \
+  --cost-scenarios --out reports/local-funded-replay.json
+```
+
+Use the ID of the intended equity snapshot in the supplied database. Replay is
+descriptive and uses already observed history. Risk and fill rules in this
+daily research report do not certify an intraday or paper fill path.
+
+The Portfolio Risk agent reports the largest absolute Pearson correlation
+among eligible open-position pairs. It uses the latest 60 common one-session
+close-to-close returns within 150 calendar days through the last XNYS close.
+Both endpoints must be present in both series. A missing close removes the
+interval on either side, and a pair with insufficient overlap or constant
+returns is omitted. Sample dates and counts accompany the estimate. Selecting
+the largest absolute pair is exploratory and the report gives no confidence
+interval.
+
+The News Research evidence panel links to stored source articles and shows
+publication, retrieval, local record ID and the report cutoff. An article is
+eligible only after both publication and local insertion, and after retrieval
+when that timestamp is recorded. Older rows without retrieval timestamps
+explicitly use local insertion as availability evidence. This guards against
+including late arrivals in a dated report. It does not reconstruct content
+revisions that were never stored. News and the risk agent remain advisory.

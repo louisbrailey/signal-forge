@@ -144,6 +144,10 @@ class ResearchAgent(ABC):
         except Exception:  # pragma: no cover - defensive: never block a report
             return static
 
+    def _collect_as_of(self, session: Session, as_of: datetime) -> dict[str, Any]:
+        """Let time-aware collectors use the same cutoff as the stored report."""
+        return self.collect(session)
+
     # ---- run ------------------------------------------------------------
     def run(self, session: Session, *, as_of: datetime | None = None) -> AgentReportResult:
         started = time.monotonic()
@@ -155,7 +159,7 @@ class ResearchAgent(ABC):
         session.commit()
         set_write_intent(session, False)
         try:
-            evidence = json.loads(json.dumps(self.collect(session), default=str))
+            evidence = json.loads(json.dumps(self._collect_as_of(session, as_of), default=str))
             summary = self.summarize(evidence)
             if RESEARCH_ONLY_NOTICE not in summary:
                 summary = f"{summary}\n\n{RESEARCH_ONLY_NOTICE}"

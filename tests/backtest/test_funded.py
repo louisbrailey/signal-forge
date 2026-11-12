@@ -140,3 +140,43 @@ def test_empty_signals_leave_cash_and_reproducible():
     assert first == run_funded_replay(*args, limits=RiskLimits(), warmup=0)
     assert not first.fills
     assert all(m["net_liquidation_usd"] == "10000.00" for m in first.marks)
+
+
+@pytest.mark.parametrize(
+    "costs,spread,buy_price,mark_price,exit_price,fee",
+    [
+        (CostModel(slippage_bps=0), 0, "100.00", "100.00", "85.00", "0.00"),
+        (CostModel(slippage_bps=3), 5, "100.06", "99.94", "84.95", "0.00"),
+        (
+            CostModel(commission_min_per_order=1, slippage_bps=10),
+            10,
+            "100.15",
+            "99.85",
+            "84.87",
+            "1.00",
+        ),
+    ],
+)
+def test_volume_capped_entry_and_gap_stop_reconcile_cash(
+    costs, spread, buy_price, mark_price, exit_price, fee
+):
+    series = bars()
+    series.volume[0] = 250  # 1% of known volume caps the order at two shares.
+    series.volume[1] = 1  # Fill-session volume is unavailable at the open.
+    series.open[2], series.low[2], series.close[2] = 85, 80, 90
+    result = run({"A": series}, cost_model=costs, spread_bps=spread)
+    buy, sell = result.fills
+
+    assert (buy["signal_day"], buy["day"]) == tuple(map(str, series.dates[:2]))
+    assert sell["day"] == str(series.dates[2]) and sell["reason"] == "gap_stop"
+    assert buy["shares"] == sell["shares"] == 2
+    assert buy["price"] == buy_price and sell["price"] == exit_price
+    assert buy["commission"] == sell["commission"] == fee
+    cash_after_buy = Decimal("10000") - 2 * Decimal(buy_price) - Decimal(fee)
+    exit_equity = cash_after_buy + 2 * Decimal(exit_price) - Decimal(fee)
+    assert Decimal(result.marks[1]["cash_usd"]) == cash_after_buy
+    assert Decimal(result.marks[1]["net_liquidation_usd"]) == (
+        cash_after_buy + 2 * Decimal(mark_price) - Decimal(fee)
+    )
+    assert Decimal(result.marks[-1]["net_liquidation_usd"]) == exit_equity
+    assert result.costs == Decimal("10000") - 2 * Decimal("15") - exit_equity

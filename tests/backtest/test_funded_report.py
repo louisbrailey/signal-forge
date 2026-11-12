@@ -59,6 +59,15 @@ def test_scenarios_use_same_snapshot_without_database_writes(tmp_path):
         "zero_fees_spread_slippage",
         "higher_cost_stress",
     }
+    assumptions = r["replay_assumptions"]
+    assert assumptions["calendar"] == "XNYS"
+    assert assumptions["session_count"] == len(sessions(start, end))
+    assert assumptions["first_session"] == str(start)
+    assert assumptions["last_session"] == str(end)
+    assert assumptions["max_prior_volume_fraction"] == 0.01
+    md = module.markdown(r)
+    assert assumptions["source_reference_sha256"] in md
+    assert "| higher_cost_stress | 10 | 10 | 0.005 | 1 | yes |" in md
     for scenario in r["scenario_diagnostics"].values():
         targets = scenario["diagnostics"]["income_targets"]
         assert targets["full_period_net_pnl_usd"] == "0.00"
