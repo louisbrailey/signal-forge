@@ -10,7 +10,9 @@ never trades, and never changes a limit; it only explains the numbers.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
+from itertools import combinations, pairwise
+from math import isfinite
 from typing import Any
 
 import numpy as np
@@ -19,10 +21,10 @@ from sqlalchemy.orm import Session
 
 from signalforge.agents.base import ResearchAgent
 from signalforge.config import get_settings
+from signalforge.data.calendar import last_closed_session, sessions
 from signalforge.data.series import PriceSeries
 from signalforge.db.models import Instrument
 from signalforge.paper.portfolio import portfolio_snapshot
-from signalforge.research.features.daily import daily_returns
 from signalforge.risk.portfolio import Holding, exposure_report
 from signalforge.settings_store import effective_research_config
 
@@ -30,32 +32,62 @@ _CORRELATION_LOOKBACK_SESSIONS = 60
 _CORRELATION_CALENDAR_DAYS = 150  # comfortably covers 60 trading sessions
 
 
-def _max_abs_correlation(
-    session: Session, symbols: list[str], source: str
-) -> dict[str, Any] | None:
-    """Max |corr| pair among ``symbols``' last 60-session daily returns.
-    ``None`` when fewer than two symbols have a full 60-session history."""
-    end = date.today()
-    start = end - timedelta(days=_CORRELATION_CALENDAR_DAYS)
-    returns_by_symbol: dict[str, np.ndarray] = {}
-    for sym in symbols:
-        series = PriceSeries.load(session, sym, start, end, source=source)
-        if len(series) == 0:
+def _session_returns(
+    series: PriceSeries, calendar: tuple[date, ...]
+) -> dict[tuple[date, date], float]:
+    """Return only intervals with both adjacent exchange-session closes."""
+    closes = dict(zip(series.dates, map(float, series.close), strict=True))
+    if len(closes) != len(series):
+        return {}
+    returns = {}
+    for previous, current in pairwise(calendar):
+        before = closes.get(previous)
+        after = closes.get(current)
+        if before is None or after is None:
             continue
-        rets = daily_returns(series, len(series) - 1, _CORRELATION_LOOKBACK_SESSIONS)
-        if rets.size == _CORRELATION_LOOKBACK_SESSIONS:
-            returns_by_symbol[sym] = rets
+        if not all(isfinite(price) and price > 0 for price in (before, after)):
+            continue
+        value = after / before - 1
+        if isfinite(value):
+            returns[previous, current] = value
+    return returns
 
-    ordered = sorted(returns_by_symbol)
+
+def _max_abs_correlation(
+    session: Session, symbols: list[str], source: str, *, end: date
+) -> dict[str, Any] | None:
+    """Rank pairs using their latest 60 common one-session returns."""
+    start = end - timedelta(days=_CORRELATION_CALENDAR_DAYS)
+    calendar = sessions(start, end)
+    returns_by_symbol = {
+        symbol: _session_returns(
+            PriceSeries.load(session, symbol, start, end, source=source), calendar
+        )
+        for symbol in sorted(set(symbols))
+    }
     best: dict[str, Any] | None = None
     best_abs = -1.0
-    for i in range(len(ordered)):
-        for j in range(i + 1, len(ordered)):
-            a, b = ordered[i], ordered[j]
-            corr = float(np.corrcoef(returns_by_symbol[a], returns_by_symbol[b])[0, 1])
-            if corr == corr and abs(corr) > best_abs:  # not NaN
-                best_abs = abs(corr)
-                best = {"symbols": [a, b], "corr": round(corr, 4)}
+    for a, b in combinations(returns_by_symbol, 2):
+        left, right = returns_by_symbol[a], returns_by_symbol[b]
+        common = sorted(left.keys() & right.keys())
+        if len(common) < _CORRELATION_LOOKBACK_SESSIONS:
+            continue
+        sample = common[-_CORRELATION_LOOKBACK_SESSIONS:]
+        x = [left[interval] for interval in sample]
+        y = [right[interval] for interval in sample]
+        if min(x) == max(x) or min(y) == max(y):
+            continue
+        corr = float(np.corrcoef(x, y)[0, 1])
+        if isfinite(corr) and abs(corr) > best_abs:
+            best_abs = abs(corr)
+            best = {
+                "symbols": [a, b],
+                "corr": round(corr, 4),
+                "sample_count": len(sample),
+                "common_return_count": len(common),
+                "first_close_session": sample[0][0].isoformat(),
+                "last_close_session": sample[-1][1].isoformat(),
+            }
     return best
 
 
@@ -107,13 +139,14 @@ class PortfolioRiskAgent(ResearchAgent):
             missing.append("no open paper positions; exposure/concentration not meaningful")
 
         max_pair: dict[str, Any] | None = None
+        correlation_cutoff = last_closed_session(datetime.now(UTC))
         if len(open_positions) >= 2:
             symbols = [pos["symbol"] for pos in open_positions]
-            max_pair = _max_abs_correlation(session, symbols, provider)
+            max_pair = _max_abs_correlation(session, symbols, provider, end=correlation_cutoff)
             if max_pair is None:
                 missing.append(
-                    f"insufficient {_CORRELATION_LOOKBACK_SESSIONS}-session price history "
-                    "to compute pairwise correlation"
+                    f"pairwise correlation requires {_CORRELATION_LOOKBACK_SESSIONS} common "
+                    "one-session returns with variation"
                 )
         else:
             missing.append("fewer than 2 open positions; pairwise correlation not computed")
@@ -157,6 +190,7 @@ class PortfolioRiskAgent(ResearchAgent):
             "correlation": {
                 "source": provider,
                 "lookback_sessions": _CORRELATION_LOOKBACK_SESSIONS,
+                "through_session": correlation_cutoff.isoformat(),
                 "max_abs_pair": max_pair,
             },
             "drawdown": drawdown,
@@ -203,7 +237,8 @@ class PortfolioRiskAgent(ResearchAgent):
             lines.append(
                 f"Highest pairwise {corr['lookback_sessions']}-session return correlation "
                 f"among open positions: {pair['symbols'][0]}/{pair['symbols'][1]} at "
-                f"{pair['corr']:.4f}."
+                f"{pair['corr']:.4f}, using {pair['sample_count']} aligned returns "
+                f"through {pair['last_close_session']}."
             )
         else:
             lines.append("Pairwise return correlation among open positions is unavailable.")

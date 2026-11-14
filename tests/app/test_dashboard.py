@@ -433,3 +433,36 @@ def test_paper_probation_shows_each_versions_own_health_and_no_placeholder_z(
     assert "closed mechanically accepted paper trade(s) &lt; 20 required" in r.text
     assert '<dd class="font-mono">—</dd>' in r.text
     assert '<dd class="font-mono">0.0</dd>' not in r.text
+
+
+def test_agent_news_source_evidence_displays_cutoff_and_local_record(registered_client):
+    from datetime import UTC, datetime, timedelta
+
+    from signalforge.agents.news_research import NewsResearchAgent
+    from signalforge.db.models import NewsItem
+    from signalforge.db.session import session_scope
+
+    cutoff = datetime(2024, 7, 3, 17, tzinfo=UTC)
+    earlier = cutoff - timedelta(minutes=15)
+    with session_scope() as session:
+        session.add(
+            NewsItem(
+                headline="Evidence headline",
+                dedupe_key="evidence-headline",
+                source="Benzinga",
+                provider="massive_benzinga_news",
+                published_at=earlier,
+                retrieved_at=earlier,
+                created_at=cutoff,
+                url="https://example.com/evidence",
+            )
+        )
+        NewsResearchAgent().run(session, as_of=cutoff)
+
+    response = registered_client.get("/agents")
+    assert response.status_code == 200
+    assert "Source evidence (1)" in response.text
+    assert "Evidence cutoff" in response.text and cutoff.isoformat() in response.text
+    assert "Local record" in response.text and "massive_benzinga_news" in response.text
+    assert "Retrieved" in response.text and earlier.isoformat() in response.text
+    assert 'href="https://example.com/evidence"' in response.text
