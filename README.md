@@ -1,3 +1,5 @@
+![Signal Forge — transparent research and measured decisions](docs/assets/signal-forge-banner.svg)
+
 # Signal Forge
 
 Human-confirmed production broker commands are documented in
@@ -15,6 +17,22 @@ predictive value.
 
 > **This is research, simulation, alerting, and education software. It is not
 > financial advice, and execution is disabled by default. Sandbox strategy orders require arming; production operations require separate explicit per-action confirmation (ADR 0006).** See [DISCLAIMER.md](DISCLAIMER.md).
+
+## Explore the project
+
+[Architecture](ARCHITECTURE.md) · [Operating guide](docs/PAPER_OPERATIONS.md) · [Methodology](docs/METHODOLOGY.md) · [Next steps](docs/NEXT_STEPS_2026-11-02.md)
+
+```mermaid
+flowchart LR
+    A[Licensed market data] --> B[Timestamped observations]
+    B --> C[Deterministic strategies]
+    C --> D[Quality and risk gates]
+    D --> E[Paper simulation]
+    E --> F[Journal and evaluation]
+    B --> G[Isolated Kronos research]
+```
+
+The diagram describes the research loop. Broker access, where configured, has its own explicit authorization and execution controls. Research results do not establish future profitability.
 
 ## What it will not do
 
