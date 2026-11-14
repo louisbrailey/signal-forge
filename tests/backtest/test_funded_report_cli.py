@@ -527,3 +527,22 @@ def test_rejection_episodes_count_runs_of_consecutive_sessions():
     assert module.rejection_episodes(result) == {
         "cap": {"candidate_days": 6, "symbols": 2, "episodes": 3}
     }
+
+
+def test_input_receipt_covers_benchmark_dividend_payment_date(tmp_path):
+    path = synthetic_db(
+        tmp_path / "s.sqlite",
+        snapshot=["SPY", "AAA"],
+        dividends=[("SPY", "2024-01-03", 1, "2024-01-08")],
+    )
+    first = module.replay(path, ["AAA"], START, END)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE dividend_event SET pay_date = '2024-01-09' WHERE symbol = 'SPY'")
+    second = module.replay(path, ["AAA"], START, END)
+
+    assert first["dataset_sha256_by_symbol"] == second["dataset_sha256_by_symbol"]
+    assert first["result"] == second["result"]
+    assert (
+        first["replay_assumptions"]["source_reference_sha256"]
+        != second["replay_assumptions"]["source_reference_sha256"]
+    )

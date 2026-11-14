@@ -14,7 +14,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from signalforge.agents.base import ResearchAgent
@@ -27,15 +27,20 @@ _CONTEXT_ONLY_SENTENCE = "News is context only and cannot affect any trade decis
 
 
 def _item_dict(n: NewsItem) -> dict[str, Any]:
+    available_at = max(n.published_at, n.created_at, n.retrieved_at or n.created_at)
     return {
         "headline": n.headline,
         "publisher": n.source,
         "url": n.url,
         "published_at": n.published_at.isoformat(),
+        "retrieved_at": n.retrieved_at.isoformat() if n.retrieved_at else None,
+        "available_at": available_at.isoformat(),
+        "availability_basis": "local record and retrieval" if n.retrieved_at else "local record",
+        "record_id": n.id,
         "tickers": list(n.instrument_symbols or []),
         "provider": n.provider or "unknown",
         "source": n.provider or "unknown",
-        "as_of": n.published_at.isoformat(),
+        "as_of": available_at.isoformat(),
     }
 
 
@@ -58,15 +63,24 @@ class NewsResearchAgent(ResearchAgent):
     llm_narrative = True
 
     def collect(self, session: Session) -> dict[str, Any]:
+        return self._collect_as_of(session, datetime.now(UTC))
+
+    def _collect_as_of(self, session: Session, as_of: datetime) -> dict[str, Any]:
+        if as_of.tzinfo is None:
+            raise ValueError("News evidence cutoff must be timezone-aware")
         missing: list[str] = []
-        now = datetime.now(UTC)
+        now = as_of.astimezone(UTC)
         start = now - timedelta(hours=_WINDOW_HOURS)
 
         rows = list(
             session.scalars(
                 select(NewsItem)
-                .where(NewsItem.published_at >= start, NewsItem.published_at <= now)
-                .order_by(NewsItem.published_at.desc())
+                .where(
+                    NewsItem.published_at.between(start, now),
+                    NewsItem.created_at <= now,
+                    or_(NewsItem.retrieved_at.is_(None), NewsItem.retrieved_at <= now),
+                )
+                .order_by(NewsItem.published_at.desc(), NewsItem.id.desc())
             )
         )
         benzinga_items = [_item_dict(n) for n in rows if n.provider == _BENZINGA_PROVIDER]
@@ -77,7 +91,7 @@ class NewsResearchAgent(ResearchAgent):
 
         entitlement_row = session.scalar(
             select(EntitlementCheck)
-            .where(EntitlementCheck.feed == _BENZINGA_FEED)
+            .where(EntitlementCheck.feed == _BENZINGA_FEED, EntitlementCheck.checked_at <= now)
             .order_by(EntitlementCheck.checked_at.desc())
             .limit(1)
         )
@@ -144,6 +158,11 @@ class NewsResearchAgent(ResearchAgent):
                 "publisher": i["publisher"],
                 "url": i["url"],
                 "published_at": i["published_at"],
+                "retrieved_at": i["retrieved_at"],
+                "available_at": i["available_at"],
+                "availability_basis": i["availability_basis"],
+                "record_id": i["record_id"],
+                "provider": i["provider"],
             }
             for i in items
         ]
