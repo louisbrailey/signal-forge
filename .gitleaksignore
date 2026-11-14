@@ -21,6 +21,8 @@ b4a6fe0c5cec6c3b32d18696cb080217de6038cc:tests/research/test_crypto_venues.py:ge
 # Audited non-secret: registered strategy identifier in the conservative replay test.
 6b670e33002e274ea933ad42cda0a31c7ffe1379:tests/research/test_conservative_crypto_cost_study.py:generic-api-key:268
 442242d1d9a7d4c1ba845f20aa00afc606800ca5:tests/research/test_conservative_crypto_cost_study.py:generic-api-key:268
+# Reviewed: detect-secrets baseline entries (SHA-1 digests of Kronos model-file checksums in scripts/r3/kronos_ic_infer.py), not credentials.
+# Exact historical fingerprints only; no rule/path/value-wide exclusion.
 # Reviewed: detect-secrets SHA-1 fingerprints of Kronos model-file SHA-256 checksums.
 5987c065d8e0dbf52b10002eb3beab36d2b70256:.secrets.baseline:generic-api-key:146
 5987c065d8e0dbf52b10002eb3beab36d2b70256:.secrets.baseline:generic-api-key:153
